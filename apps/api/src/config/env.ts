@@ -9,8 +9,9 @@ config({
 
 const EnvSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
-  // Dokku injects PORT; API_PORT remains for local runs.
-  PORT: z.coerce.number().int().positive().optional(),
+  // Dokku injects PORT; API_PORT remains for local runs. Dokku sets PORT=0 for
+  // non-web Procfile processes (worker/bot), which must boot without listening.
+  PORT: z.coerce.number().int().min(0).optional(),
   API_PORT: z.coerce.number().int().positive().optional(),
   DATABASE_URL: z.string().min(1),
   REDIS_URL: z.string().min(1).optional(),
@@ -51,7 +52,7 @@ if (!parsed.success) {
 
 export const env = {
   ...parsed.data,
-  port: parsed.data.API_PORT ?? parsed.data.PORT ?? 4000,
+  port: parsed.data.API_PORT ?? (parsed.data.PORT ? parsed.data.PORT : undefined) ?? 4000,
   isProd: parsed.data.NODE_ENV === 'production',
   corsOrigins: parsed.data.CORS_ORIGINS.split(',')
     .map((origin) => origin.trim())
