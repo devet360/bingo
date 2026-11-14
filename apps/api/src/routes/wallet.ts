@@ -7,12 +7,18 @@ import { Errors } from '../lib/errors';
 import { prisma } from '../lib/prisma';
 import { serializeDeposit, serializeWallet, serializeWithdrawal } from '../lib/serializers';
 import { authenticate, requireVerifiedPhone } from '../middleware/auth';
-import { moneyLimiter } from '../middleware/rateLimit';
+import { moneyLimiter, receiptLimiter } from '../middleware/rateLimit';
 import { findAgentByCode } from '../services/agents';
 import {
   createDeposit,
   listPlayerDeposits,
 } from '../services/deposits';
+import {
+  queueDepositVerification,
+  serializePlayerDeposit,
+  verifyDepositReceipt,
+} from '../services/receipts/deposits';
+import { listEnabledProviders, serializeProvider } from '../services/providers';
 import {
   cancelWithdrawal,
   createWithdrawal,
@@ -29,6 +35,10 @@ const CreateDepositSchema = z
     agentProfileId: z.string().uuid().optional(),
     agentCode: z.string().max(16).optional(),
     paymentAccountId: z.string().uuid().optional(),
+    providerCode: z.string().trim().min(1).max(32).optional(),
+    receiptReference: z.string().trim().max(512).optional(),
+    receiptAccount: z.string().trim().max(64).optional(),
+    receiptPhone: z.string().trim().max(32).optional(),
     externalRef: z.string().max(128).optional(),
     receiptUrl: z.string().url().max(2048).optional(),
     playerNote: z.string().max(500).optional(),
@@ -38,10 +48,38 @@ const CreateDepositSchema = z
     path: ['agentCode'],
   });
 
+/**
+ * "I have paid": the reference typed from the receipt, an optional proof
+ * screenshot, and — for client-side rails — the bank's own response captured
+ * by the player's device.
+ */
+const VerifyReceiptSchema = z
+  .object({
+    contentType: z.string().max(128).optional(),
+    bodyBase64: z.string().min(1).max(7_200_000).optional(),
+    receiptReference: z.string().trim().max(512).optional(),
+    receiptAccount: z.string().trim().max(64).optional(),
+    receiptPhone: z.string().trim().max(32).optional(),
+    proofBase64: z.string().min(1).max(6_000_000).optional(),
+    proofContentType: z.enum(['image/png', 'image/jpeg', 'image/webp']).optional(),
+  })
+  .refine(
+    (value) => Boolean(value.bodyBase64 || value.receiptReference || value.proofBase64),
+    { message: 'Provide a receipt reference, a proof image or the bank response' },
+  )
+  .refine((value) => !value.proofBase64 || Boolean(value.proofContentType), {
+    message: 'proofContentType is required with proofBase64',
+    path: ['proofContentType'],
+  });
+
+const DepositCodeParams = z.object({ code: z.string().regex(/^\d{6}$/, 'Expected a 6-digit code') });
+
+const ProviderQuery = z.object({ method: z.nativeEnum(PaymentMethod).optional() });
+
 const CreateWithdrawalSchema = z.object({
   amount: minorAmount,
   method: z.nativeEnum(PaymentMethod),
-  agentProfileId: z.string().uuid(),
+  agentProfileId: z.string().uuid().optional(),
   paymentAccountId: z.string().uuid().optional(),
   playerNote: z.string().max(500).optional(),
 });
@@ -102,6 +140,15 @@ walletRouter.get(
   }),
 );
 
+walletRouter.get(
+  '/deposit-providers',
+  asyncHandler(async (req, res) => {
+    const query = parse(ProviderQuery, req.query);
+    const providers = await listEnabledProviders(query.method);
+    res.json({ data: providers.map(serializeProvider) });
+  }),
+);
+
 walletRouter.post(
   '/deposits',
   moneyLimiter,
@@ -116,19 +163,74 @@ walletRouter.post(
       agentProfileId = agent.id;
     }
 
-    const { deposit, replayed } = await createDeposit({
+    const { deposit, replayed, provider } = await createDeposit({
       playerId: req.auth!.userId,
       agentProfileId,
       paymentAccountId: body.paymentAccountId,
       method: body.method,
       amount: BigInt(body.amount),
+      providerCode: body.providerCode,
+      receiptReference: body.receiptReference,
+      receiptAccount: body.receiptAccount,
+      receiptPhone: body.receiptPhone,
       externalRef: body.externalRef,
       receiptUrl: body.receiptUrl,
       playerNote: body.playerNote,
       idempotencyKey,
     });
 
-    res.status(replayed ? 200 : 201).json({ data: serializeDeposit(deposit), replayed });
+    // Only a legacy caller that already supplied the reference can be checked
+    // now. Normally the receipt arrives later with "I have paid".
+    if (!replayed && provider?.supported && !provider.clientSide && deposit.receiptReference) {
+      queueDepositVerification(deposit.id);
+    }
+
+    res
+      .status(replayed ? 200 : 201)
+      .json({ data: await serializePlayerDeposit({ ...deposit, provider }), replayed });
+  }),
+);
+
+walletRouter.post(
+  '/deposits/:code/verify-receipt',
+  receiptLimiter,
+  asyncHandler(async (req, res) => {
+    const params = parse(DepositCodeParams, req.params);
+    const payload = parse(VerifyReceiptSchema, req.body ?? {});
+
+    const deposit = await prisma.depositRequest.findFirst({
+      where: { code: params.code, playerId: req.auth!.userId },
+      select: { id: true },
+    });
+    if (!deposit) throw Errors.notFound('Deposit request');
+
+    const result = await verifyDepositReceipt({
+      depositId: deposit.id,
+      payload: payload.bodyBase64
+        ? { contentType: payload.contentType, bodyBase64: payload.bodyBase64 }
+        : undefined,
+      receipt: {
+        reference: payload.receiptReference,
+        accountNumber: payload.receiptAccount,
+        phoneNumber: payload.receiptPhone,
+      },
+      proof: payload.proofBase64
+        ? { contentType: payload.proofContentType!, base64: payload.proofBase64 }
+        : undefined,
+    });
+    const full = await prisma.depositRequest.findUnique({
+      where: { id: deposit.id },
+      include: { provider: true },
+    });
+    res.json({
+      data: await serializePlayerDeposit(full!),
+      verification: {
+        status: result.outcome.status,
+        message: result.outcome.message,
+      },
+      autoCredited: result.autoCredited,
+      needsClientFetch: result.needsClientFetch,
+    });
   }),
 );
 
@@ -146,9 +248,10 @@ walletRouter.get(
   asyncHandler(async (req, res) => {
     const deposit = await prisma.depositRequest.findFirst({
       where: { id: req.params.id, playerId: req.auth!.userId },
+      include: { provider: true },
     });
     if (!deposit) throw Errors.notFound('Deposit');
-    res.json({ data: serializeDeposit(deposit) });
+    res.json({ data: await serializePlayerDeposit(deposit) });
   }),
 );
 

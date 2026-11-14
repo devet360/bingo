@@ -36,6 +36,9 @@ export function createApp() {
       credentials: true,
     }),
   );
+  // Client-side receipt verification posts the bank's own response (PDFs from
+  // M-Pesa) as base64, so this subtree needs more room than the rest of the API.
+  app.use('/wallet/deposits', express.json({ limit: '8mb' }));
   app.use(express.json({ limit: '1mb' }));
   app.use(
     pinoHttp({

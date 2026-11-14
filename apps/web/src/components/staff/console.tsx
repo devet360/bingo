@@ -5,11 +5,13 @@ import { useSession } from '@/components/session';
 import { EmptyState, Panel, Tabs } from '@/components/ui';
 import { useI18n } from '@/lib/i18n';
 import { AuditTab, OverviewTab, StaffTab } from './admin';
+import { ProvidersTab } from './providers';
 import { AgentsTab, DepositsTab, TransactionsTab, WithdrawalsTab } from './queues';
+import { ReceiptsTab } from './receipts';
 import { UsersTab } from './users';
 
-type SupportTab = 'users' | 'transactions' | 'deposits' | 'withdrawals' | 'agents';
-type AdminTab = 'overview' | SupportTab | 'staff' | 'audit';
+type SupportTab = 'users' | 'transactions' | 'deposits' | 'withdrawals' | 'agents' | 'receipts';
+type AdminTab = 'overview' | SupportTab | 'staff' | 'audit' | 'providers';
 
 export function StaffConsole({ mode }: { mode: 'support' | 'admin' }) {
   const { user } = useSession();
@@ -51,6 +53,7 @@ export function StaffConsole({ mode }: { mode: 'support' | 'admin' }) {
             { value: 'deposits', label: t('staff.tab.deposits') },
             { value: 'withdrawals', label: t('staff.tab.withdrawals') },
             { value: 'agents', label: t('staff.tab.agents') },
+            { value: 'receipts', label: t('staff.tab.receipts') },
           ]}
         />
 
@@ -59,6 +62,7 @@ export function StaffConsole({ mode }: { mode: 'support' | 'admin' }) {
         {supportTab === 'deposits' ? <DepositsTab /> : null}
         {supportTab === 'withdrawals' ? <WithdrawalsTab /> : null}
         {supportTab === 'agents' ? <AgentsTab canManage={false} /> : null}
+        {supportTab === 'receipts' ? <ReceiptsTab /> : null}
       </div>
     );
   }
@@ -92,6 +96,8 @@ export function StaffConsole({ mode }: { mode: 'support' | 'admin' }) {
             { value: 'deposits', label: t('staff.tab.deposits') },
             { value: 'withdrawals', label: t('staff.tab.withdrawals') },
             { value: 'agents', label: t('staff.tab.agents') },
+            { value: 'receipts', label: t('staff.tab.receipts') },
+            { value: 'providers', label: t('staff.tab.providers') },
             { value: 'staff', label: t('staff.tab.staff') },
             { value: 'audit', label: t('staff.tab.audit') },
           ]}
@@ -104,6 +110,8 @@ export function StaffConsole({ mode }: { mode: 'support' | 'admin' }) {
       {adminTab === 'deposits' ? <DepositsTab /> : null}
       {adminTab === 'withdrawals' ? <WithdrawalsTab /> : null}
       {adminTab === 'agents' ? <AgentsTab canManage /> : null}
+      {adminTab === 'receipts' ? <ReceiptsTab /> : null}
+      {adminTab === 'providers' ? <ProvidersTab /> : null}
       {adminTab === 'staff' ? <StaffTab /> : null}
       {adminTab === 'audit' ? <AuditTab /> : null}
     </div>

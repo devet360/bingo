@@ -105,6 +105,25 @@ enum DepositStatus {
   DISPUTED
 }
 
+// How far a deposit's receipt has been checked. NOT_REQUIRED covers methods
+// with no receipt (cash), MANUAL means a human must decide.
+enum VerificationStatus {
+  NOT_REQUIRED
+  PENDING
+  VERIFIED
+  FAILED
+  MANUAL
+}
+
+// Where the receipt body came from. Server is cheki's normal path; Client is
+// a Telebirr/M-Pesa page fetched by the payer's own device (those hosts are
+// unreachable from outside Ethiopia); Relay is an operator-run fetcher.
+enum VerificationSource {
+  SERVER
+  CLIENT
+  RELAY
+}
+
 enum WithdrawalStatus {
   ESCROWED // player funds locked, payout code issued
   SETTLED // agent redeemed payout code, escrow moved to agent float
@@ -246,6 +265,11 @@ model User {
   kycReviewedAt    DateTime?
   referralCode     String     @unique
   referredById     String?    @db.Uuid
+  // One-time token the staff dashboard puts in a t.me/<bot>?start=staff_<token>
+  // link, so a staff member can attach their own Telegram account without the
+  // super admin knowing their numeric id.
+  telegramLinkToken     String?   @unique
+  telegramLinkExpiresAt DateTime?
   lastLoginAt      DateTime?
   createdAt        DateTime   @default(now())
   updatedAt        DateTime   @updatedAt
@@ -330,6 +354,12 @@ model AgentProfile {
   perTxnLimit             BigInt?
   dailyDepositLimit       BigInt?
   dailyWithdrawalLimit    BigInt?
+  // Semi-automated deposits: when enabled, a deposit assigned to this agent
+  // whose receipt verifies and whose amount is <= autoDepositThreshold is
+  // credited without the agent pressing Credit. Anything above, or anything
+  // that fails to verify, stays in the manual queue.
+  autoDepositEnabled      Boolean     @default(false)
+  autoDepositThreshold    BigInt?
   // Denormalised caches of the AGENT ledger accounts. Rebuildable from the journal.
   floatAvailable          BigInt      @default(0)
   floatEscrow             BigInt      @default(0) // float locked by pending cash-out
@@ -532,6 +562,46 @@ model Wallet {
 
 // ═══════════════════════ AGENT-ASSISTED MONEY MOVEMENT ════════════════════════
 
+// Admin-configured deposit rails. `code` selects the parser implementation in
+// services/receipts/parsers; the endpoint template and limits are editable so a
+// bank changing host or a new minimum does not need a deploy. A provider with
+// no parser (or supported = false) can still be offered for manual deposits.
+model DepositProvider {
+  code              String        @id // "telebirr", "cbe", "boa", ...
+  name              String
+  method            PaymentMethod
+  // Parser implementation in services/receipts/parsers (null = manual only).
+  parser            String?
+  // URL template with {ref}, {account} and {phone}. Null = manual only.
+  endpoint          String?
+  // Regex source a reference must match (anchored, no flags).
+  refPattern        String?
+  refHint           String?
+  accountDigits     Int? // last N digits of the receiving account, when required
+  requiresPhone     Boolean       @default(false)
+  // The reference is a lookup token, not printed on the receipt (Awash, Bunna,
+  // ZamZam, eBirr, CBE receipt ids): skip the reference-equality gate.
+  opaqueReference   Boolean       @default(false)
+  // Telebirr and M-Pesa receipt hosts reject connections from outside
+  // Ethiopia: the payer's device may fetch the page and submit it back.
+  clientSide        Boolean       @default(false)
+  // Whether cheki has a parser for `code`. Admin may enable/disable a
+  // supported provider but cannot make an unsupported one auto-verify.
+  supported         Boolean       @default(false)
+  enabled           Boolean       @default(false)
+  sortOrder         Int           @default(0)
+  instructions      String?
+  minAmount         BigInt?
+  maxAmount         BigInt?
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+
+  deposits      DepositRequest[]
+  verifications ReceiptVerification[]
+
+  @@index([enabled, method, sortOrder])
+}
+
 model DepositRequest {
   id               String        @id @default(uuid()) @db.Uuid
   // 6-digit code the player shows the agent. Unique only among open requests
@@ -547,6 +617,19 @@ model DepositRequest {
   status           DepositStatus @default(PENDING)
   receiptUrl       String?
   externalRef      String? // MoMo/bank reference typed by the player
+  // Provider + receipt reference when the deposit is to be verified
+  // automatically against the bank's receipt page.
+  providerCode     String?
+  receiptReference String?
+  // Extra inputs some banks need to look the receipt up (BOA: last 5 digits of
+  // an account; CBE Birr: the payer phone). Kept only until verification.
+  receiptAccount   String?
+  receiptPhone     String?
+  verificationStatus  VerificationStatus @default(NOT_REQUIRED)
+  verificationMessage String?
+  verificationSource  VerificationSource?
+  autoVerified     Boolean       @default(false)
+  verifiedAt       DateTime?
   playerNote       String?
   agentNote        String?
   processedById    String?       @db.Uuid
@@ -560,6 +643,8 @@ model DepositRequest {
   agentProfile   AgentProfile?        @relation(fields: [agentProfileId], references: [id], onDelete: SetNull)
   paymentAccount AgentPaymentAccount? @relation(fields: [paymentAccountId], references: [id], onDelete: SetNull)
   processedBy    User?                @relation("DepositProcessor", fields: [processedById], references: [id], onDelete: SetNull)
+  provider       DepositProvider?     @relation(fields: [providerCode], references: [code], onDelete: SetNull)
+  verification   ReceiptVerification?
   commission     AgentCommission?
   rating         AgentRating?
 
@@ -567,6 +652,40 @@ model DepositRequest {
   @@index([playerId, status])
   @@index([status, expiresAt])
   @@index([code])
+  @@index([providerCode, receiptReference])
+}
+
+// One row per (provider, receipt reference) ever seen. The unique key is the
+// anti-replay guard: the same bank receipt can only move money once, and the
+// row keeps the parse result for audit and disputes. Values are snapshots; the
+// deposit's own columns win once an agent edits it.
+model ReceiptVerification {
+  id               String             @id @default(uuid()) @db.Uuid
+  providerCode     String
+  reference        String
+  depositId        String?            @unique @db.Uuid
+  status           VerificationStatus @default(PENDING)
+  source           VerificationSource?
+  amount           BigInt?
+  currency         String?
+  senderName       String?
+  senderAccount    String?
+  receiverName     String?
+  receiverAccount  String?
+  transactionDate  String?
+  transactionStatus String?
+  message          String?
+  detail           Json?
+  attempts         Int                @default(0)
+  verifiedAt       DateTime?
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime           @updatedAt
+
+  provider DepositProvider @relation(fields: [providerCode], references: [code], onDelete: Restrict)
+  deposit  DepositRequest? @relation(fields: [depositId], references: [id], onDelete: SetNull)
+
+  @@unique([providerCode, reference])
+  @@index([status, createdAt])
 }
 
 model WithdrawalRequest {
@@ -576,7 +695,7 @@ model WithdrawalRequest {
   payoutCode       String
   idempotencyKey   String           @unique
   playerId         String           @db.Uuid
-  agentProfileId   String           @db.Uuid
+  agentProfileId   String?          @db.Uuid // null = any active agent may settle it
   paymentAccountId String?          @db.Uuid
   method           PaymentMethod
   amount           BigInt // gross, debited from player
@@ -593,7 +712,7 @@ model WithdrawalRequest {
   updatedAt        DateTime         @updatedAt
 
   player         User                 @relation("WithdrawalPlayer", fields: [playerId], references: [id], onDelete: Restrict)
-  agentProfile   AgentProfile         @relation(fields: [agentProfileId], references: [id], onDelete: Restrict)
+  agentProfile   AgentProfile?        @relation(fields: [agentProfileId], references: [id], onDelete: SetNull)
   paymentAccount AgentPaymentAccount? @relation(fields: [paymentAccountId], references: [id], onDelete: SetNull)
   processedBy    User?                @relation("WithdrawalProcessor", fields: [processedById], references: [id], onDelete: SetNull)
   commission     AgentCommission?
@@ -613,7 +732,7 @@ model BingoRoom {
   variant            BingoVariant
   stakePerCard       BigInt
   maxCardsPerPlayer  Int          @default(4)
-  minPlayersToStart  Int          @default(2)
+  minPlayersToStart  Int          @default(1)
   rakeBps            Int          @default(1000) // 10.00%
   allowedPatterns    WinPattern[]
   status             RoomStatus   @default(OPEN)

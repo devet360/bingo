@@ -1,4 +1,4 @@
-import { AgentStatus, UserRole, type AgentProfile, type PaymentMethod } from '@prisma/client';
+import { AgentStatus, UserRole, type AgentPaymentAccount, type AgentProfile, type PaymentMethod } from '@prisma/client';
 import { env } from '../config/env';
 import { prisma } from '../lib/prisma';
 import { provisionAgentAccounts } from './accounts';
@@ -141,6 +141,56 @@ export async function listPublicAgents(filter: { region?: string; method?: Payme
   });
 }
 
+export interface AgentAssignment {
+  agent: AgentProfile & {
+    user: { displayName: string | null; avatarUrl: string | null };
+    paymentAccounts: AgentPaymentAccount[];
+  };
+  account: AgentPaymentAccount;
+}
+
+/**
+ * Picks the agent a player should pay for a deposit. Online and
+ * automation-capable agents come first, then reputation and float; the
+ * payment account must also accept the requested amount.
+ */
+export async function assignAgentForPayment(params: {
+  method: PaymentMethod;
+  amount: bigint;
+}): Promise<AgentAssignment | null> {
+  const agents = await prisma.agentProfile.findMany({
+    where: {
+      status: AgentStatus.ACTIVE,
+      paymentAccounts: { some: { isActive: true, method: params.method } },
+    },
+    include: {
+      user: { select: { displayName: true, avatarUrl: true } },
+      paymentAccounts: {
+        where: { isActive: true, method: params.method },
+        orderBy: { createdAt: 'asc' },
+      },
+    },
+    orderBy: [
+      { isOnline: 'desc' },
+      { autoDepositEnabled: 'desc' },
+      { ratingAvg: 'desc' },
+      { completedDeposits: 'desc' },
+      { floatAvailable: 'desc' },
+    ],
+    take: 25,
+  });
+
+  for (const agent of agents) {
+    const account = agent.paymentAccounts.find(
+      (item) =>
+        (item.minAmount === null || item.minAmount <= params.amount) &&
+        (item.maxAmount === null || item.maxAmount >= params.amount),
+    );
+    if (account) return { agent, account };
+  }
+  return null;
+}
+
 export async function findAgentByCode(agentCode: string) {
   return prisma.agentProfile.findUnique({
     where: { agentCode },
@@ -156,4 +206,141 @@ export async function setAgentPresence(userId: string, isOnline: boolean): Promi
     where: { userId },
     data: { isOnline, lastSeenAt: new Date() },
   });
+}
+
+export interface AutoDepositSettings {
+  autoDepositEnabled?: boolean;
+  autoDepositThreshold?: bigint | null;
+}
+
+/**
+ * Agent preference for semi-automated deposits. Enabling requires a positive
+ * ceiling: without one nothing would ever be below the threshold.
+ */
+export async function updateAutoDepositSettings(
+  agentProfileId: string,
+  settings: AutoDepositSettings,
+): Promise<AgentProfile> {
+  const current = await prisma.agentProfile.findUnique({
+    where: { id: agentProfileId },
+    select: { autoDepositEnabled: true, autoDepositThreshold: true },
+  });
+  if (!current) throw Errors.notFound('Agent');
+
+  const enabled = settings.autoDepositEnabled ?? current.autoDepositEnabled;
+  const threshold =
+    settings.autoDepositThreshold !== undefined
+      ? settings.autoDepositThreshold
+      : current.autoDepositThreshold;
+
+  if (settings.autoDepositThreshold !== undefined && settings.autoDepositThreshold !== null && settings.autoDepositThreshold <= 0n) {
+    throw Errors.badRequest('The auto-verification limit must be positive', 'INVALID_AUTO_DEPOSIT_THRESHOLD');
+  }
+  if (enabled && (threshold === null || threshold === undefined || threshold <= 0n)) {
+    throw Errors.badRequest(
+      'Set an auto-verification limit before enabling it',
+      'AUTO_DEPOSIT_THRESHOLD_REQUIRED',
+    );
+  }
+
+  return prisma.agentProfile.update({
+    where: { id: agentProfileId },
+    data: {
+      autoDepositEnabled: enabled,
+      autoDepositThreshold: threshold ?? null,
+    },
+  });
+}
+
+export interface PaymentAccountInput {
+  method: PaymentMethod;
+  provider?: string | null;
+  accountName: string;
+  accountNumber: string;
+  instructions?: string | null;
+  minAmount?: bigint | null;
+  maxAmount?: bigint | null;
+  isActive?: boolean;
+}
+
+function assertPaymentAccountLimits(input: Pick<PaymentAccountInput, 'minAmount' | 'maxAmount'>) {
+  if (input.minAmount !== undefined && input.minAmount !== null && input.minAmount < 0n) {
+    throw Errors.badRequest('The minimum amount cannot be negative', 'INVALID_MIN_AMOUNT');
+  }
+  if (input.maxAmount !== undefined && input.maxAmount !== null && input.maxAmount <= 0n) {
+    throw Errors.badRequest('The maximum amount must be positive', 'INVALID_MAX_AMOUNT');
+  }
+  if (
+    input.minAmount !== undefined &&
+    input.minAmount !== null &&
+    input.maxAmount !== undefined &&
+    input.maxAmount !== null &&
+    input.minAmount > input.maxAmount
+  ) {
+    throw Errors.badRequest('The minimum cannot exceed the maximum', 'INVALID_AMOUNT_RANGE');
+  }
+}
+
+export async function createPaymentAccount(
+  agentProfileId: string,
+  input: PaymentAccountInput,
+): Promise<AgentPaymentAccount> {
+  assertPaymentAccountLimits(input);
+  try {
+    return await prisma.agentPaymentAccount.create({
+      data: {
+        agentProfileId,
+        method: input.method,
+        provider: input.provider,
+        accountName: input.accountName,
+        accountNumber: input.accountNumber,
+        instructions: input.instructions,
+        minAmount: input.minAmount ?? null,
+        maxAmount: input.maxAmount ?? null,
+        isActive: input.isActive ?? true,
+      },
+    });
+  } catch (error) {
+    if (isUniqueViolation(error)) {
+      throw Errors.conflict('This account is already on your profile', 'PAYMENT_ACCOUNT_EXISTS');
+    }
+    throw error;
+  }
+}
+
+export async function updatePaymentAccount(
+  agentProfileId: string,
+  accountId: string,
+  input: Partial<PaymentAccountInput>,
+): Promise<AgentPaymentAccount> {
+  const account = await prisma.agentPaymentAccount.findFirst({
+    where: { id: accountId, agentProfileId },
+  });
+  if (!account) throw Errors.notFound('Payment account');
+
+  assertPaymentAccountLimits({
+    minAmount: input.minAmount !== undefined ? input.minAmount : account.minAmount,
+    maxAmount: input.maxAmount !== undefined ? input.maxAmount : account.maxAmount,
+  });
+
+  try {
+    return await prisma.agentPaymentAccount.update({
+      where: { id: account.id },
+      data: {
+        ...(input.method !== undefined ? { method: input.method } : {}),
+        ...(input.provider !== undefined ? { provider: input.provider } : {}),
+        ...(input.accountName !== undefined ? { accountName: input.accountName } : {}),
+        ...(input.accountNumber !== undefined ? { accountNumber: input.accountNumber } : {}),
+        ...(input.instructions !== undefined ? { instructions: input.instructions } : {}),
+        ...(input.minAmount !== undefined ? { minAmount: input.minAmount } : {}),
+        ...(input.maxAmount !== undefined ? { maxAmount: input.maxAmount } : {}),
+        ...(input.isActive !== undefined ? { isActive: input.isActive } : {}),
+      },
+    });
+  } catch (error) {
+    if (isUniqueViolation(error)) {
+      throw Errors.conflict('This account is already on your profile', 'PAYMENT_ACCOUNT_EXISTS');
+    }
+    throw error;
+  }
 }

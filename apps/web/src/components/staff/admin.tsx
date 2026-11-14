@@ -4,11 +4,13 @@ import { useCallback, useEffect, useState } from 'react';
 import {
   ApiError,
   createStaffMember,
+  createStaffTelegramLink,
   fetchAdminOverview,
   fetchAuditLog,
   fetchStaffMembers,
   resetStaffPassword,
   setStaffMemberStatus,
+  setStaffTelegram,
 } from '@/lib/api';
 import { formatCredits, formatDateTime } from '@/lib/format';
 import { useI18n } from '@/lib/i18n';
@@ -92,6 +94,11 @@ export function StaffTab() {
   const [resetResult, setResetResult] = useState<{ name: string; password: string } | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
+  const [telegramTarget, setTelegramTarget] = useState<StaffMember | null>(null);
+  const [telegramId, setTelegramId] = useState('');
+  const [telegramBusy, setTelegramBusy] = useState(false);
+  const [telegramError, setTelegramError] = useState<string | null>(null);
+  const [telegramLink, setTelegramLink] = useState<{ url: string; expiresAt: string } | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -134,6 +141,66 @@ export function StaffTab() {
       setError(caught instanceof ApiError ? caught.message : t('common.failed'));
     } finally {
       setBusy(null);
+    }
+  };
+
+  const openTelegram = (member: StaffMember) => {
+    setTelegramTarget(member);
+    setTelegramId(member.telegramId ?? '');
+    setTelegramError(null);
+    setTelegramLink(null);
+  };
+
+  const saveTelegram = async () => {
+    if (!telegramTarget) return;
+    const value = telegramId.trim();
+    if (value && !/^\d{1,20}$/.test(value)) {
+      setTelegramError('Telegram ids are digits only.');
+      return;
+    }
+    setTelegramBusy(true);
+    setTelegramError(null);
+    try {
+      const result = await setStaffTelegram(telegramTarget.id, value || null);
+      setTelegramTarget({ ...telegramTarget, ...result.user });
+      setTelegramId(result.user.telegramId ?? '');
+      setNotice(`Telegram id updated for ${telegramTarget.displayName}.`);
+      await load();
+    } catch (caught) {
+      setTelegramError(caught instanceof ApiError ? caught.message : t('common.failed'));
+    } finally {
+      setTelegramBusy(false);
+    }
+  };
+
+  const generateTelegramLink = async () => {
+    if (!telegramTarget) return;
+    setTelegramBusy(true);
+    setTelegramError(null);
+    try {
+      const result = await createStaffTelegramLink(telegramTarget.id);
+      setTelegramLink({ url: result.url, expiresAt: result.expiresAt });
+    } catch (caught) {
+      setTelegramError(caught instanceof ApiError ? caught.message : t('common.failed'));
+    } finally {
+      setTelegramBusy(false);
+    }
+  };
+
+  const unlinkTelegram = async () => {
+    if (!telegramTarget) return;
+    setTelegramBusy(true);
+    setTelegramError(null);
+    try {
+      const result = await setStaffTelegram(telegramTarget.id, null);
+      setTelegramTarget({ ...telegramTarget, ...result.user });
+      setTelegramId('');
+      setNotice(`Telegram unlinked for ${telegramTarget.displayName}.`);
+      await load();
+    } catch (caught) {
+      setTelegramError(caught instanceof ApiError ? caught.message : t('common.failed'));
+    } finally {
+      setTelegramBusy(false);
     }
   };
 
@@ -197,10 +264,14 @@ export function StaffTab() {
                   {member.role}
                   {member.agentProfile ? ` · ${member.agentProfile.agentCode}` : ''} ·{' '}
                   {member.email ?? member.phone ?? '—'}
+                  {member.telegramId ? ` · TG ${member.telegramId}` : ''}
                 </p>
               </div>
               <div className="flex items-center gap-2">
                 <StatusPill status={member.status} />
+                <Button size="sm" variant="ghost" onClick={() => openTelegram(member)}>
+                  Telegram
+                </Button>
                 <Button
                   size="sm"
                   variant="outline"
@@ -280,6 +351,71 @@ export function StaffTab() {
               </div>
               <p className="mt-2 text-[11px] text-muted">{t('staff.tempPasswordHint')}</p>
             </div>
+          </div>
+        ) : null}
+      </Sheet>
+
+      <Sheet
+        open={telegramTarget !== null}
+        title="Telegram access"
+        onClose={() => setTelegramTarget(null)}
+      >
+        {telegramTarget ? (
+          <div className="space-y-3">
+            <p className="text-xs text-muted">
+              {telegramTarget.displayName} · {telegramTarget.role}
+              {telegramTarget.telegramUsername ? ` · @${telegramTarget.telegramUsername}` : ''}
+            </p>
+            <Input
+              label="Telegram numeric id"
+              inputMode="numeric"
+              placeholder="123456789"
+              value={telegramId}
+              onChange={(event) => setTelegramId(event.target.value.replace(/\D/g, ''))}
+              hint="Send /start to @userinfobot to read the id. Staff can also prove ownership with the link below."
+            />
+            <Button className="w-full" loading={telegramBusy} onClick={() => void saveTelegram()}>
+              Save id
+            </Button>
+            <div className="rounded-xl border border-line/70 bg-ink/40 p-3">
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-muted">
+                One-time sign-in link
+              </p>
+              <p className="mt-1 text-[11px] text-muted">
+                Send this to the staff member. Opening it links their Telegram account to this login
+                and opens their dashboard inside the Mini App.
+              </p>
+              <Button
+                className="mt-2 w-full"
+                variant="gold"
+                loading={telegramBusy}
+                onClick={() => void generateTelegramLink()}
+              >
+                Generate link
+              </Button>
+              {telegramLink ? (
+                <div className="mt-2 rounded-lg border border-gold/30 bg-gold/5 p-2">
+                  <p className="break-all font-mono text-[11px] text-text">{telegramLink.url}</p>
+                  <div className="mt-2 flex items-center justify-between gap-2">
+                    <span className="text-[10px] text-muted">
+                      expires {formatDateTime(telegramLink.expiresAt)}
+                    </span>
+                    <CopyButton value={telegramLink.url} label={t('common.copy')} />
+                  </div>
+                </div>
+              ) : null}
+            </div>
+            {telegramError ? <ErrorNote>{telegramError}</ErrorNote> : null}
+            {telegramTarget.telegramId ? (
+              <Button
+                variant="danger"
+                className="w-full"
+                loading={telegramBusy}
+                onClick={() => void unlinkTelegram()}
+              >
+                Unlink Telegram
+              </Button>
+            ) : null}
           </div>
         ) : null}
       </Sheet>

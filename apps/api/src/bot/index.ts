@@ -5,7 +5,9 @@ import { logger } from '../lib/logger';
 import { prisma } from '../lib/prisma';
 import { AppError } from '../lib/errors';
 import { registerTelegramPhone } from '../services/users';
+import { consumeStaffTelegramLink } from '../services/staff';
 import { resolveBotLocale, botCopy, type BotLocale } from './messages';
+import type { TelegramInitUser } from '../services/telegram';
 
 const bot = new Bot(env.BOT_TOKEN);
 
@@ -28,6 +30,22 @@ function playKeyboard(locale: BotLocale): InlineKeyboard | undefined {
   const url = webAppUrl();
   if (!url) return undefined;
   return new InlineKeyboard().webApp(botCopy[locale].playButton, url);
+}
+
+/** Staff and agents land directly on their console inside the same Mini App. */
+function dashboardKeyboard(locale: BotLocale, role: User['role']): InlineKeyboard | undefined {
+  const base = webAppUrl();
+  if (!base) return undefined;
+  const root = base.replace(/\/+$/, '');
+  const targets: Partial<Record<User['role'], { label: string; path: string }>> = {
+    SUPER_ADMIN: { label: botCopy[locale].dashboardAdmin, path: '/admin' },
+    SUPPORT: { label: botCopy[locale].dashboardSupport, path: '/support' },
+    AGENT: { label: botCopy[locale].dashboardAgent, path: '/agent' },
+  };
+  const target = targets[role];
+  return target
+    ? new InlineKeyboard().webApp(target.label, `${root}${target.path}`)
+    : new InlineKeyboard().webApp(botCopy[locale].playButton, base);
 }
 
 function shareContactKeyboard(locale: BotLocale): Keyboard {
@@ -57,6 +75,46 @@ async function openGame(ctx: Context, locale: BotLocale, intro: string): Promise
   await ctx.reply(intro, { reply_markup: keyboard });
 }
 
+async function openDashboard(ctx: Context, locale: BotLocale, role: User['role'], intro: string): Promise<void> {
+  const keyboard = dashboardKeyboard(locale, role);
+  if (!keyboard) {
+    await ctx.reply(intro);
+    await ctx.reply(botCopy[locale].appNotConfigured);
+    return;
+  }
+  await ctx.reply(intro, { reply_markup: keyboard });
+}
+
+function telegramProfile(sender: NonNullable<Context['from']>): TelegramInitUser {
+  return {
+    id: sender.id,
+    first_name: sender.first_name,
+    last_name: sender.last_name,
+    username: sender.username,
+    language_code: sender.language_code,
+    is_premium: sender.is_premium,
+  };
+}
+
+async function handleStaffLink(ctx: Context, locale: BotLocale, token: string): Promise<void> {
+  const sender = ctx.from;
+  if (!sender) return;
+  try {
+    const user = await consumeStaffTelegramLink(token, telegramProfile(sender));
+    await openDashboard(ctx, locale, user.role, botCopy[locale].staffLinked);
+  } catch (error) {
+    if (error instanceof AppError && error.code === 'TELEGRAM_LINK_INVALID') {
+      await ctx.reply(botCopy[locale].staffLinkInvalid);
+      return;
+    }
+    if (error instanceof AppError && error.code === 'TELEGRAM_TAKEN') {
+      await ctx.reply(botCopy[locale].phoneTaken);
+      return;
+    }
+    throw error;
+  }
+}
+
 async function sendWelcome(ctx: Context): Promise<void> {
   const locale = await localeFor(ctx);
   const telegramId = ctx.from ? BigInt(ctx.from.id) : null;
@@ -68,7 +126,7 @@ async function sendWelcome(ctx: Context): Promise<void> {
     : null;
 
   if (user && user.role !== 'PLAYER') {
-    await ctx.reply(botCopy[locale].staffWebOnly);
+    await openDashboard(ctx, locale, user.role, botCopy[locale].staffWelcome);
     return;
   }
 
@@ -84,10 +142,30 @@ async function sendWelcome(ctx: Context): Promise<void> {
 
 bot.command('start', async (ctx) => {
   const payload = ctx.match?.trim();
+  if (payload?.startsWith('staff_')) {
+    const locale = await localeFor(ctx);
+    await handleStaffLink(ctx, locale, payload.slice('staff_'.length));
+    return;
+  }
   if (ctx.from && payload) {
     pendingStartParams.set(ctx.from.id, { param: payload, expiresAt: Date.now() + 10 * 60_000 });
   }
   await sendWelcome(ctx);
+});
+
+bot.command('dashboard', async (ctx) => {
+  const locale = await localeFor(ctx);
+  const user = ctx.from
+    ? await prisma.user.findUnique({
+        where: { telegramId: BigInt(ctx.from.id) },
+        select: { role: true },
+      })
+    : null;
+  if (!user || user.role === 'PLAYER') {
+    await sendWelcome(ctx);
+    return;
+  }
+  await openDashboard(ctx, locale, user.role, botCopy[locale].staffWelcome);
 });
 
 bot.command('verify', async (ctx) => {
@@ -116,18 +194,15 @@ bot.on('message:contact', async (ctx) => {
 
   try {
     const user = await registerTelegramPhone(
-      {
-        id: sender.id,
-        first_name: sender.first_name,
-        last_name: sender.last_name,
-        username: sender.username,
-        language_code: sender.language_code,
-        is_premium: sender.is_premium,
-      },
+      telegramProfile(sender),
       contact.phone_number,
       takeStartParam(sender.id),
     );
     const savedLocale = resolveBotLocale(sender.language_code, user.locale);
+    if (user.role !== 'PLAYER') {
+      await openDashboard(ctx, savedLocale, user.role, botCopy[savedLocale].staffWelcome);
+      return;
+    }
     const keyboard = playKeyboard(savedLocale);
     const text = botCopy[savedLocale].contactSaved(user.phone ?? contact.phone_number);
     if (keyboard) {
@@ -144,10 +219,6 @@ bot.on('message:contact', async (ctx) => {
       await ctx.reply(botCopy[locale].invalidPhone, {
         reply_markup: shareContactKeyboard(locale),
       });
-      return;
-    }
-    if (error instanceof AppError && error.code === 'STAFF_WEB_ONLY') {
-      await ctx.reply(botCopy[locale].staffWebOnly);
       return;
     }
     throw error;
@@ -167,11 +238,13 @@ async function main(): Promise<void> {
   const commandsEn = [
     { command: 'start', description: 'Open Bingo Hall' },
     { command: 'verify', description: 'Verify your phone number' },
+    { command: 'dashboard', description: 'Open your staff dashboard' },
     { command: 'help', description: 'How to play' },
   ];
   const commandsAm = [
     { command: 'start', description: 'ቢንጎ አዳራሽ ክፈት' },
     { command: 'verify', description: 'ስልክ ቁጥርዎን ያረጋግጡ' },
+    { command: 'dashboard', description: 'የሰራተኛ ዳሽቦርድዎን ክፈቱ' },
     { command: 'help', description: 'እንዴት እንደሚጫወቱ' },
   ];
   await bot.api.setMyCommands(commandsEn).catch((error) => logger.warn({ err: error }, 'setMyCommands failed'));

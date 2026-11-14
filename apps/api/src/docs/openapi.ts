@@ -45,7 +45,8 @@ export const openApiDocument = {
       'REST + Socket.io API for the Bingo Hall Telegram Mini App, agent network and staff dashboards. ' +
       'Money is always an integer number of minor units rendered as a decimal string. ' +
       'Player signup happens only through the Telegram bot (`/start` → share contact). ' +
-      'Staff (agent, support, super admin) sign in here with email/phone + password.',
+      'Staff (agent, support, super admin) sign in with email/phone + password, or open their dashboard in the ' +
+      'Telegram Mini App once a super admin links their Telegram id.',
   },
   servers: [{ url: '/', description: 'Current host' }],
   tags: [
@@ -134,6 +135,15 @@ export const openApiDocument = {
           ratingCount: { type: 'integer' },
           completedDeposits: { type: 'integer' },
           completedWithdrawals: { type: 'integer' },
+          autoDepositEnabled: {
+            type: 'boolean',
+            description: 'Auto-credit verified receipts up to the agent threshold.',
+          },
+          autoDepositThreshold: { ...money, nullable: true },
+          paymentAccounts: {
+            type: 'array',
+            items: { $ref: '#/components/schemas/PaymentAccount' },
+          },
           floatAvailable: { ...money, nullable: true },
           floatEscrow: { ...money, nullable: true },
           commissionEarned: { ...money, nullable: true },
@@ -152,10 +162,121 @@ export const openApiDocument = {
           amount: money,
           creditedAmount: { ...money, nullable: true },
           agentProfileId: { type: 'string', nullable: true },
+          providerCode: { type: 'string', nullable: true },
+          receiptReference: { type: 'string', nullable: true },
+          receiptAccount: { type: 'string', nullable: true },
+          verificationStatus: {
+            type: 'string',
+            enum: ['NOT_REQUIRED', 'PENDING', 'VERIFIED', 'FAILED', 'MANUAL'],
+          },
+          verificationMessage: { type: 'string', nullable: true },
+          verificationSource: { type: 'string', enum: ['SERVER', 'CLIENT', 'RELAY'], nullable: true },
+          autoVerified: { type: 'boolean' },
+          verifiedAt: { type: 'string', format: 'date-time', nullable: true },
           externalRef: { type: 'string', nullable: true },
+          clientReceiptUrl: {
+            type: 'string',
+            nullable: true,
+            description: 'Bank page the payer app fetches for client-side rails (Telebirr, M-Pesa).',
+          },
+          agent: {
+            type: 'object',
+            nullable: true,
+            description: 'Agent the server assigned to receive this payment.',
+            properties: {
+              id: { type: 'string', format: 'uuid' },
+              agentCode: { type: 'string' },
+              displayName: { type: 'string', nullable: true },
+              isOnline: { type: 'boolean' },
+              autoDepositEnabled: { type: 'boolean' },
+              autoDepositThreshold: { ...money, nullable: true },
+            },
+          },
+          paymentAccount: {
+            allOf: [{ $ref: '#/components/schemas/PaymentAccount' }],
+            nullable: true,
+            description: 'Account the player pays into.',
+          },
           expiresAt: { type: 'string', format: 'date-time' },
           settledAt: { type: 'string', format: 'date-time', nullable: true },
           createdAt: { type: 'string', format: 'date-time' },
+        },
+      },
+      DepositProvider: {
+        type: 'object',
+        properties: {
+          code: { type: 'string', example: 'telebirr' },
+          name: { type: 'string' },
+          method: { type: 'string' },
+          requiresPhone: { type: 'boolean' },
+          accountDigits: { type: 'integer', nullable: true },
+          opaqueReference: { type: 'boolean' },
+          clientSide: { type: 'boolean' },
+          supported: { type: 'boolean' },
+          enabled: { type: 'boolean' },
+          sortOrder: { type: 'integer' },
+          instructions: { type: 'string', nullable: true },
+          refHint: { type: 'string', nullable: true },
+          refPattern: { type: 'string', nullable: true },
+          minAmount: { ...money, nullable: true },
+          maxAmount: { ...money, nullable: true },
+          parser: { type: 'string', nullable: true },
+          endpoint: { type: 'string', nullable: true },
+        },
+      },
+      PaymentAccount: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', format: 'uuid' },
+          method: { type: 'string' },
+          provider: { type: 'string', nullable: true },
+          accountName: { type: 'string' },
+          accountNumber: { type: 'string' },
+          instructions: { type: 'string', nullable: true },
+          minAmount: { ...money, nullable: true },
+          maxAmount: { ...money, nullable: true },
+          isActive: { type: 'boolean' },
+        },
+      },
+      ReceiptVerification: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', format: 'uuid' },
+          providerCode: { type: 'string' },
+          providerName: { type: 'string' },
+          reference: { type: 'string' },
+          status: { type: 'string', enum: ['NOT_REQUIRED', 'PENDING', 'VERIFIED', 'FAILED', 'MANUAL'] },
+          source: { type: 'string', enum: ['SERVER', 'CLIENT', 'RELAY'], nullable: true },
+          amount: { ...money, nullable: true },
+          currency: { type: 'string', nullable: true },
+          senderName: { type: 'string', nullable: true },
+          senderAccount: { type: 'string', nullable: true },
+          receiverName: { type: 'string', nullable: true },
+          receiverAccount: { type: 'string', nullable: true },
+          transactionDate: { type: 'string', nullable: true },
+          transactionStatus: { type: 'string', nullable: true },
+          message: { type: 'string', nullable: true },
+          attempts: { type: 'integer' },
+          verifiedAt: { type: 'string', format: 'date-time', nullable: true },
+          createdAt: { type: 'string', format: 'date-time' },
+          deposit: {
+            type: 'object',
+            nullable: true,
+            properties: {
+              code: { type: 'string' },
+              amount: money,
+              status: { type: 'string' },
+              autoVerified: { type: 'boolean' },
+              player: {
+                type: 'object',
+                nullable: true,
+                properties: {
+                  displayName: { type: 'string', nullable: true },
+                  phone: { type: 'string', nullable: true },
+                },
+              },
+            },
+          },
         },
       },
       Withdrawal: {
@@ -350,19 +471,40 @@ export const openApiDocument = {
         properties: {
           amount: { type: 'integer', minimum: 1, description: 'Minor units' },
           method: { type: 'string', enum: ['MOBILE_MONEY', 'BANK_TRANSFER', 'CASH', 'CARD', 'CRYPTO'] },
-          agentProfileId: { type: 'string', format: 'uuid' },
-          paymentAccountId: { type: 'string', format: 'uuid' },
+          agentProfileId: {
+            type: 'string',
+            format: 'uuid',
+            description: 'Legacy override. Omit: the server assigns an active agent automatically.',
+          },
+          agentCode: { type: 'string', description: 'Legacy override, alternative to agentProfileId' },
+          paymentAccountId: { type: 'string', format: 'uuid', description: 'Legacy override; chosen by the server otherwise' },
+          providerCode: {
+            type: 'string',
+            description: 'Deposit rail from GET /wallet/deposit-providers. Locks `method` to the rail.',
+          },
+          receiptReference: {
+            type: 'string',
+            maxLength: 512,
+            description: 'Optional at creation; normally submitted with POST /wallet/deposits/{code}/verify-receipt ("I have paid").',
+          },
+          receiptAccount: { type: 'string', maxLength: 64, description: 'Last N digits of the payer account, when the rail needs them' },
+          receiptPhone: { type: 'string', maxLength: 32, description: 'Payer phone, when the rail needs it' },
+          receiptUrl: { type: 'string', format: 'uri', maxLength: 2048, description: 'Optional payer-supplied receipt link' },
           playerNote: { type: 'string' },
           externalRef: { type: 'string' },
         },
       },
       WithdrawalCreate: {
         type: 'object',
-        required: ['amount', 'method', 'agentProfileId'],
+        required: ['amount', 'method'],
         properties: {
           amount: { type: 'integer', minimum: 1, description: 'Minor units' },
           method: { type: 'string' },
-          agentProfileId: { type: 'string', format: 'uuid' },
+          agentProfileId: {
+            type: 'string',
+            format: 'uuid',
+            description: 'Legacy override. Unassigned payouts can be settled by any active agent.',
+          },
           paymentAccountId: { type: 'string', format: 'uuid' },
           playerNote: { type: 'string' },
         },
@@ -371,6 +513,93 @@ export const openApiDocument = {
         type: 'object',
         required: ['isOnline'],
         properties: { isOnline: { type: 'boolean' } },
+      },
+      AutoDepositPatch: {
+        type: 'object',
+        description: 'Agent-controlled automation. Both fields are optional; at least one is required.',
+        properties: {
+          autoDepositEnabled: { type: 'boolean' },
+          autoDepositThreshold: {
+            type: 'integer',
+            minimum: 1,
+            nullable: true,
+            description: 'Minor units. Verified receipts at or below this amount auto-credit; null disables the cap.',
+          },
+        },
+      },
+      PaymentAccountCreate: {
+        type: 'object',
+        required: ['method', 'accountName', 'accountNumber'],
+        properties: {
+          method: { type: 'string', enum: ['MOBILE_MONEY', 'BANK_TRANSFER', 'CASH', 'CARD', 'CRYPTO'] },
+          provider: { type: 'string', nullable: true, description: 'Deposit provider code, e.g. telebirr' },
+          accountName: { type: 'string', maxLength: 128 },
+          accountNumber: { type: 'string', maxLength: 64 },
+          instructions: { type: 'string', maxLength: 500, nullable: true },
+          minAmount: { type: 'integer', minimum: 0, nullable: true, description: 'Minor units' },
+          maxAmount: { type: 'integer', minimum: 1, nullable: true, description: 'Minor units' },
+        },
+      },
+      PaymentAccountPatch: {
+        type: 'object',
+        properties: {
+          method: { type: 'string', enum: ['MOBILE_MONEY', 'BANK_TRANSFER', 'CASH', 'CARD', 'CRYPTO'] },
+          provider: { type: 'string', nullable: true },
+          accountName: { type: 'string', maxLength: 128 },
+          accountNumber: { type: 'string', maxLength: 64 },
+          instructions: { type: 'string', maxLength: 500, nullable: true },
+          minAmount: { type: 'integer', minimum: 0, nullable: true },
+          maxAmount: { type: 'integer', minimum: 1, nullable: true },
+          isActive: { type: 'boolean' },
+        },
+      },
+      DepositProviderPatch: {
+        type: 'object',
+        description:
+          'Presentation and policy only. The parser and endpoint host allowlist are code-owned and cannot be changed here.',
+        properties: {
+          name: { type: 'string', maxLength: 96 },
+          enabled: { type: 'boolean' },
+          supported: { type: 'boolean', description: 'Implementation exists; unsupported rails fail closed' },
+          requiresPhone: { type: 'boolean' },
+          accountDigits: { type: 'integer', minimum: 1, maximum: 12, nullable: true },
+          opaqueReference: { type: 'boolean' },
+          clientSide: { type: 'boolean', description: 'Bank blocks foreign IPs; payer device fetches the receipt' },
+          sortOrder: { type: 'integer', minimum: 0, maximum: 10000 },
+          instructions: { type: 'string', maxLength: 1000, nullable: true },
+          refPattern: { type: 'string', maxLength: 300, nullable: true },
+          refHint: { type: 'string', maxLength: 200, nullable: true },
+          minAmount: { type: 'integer', minimum: 1, nullable: true, description: 'Minor units' },
+          maxAmount: { type: 'integer', minimum: 1, nullable: true, description: 'Minor units' },
+        },
+      },
+      StaffTelegramPatch: {
+        type: 'object',
+        required: ['telegramId'],
+        properties: {
+          telegramId: {
+            type: 'string',
+            pattern: '^\\d{1,20}$',
+            nullable: true,
+            description: 'Numeric Telegram user id; null unlinks the account',
+          },
+        },
+      },
+      ReceiptVerifyPayload: {
+        type: 'object',
+        description:
+          '"I have paid": the receipt reference, an optional proof screenshot, and the bank response captured by the ' +
+          'payer device for client-side rails. All evidence is untrusted: the server re-parses it, dedupes the ' +
+          'reference and compares the amount.',
+        properties: {
+          receiptReference: { type: 'string', maxLength: 512 },
+          receiptAccount: { type: 'string', maxLength: 64 },
+          receiptPhone: { type: 'string', maxLength: 32 },
+          contentType: { type: 'string', maxLength: 128 },
+          bodyBase64: { type: 'string', maxLength: 7200000 },
+          proofBase64: { type: 'string', maxLength: 6000000, description: 'Screenshot/photo of the receipt' },
+          proofContentType: { type: 'string', enum: ['image/png', 'image/jpeg', 'image/webp'] },
+        },
       },
     },
   },
@@ -398,9 +627,11 @@ export const openApiDocument = {
     '/auth/telegram': {
       post: {
         tags: ['Auth'],
-        summary: 'Player sign-in through the Telegram Mini App',
+        summary: 'Sign in through the Telegram Mini App (players and staff)',
         description:
-          'Creates the player on first launch. Playing and withdrawals additionally require a phone number shared with the bot.',
+          'Creates the player on first launch. Playing and withdrawals additionally require a phone number shared with the bot. ' +
+          'A staff account whose Telegram id is linked is returned with its role so the Mini App can open the agent, support ' +
+          'or admin dashboard.',
         security: [],
         requestBody: { required: true, content: { 'application/json': { schema: { $ref: '#/components/schemas/TelegramAuth' } } } },
         responses: {
@@ -420,7 +651,6 @@ export const openApiDocument = {
             },
           }),
           '401': errorResponse('Invalid or expired initData'),
-          '403': errorResponse('Staff accounts cannot use the Mini App (STAFF_WEB_ONLY)'),
         },
       },
     },
@@ -547,6 +777,17 @@ export const openApiDocument = {
         responses: { '200': ok(dataArrayRef('Ledger')) },
       },
     },
+    '/wallet/deposit-providers': {
+      get: {
+        tags: ['Player wallet'],
+        summary: 'Enabled deposit rails and their receipt requirements',
+        description:
+          'Client-side rails (`clientSide: true`, e.g. Telebirr, M-Pesa) return a `clientReceiptUrl` on the deposit ' +
+          'that the player app must fetch from an Ethiopian IP and POST back to `/wallet/deposits/{code}/verify-receipt`.',
+        parameters: [{ name: 'method', in: 'query', schema: { type: 'string' } }],
+        responses: { '200': ok(dataArrayRef('DepositProvider')) },
+      },
+    },
     '/wallet/deposits': {
       get: {
         tags: ['Player wallet'],
@@ -555,10 +796,16 @@ export const openApiDocument = {
       },
       post: {
         tags: ['Player wallet'],
-        summary: 'Open a deposit request and get a code for an agent',
+        summary: 'Open a deposit request; the server assigns the receiving agent',
+        description:
+          'The player sends only the method/rail and amount. The response carries the assigned agent and the exact ' +
+          'payment account to pay, so the UI can show "pay X to account Y".',
         security: [{ bearerAuth: [] }, { idempotency: [] }],
         requestBody: { required: true, content: { 'application/json': { schema: { $ref: '#/components/schemas/DepositCreate' } } } },
-        responses: { '201': ok(dataRef('Deposit')), '409': errorResponse('Duplicate request') },
+        responses: {
+          '201': ok(dataRef('Deposit')),
+          '409': errorResponse('Duplicate request / AGENT_UNAVAILABLE'),
+        },
       },
     },
     '/wallet/deposits/{id}': {
@@ -569,6 +816,45 @@ export const openApiDocument = {
         responses: { '200': ok(dataRef('Deposit')), '404': errorResponse('Not found') },
       },
     },
+    '/wallet/deposits/{code}/verify-receipt': {
+      post: {
+        tags: ['Player wallet'],
+        summary: '"I have paid": submit the receipt reference, proof, or the bank response',
+        description:
+          'Called after the player pays. For client-side rails the reply sets `needsClientFetch`; the app then fetches ' +
+          '`clientReceiptUrl` on the player phone and posts `bodyBase64` back. A screenshot without a fetchable receipt ' +
+          'parks the deposit in MANUAL for the agent. A verified receipt only credits automatically when the assigned ' +
+          'agent has auto-deposit on, the rail is enabled, the amount matches exactly and the agent threshold covers it.',
+        security: [{ bearerAuth: [] }],
+        parameters: [idParam('code')],
+        requestBody: {
+          required: false,
+          content: { 'application/json': { schema: { $ref: '#/components/schemas/ReceiptVerifyPayload' } } },
+        },
+        responses: {
+          '200': ok({
+            type: 'object',
+            properties: {
+              data: { $ref: '#/components/schemas/Deposit' },
+              verification: {
+                type: 'object',
+                properties: {
+                  status: { type: 'string', enum: ['VERIFIED', 'FAILED', 'PENDING', 'MANUAL'] },
+                  message: { type: 'string' },
+                },
+              },
+              autoCredited: { type: 'boolean' },
+              needsClientFetch: {
+                type: 'boolean',
+                description: 'True when the app should fetch clientReceiptUrl and post the bank bytes back.',
+              },
+            },
+          }),
+          '404': errorResponse('Deposit not found'),
+          '409': errorResponse('DEPOSIT_NOT_OPEN / RECEIPT_ALREADY_USED / RECEIPT_REFERENCE_REQUIRED'),
+        },
+      },
+    },
     '/wallet/withdrawals': {
       get: {
         tags: ['Player wallet'],
@@ -577,7 +863,7 @@ export const openApiDocument = {
       },
       post: {
         tags: ['Player wallet'],
-        summary: 'Escrow credits and issue a payout code (phone verification required)',
+        summary: 'Escrow credits and issue a payout code (phone verification required; any agent may settle)',
         security: [{ bearerAuth: [] }, { idempotency: [] }],
         requestBody: { required: true, content: { 'application/json': { schema: { $ref: '#/components/schemas/WithdrawalCreate' } } } },
         responses: {
@@ -617,6 +903,43 @@ export const openApiDocument = {
         tags: ['Agent portal'],
         summary: 'Agent profile, balances and queues summary',
         responses: { '200': ok({ type: 'object' }) },
+      },
+      patch: {
+        tags: ['Agent portal'],
+        summary: 'Set auto-deposit mode and threshold',
+        description:
+          'Only the assigned agent decides automation. Verified receipts at or below the threshold credit without manual ' +
+          'confirmation; larger ones stay in the queue.',
+        requestBody: { required: true, content: { 'application/json': { schema: { $ref: '#/components/schemas/AutoDepositPatch' } } } },
+        responses: { '200': ok(dataRef('Agent')), '400': errorResponse('Nothing to update') },
+      },
+    },
+    '/agent/payment-accounts': {
+      get: {
+        tags: ['Agent portal'],
+        summary: 'My receiving accounts',
+        responses: { '200': ok(dataArrayRef('PaymentAccount')) },
+      },
+      post: {
+        tags: ['Agent portal'],
+        summary: 'Add a receiving account',
+        requestBody: { required: true, content: { 'application/json': { schema: { $ref: '#/components/schemas/PaymentAccountCreate' } } } },
+        responses: { '201': ok(dataRef('PaymentAccount')) },
+      },
+    },
+    '/agent/payment-accounts/{id}': {
+      patch: {
+        tags: ['Agent portal'],
+        summary: 'Edit a receiving account',
+        parameters: [idParam('id')],
+        requestBody: { required: true, content: { 'application/json': { schema: { $ref: '#/components/schemas/PaymentAccountPatch' } } } },
+        responses: { '200': ok(dataRef('PaymentAccount')), '404': errorResponse('Not found') },
+      },
+      delete: {
+        tags: ['Agent portal'],
+        summary: 'Deactivate a receiving account (soft delete)',
+        parameters: [idParam('id')],
+        responses: { '200': ok(dataRef('PaymentAccount')) },
       },
     },
     '/agent/presence': {
@@ -870,6 +1193,26 @@ export const openApiDocument = {
         responses: { '200': ok(dataArrayRef('Agent')) },
       },
     },
+    '/support/receipts': {
+      get: {
+        tags: ['Support'],
+        summary: 'Receipt verification audit trail',
+        parameters: [
+          { name: 'status', in: 'query', schema: { type: 'string', enum: ['PENDING', 'VERIFIED', 'FAILED', 'MANUAL', 'NOT_REQUIRED'] } },
+          { name: 'providerCode', in: 'query', schema: { type: 'string' } },
+          pageParam,
+        ],
+        responses: {
+          '200': ok({
+            type: 'object',
+            properties: {
+              data: { type: 'array', items: { $ref: '#/components/schemas/ReceiptVerification' } },
+              page: { $ref: '#/components/schemas/Page' },
+            },
+          }),
+        },
+      },
+    },
     '/admin/overview': {
       get: {
         tags: ['Admin'],
@@ -908,6 +1251,41 @@ export const openApiDocument = {
         responses: { '200': ok({ type: 'object' }) },
       },
     },
+    '/admin/staff/{userId}/telegram': {
+      patch: {
+        tags: ['Admin'],
+        summary: 'Attach or clear a staff Telegram id',
+        description: 'The id lets the staff member open their dashboard inside the Telegram Mini App.',
+        parameters: [idParam('userId')],
+        requestBody: { required: true, content: { 'application/json': { schema: { $ref: '#/components/schemas/StaffTelegramPatch' } } } },
+        responses: {
+          '200': ok({ type: 'object', properties: { data: { type: 'object' } } }),
+          '409': errorResponse('TELEGRAM_ALREADY_LINKED'),
+        },
+      },
+    },
+    '/admin/staff/{userId}/telegram-link': {
+      post: {
+        tags: ['Admin'],
+        summary: 'Mint a one-time bot deep link so staff can link their own Telegram id',
+        parameters: [idParam('userId')],
+        responses: {
+          '200': ok({
+            type: 'object',
+            properties: {
+              data: {
+                type: 'object',
+                properties: {
+                  token: { type: 'string' },
+                  expiresAt: { type: 'string', format: 'date-time' },
+                  url: { type: 'string', nullable: true, example: 'https://t.me/bingohall_bot?start=staff_abc123' },
+                },
+              },
+            },
+          }),
+        },
+      },
+    },
     '/admin/audit': {
       get: {
         tags: ['Admin'],
@@ -937,8 +1315,24 @@ export const openApiDocument = {
     '/admin/agents/{agentId}': {
       patch: {
         tags: ['Admin'],
-        summary: 'Update agent status or tier',
+        summary: 'Update agent status, tier, auto-deposit mode or threshold',
         parameters: [idParam('agentId')],
+        requestBody: {
+          required: false,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                properties: {
+                  status: { type: 'string', enum: ['PENDING', 'ACTIVE', 'SUSPENDED', 'TERMINATED'] },
+                  tier: { type: 'string', enum: ['BRONZE', 'SILVER', 'GOLD', 'PLATINUM'] },
+                  autoDepositEnabled: { type: 'boolean' },
+                  autoDepositThreshold: { type: 'integer', minimum: 1, nullable: true, description: 'Minor units' },
+                },
+              },
+            },
+          },
+        },
         responses: { '200': ok(dataRef('Agent')) },
       },
     },
@@ -949,6 +1343,25 @@ export const openApiDocument = {
         security: [{ bearerAuth: [] }, { idempotency: [] }],
         parameters: [idParam('agentId')],
         responses: { '201': ok({ type: 'object' }) },
+      },
+    },
+    '/admin/deposit-providers': {
+      get: {
+        tags: ['Admin'],
+        summary: 'Every deposit rail, including disabled ones',
+        responses: { '200': ok(dataArrayRef('DepositProvider')) },
+      },
+    },
+    '/admin/deposit-providers/{code}': {
+      patch: {
+        tags: ['Admin'],
+        summary: 'Configure a deposit rail',
+        description:
+          'Parser, endpoint host allowlist and verification code stay in the codebase; this endpoint only edits ' +
+          'availability, limits, payer prompts and sort order.',
+        parameters: [idParam('code')],
+        requestBody: { required: true, content: { 'application/json': { schema: { $ref: '#/components/schemas/DepositProviderPatch' } } } },
+        responses: { '200': ok(dataRef('DepositProvider')), '404': errorResponse('Provider not found') },
       },
     },
     '/admin/reconciliation': {

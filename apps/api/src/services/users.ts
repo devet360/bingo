@@ -101,9 +101,6 @@ export async function registerTelegramPhone(
     prisma.user.findUnique({ where: { phone }, select: { id: true, role: true } }),
   ]);
 
-  if (byTelegram && byTelegram.role !== UserRole.PLAYER) {
-    throw Errors.forbidden('Staff accounts sign in on the web portal', 'STAFF_WEB_ONLY');
-  }
   if (byPhone && byPhone.id !== byTelegram?.id) {
     if (byPhone.role !== UserRole.PLAYER) {
       throw Errors.conflict('That phone number belongs to a staff account', 'PHONE_TAKEN');
@@ -242,7 +239,7 @@ export async function linkTelegram(userId: string, profile: TelegramInitUser): P
   const owner = await prisma.user.findUnique({ where: { telegramId }, select: { id: true } });
   if (owner && owner.id !== userId) {
     throw Errors.conflict(
-      'This Telegram account is already linked to another player',
+      'This Telegram account is already linked to another user',
       'TELEGRAM_ALREADY_LINKED',
     );
   }

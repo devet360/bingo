@@ -92,6 +92,28 @@ BEGIN
          AND "withdrawalCommissionBps" BETWEEN 0 AND 10000);
   END IF;
 
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'AgentProfile_auto_deposit_limit') THEN
+    ALTER TABLE "AgentProfile" ADD CONSTRAINT "AgentProfile_auto_deposit_limit"
+      CHECK ("autoDepositThreshold" IS NULL OR "autoDepositThreshold" > 0);
+  END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'AgentProfile_auto_deposit_requires_limit') THEN
+    ALTER TABLE "AgentProfile" ADD CONSTRAINT "AgentProfile_auto_deposit_requires_limit"
+      CHECK (NOT "autoDepositEnabled" OR "autoDepositThreshold" IS NOT NULL);
+  END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'DepositProvider_amount_range') THEN
+    ALTER TABLE "DepositProvider" ADD CONSTRAINT "DepositProvider_amount_range"
+      CHECK (("minAmount" IS NULL OR "minAmount" > 0)
+         AND ("maxAmount" IS NULL OR "maxAmount" > 0)
+         AND ("minAmount" IS NULL OR "maxAmount" IS NULL OR "minAmount" <= "maxAmount"));
+  END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ReceiptVerification_attempts_range') THEN
+    ALTER TABLE "ReceiptVerification" ADD CONSTRAINT "ReceiptVerification_attempts_range"
+      CHECK ("attempts" >= 0);
+  END IF;
+
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'CommissionRule_bps_range') THEN
     ALTER TABLE "CommissionRule" ADD CONSTRAINT "CommissionRule_bps_range"
       CHECK ("depositBps" BETWEEN 0 AND 10000 AND "withdrawalBps" BETWEEN 0 AND 10000);
@@ -156,6 +178,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS "WithdrawalRequest_one_open_per_player"
 CREATE UNIQUE INDEX IF NOT EXISTS "DepositRequest_open_code_unique"
   ON "DepositRequest" ("code")
   WHERE "status" IN ('PENDING', 'PROCESSING');
+
+-- A bank receipt can move money once. ReceiptVerification's unique key already
+-- serialises attempts; this is the belt-and-braces constraint on the money row.
+CREATE UNIQUE INDEX IF NOT EXISTS "DepositRequest_credited_receipt_unique"
+  ON "DepositRequest" ("providerCode", "receiptReference")
+  WHERE "receiptReference" IS NOT NULL AND "status" = 'CREDITED';
 
 CREATE UNIQUE INDEX IF NOT EXISTS "WithdrawalRequest_open_payout_code_unique"
   ON "WithdrawalRequest" ("payoutCode")

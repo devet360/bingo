@@ -116,6 +116,8 @@ export function serializeAgent(
     completedWithdrawals: agent.completedWithdrawals,
     depositCommissionBps: agent.depositCommissionBps,
     withdrawalCommissionBps: agent.withdrawalCommissionBps,
+    autoDepositEnabled: agent.autoDepositEnabled,
+    autoDepositThreshold: minorToWire(agent.autoDepositThreshold),
     paymentAccounts: agent.paymentAccounts?.map(serializePaymentAccount),
     ...(options.includeBalances
       ? {
@@ -140,6 +142,14 @@ export function serializeDeposit(deposit: DepositRequest) {
     creditedAmount: minorToWire(deposit.creditedAmount),
     agentProfileId: deposit.agentProfileId,
     paymentAccountId: deposit.paymentAccountId,
+    providerCode: deposit.providerCode,
+    receiptReference: deposit.receiptReference,
+    receiptAccount: deposit.receiptAccount,
+    verificationStatus: deposit.verificationStatus,
+    verificationMessage: deposit.verificationMessage,
+    verificationSource: deposit.verificationSource,
+    autoVerified: deposit.autoVerified,
+    verifiedAt: deposit.verifiedAt,
     externalRef: deposit.externalRef,
     receiptUrl: deposit.receiptUrl,
     playerNote: deposit.playerNote,

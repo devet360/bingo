@@ -1,6 +1,7 @@
 'use client';
 
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useState } from 'react';
 import { fetchRooms } from '@/lib/api';
 import { formatCredits, formatCountdown, formatStake } from '@/lib/format';
@@ -100,9 +101,18 @@ function RoomCard({ entry, now }: { entry: LobbyRoom; now: number }) {
 export default function LobbyPage() {
   const { user, wallet } = useSession();
   const { t } = useI18n();
+  const router = useRouter();
   const [rooms, setRooms] = useState<LobbyRoom[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const now = useNow();
+
+  // Staff arrive through the same Mini App; send them to their console.
+  const staffHome =
+    user?.role === 'SUPER_ADMIN' ? '/admin' : user?.role === 'SUPPORT' ? '/support' : null;
+
+  useEffect(() => {
+    if (staffHome) router.replace(staffHome);
+  }, [staffHome, router]);
 
   const load = useCallback(async () => {
     try {
@@ -115,10 +125,19 @@ export default function LobbyPage() {
   }, []);
 
   useEffect(() => {
+    if (staffHome) return;
     void load();
     const timer = setInterval(() => void load(), 5_000);
     return () => clearInterval(timer);
-  }, [load]);
+  }, [load, staffHome]);
+
+  if (staffHome) {
+    return (
+      <div className="flex justify-center py-14">
+        <Spinner className="h-6 w-6 text-mint" />
+      </div>
+    );
+  }
 
   const sorted = rooms
     ? [...rooms].sort((a, b) => Number(a.room.stakePerCard) - Number(b.room.stakePerCard))

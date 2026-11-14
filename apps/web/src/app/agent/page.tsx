@@ -22,6 +22,7 @@ import {
   formatDateTime,
 } from '@/lib/format';
 import { useSession } from '@/components/session';
+import { AgentSettings } from '@/components/agent/settings';
 import {
   Button,
   EmptyState,
@@ -41,7 +42,7 @@ import type {
   Withdrawal,
 } from '@/lib/types';
 
-type Tab = 'deposits' | 'withdrawals' | 'earnings';
+type Tab = 'deposits' | 'withdrawals' | 'earnings' | 'settings';
 
 const STATUS_TONE: Record<string, 'mint' | 'gold' | 'warn' | 'danger' | 'neutral'> = {
   PENDING: 'warn',
@@ -352,6 +353,7 @@ export default function AgentPage() {
           { value: 'deposits', label: 'Deposits', badge: openDeposits.length || undefined },
           { value: 'withdrawals', label: 'Payouts', badge: openWithdrawals.length || undefined },
           { value: 'earnings', label: 'Earnings' },
+          { value: 'settings', label: 'Settings' },
         ]}
       />
 
@@ -386,6 +388,19 @@ export default function AgentPage() {
                         <Pill tone={STATUS_TONE[deposit.status] ?? 'neutral'}>
                           {deposit.status.toLowerCase()}
                         </Pill>
+                        {deposit.verificationStatus !== 'NOT_REQUIRED' ? (
+                          <Pill
+                            tone={
+                              deposit.verificationStatus === 'VERIFIED'
+                                ? 'mint'
+                                : deposit.verificationStatus === 'FAILED'
+                                  ? 'danger'
+                                  : 'gold'
+                            }
+                          >
+                            receipt {deposit.verificationStatus.toLowerCase()}
+                          </Pill>
+                        ) : null}
                         {unassigned ? <Pill tone="blue">unclaimed</Pill> : mine ? <Pill tone="mint">yours</Pill> : null}
                       </div>
                     </div>
@@ -568,6 +583,8 @@ export default function AgentPage() {
         </div>
       ) : null}
 
+      {tab === 'settings' ? <AgentSettings /> : null}
+
       <Sheet open={creditTarget !== null} title="Credit deposit" onClose={() => setCreditTarget(null)}>
         {creditTarget ? (
           <div className="space-y-3">
@@ -575,6 +592,12 @@ export default function AgentPage() {
               Code <span className="font-bold tracking-widest text-text">{creditTarget.code}</span> ·
               requested {formatCredits(creditTarget.amount)} credits
             </p>
+            {creditTarget.verificationStatus !== 'NOT_REQUIRED' ? (
+              <p className="text-[11px] text-muted">
+                Receipt check: {creditTarget.verificationStatus.toLowerCase()}
+                {creditTarget.verificationMessage ? ` — ${creditTarget.verificationMessage}` : ''}
+              </p>
+            ) : null}
             <Input
               label="Credited amount (credits)"
               inputMode="decimal"

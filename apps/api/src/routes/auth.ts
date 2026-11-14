@@ -92,9 +92,8 @@ authRouter.post(
       env.TELEGRAM_LOGIN_MAX_AGE_SECS,
     );
     const user = await findOrCreateTelegramUser(verified.user, body.startParam ?? verified.startParam);
-    if (isStaffRole(user.role)) {
-      throw Errors.forbidden('Staff accounts use the web portal', 'STAFF_WEB_ONLY');
-    }
+    // Staff and agents reach their dashboards through the same Mini App; the
+    // account keeps its role, so the app routes by role after sign-in.
     const tokens = await issueSession(user, sessionMeta(req, 'TELEGRAM_MINI_APP'));
     res.json({ data: { ...tokenPayload(tokens), user: serializeUser(user) } });
   }),

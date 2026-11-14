@@ -12,7 +12,8 @@ const WITHDRAWAL_TTL_MS = 60 * 60_000;
 
 export interface CreateWithdrawalInput {
   playerId: string;
-  agentProfileId: string;
+  /** Optional legacy assignment; players normally leave this to the server. */
+  agentProfileId?: string;
   paymentAccountId?: string;
   method: PaymentMethod;
   amount: bigint;
@@ -21,15 +22,17 @@ export interface CreateWithdrawalInput {
 }
 
 export async function createWithdrawal(input: CreateWithdrawalInput) {
-  const agent = await prisma.agentProfile.findUnique({
-    where: { id: input.agentProfileId },
-    select: { id: true, status: true, agentCode: true },
-  });
-  if (!agent) throw Errors.notFound('Agent');
-  if (agent.status !== 'ACTIVE') {
+  const agent = input.agentProfileId
+    ? await prisma.agentProfile.findUnique({
+        where: { id: input.agentProfileId },
+        select: { id: true, status: true, agentCode: true },
+      })
+    : null;
+  if (input.agentProfileId && !agent) throw Errors.notFound('Agent');
+  if (agent && agent.status !== 'ACTIVE') {
     throw Errors.conflict('Agent is not processing payouts right now', 'AGENT_INACTIVE');
   }
-  if (input.paymentAccountId) {
+  if (input.paymentAccountId && agent) {
     const owned = await prisma.agentPaymentAccount.findFirst({
       where: { id: input.paymentAccountId, agentProfileId: agent.id, isActive: true },
       select: { id: true },
@@ -71,7 +74,7 @@ export async function createWithdrawal(input: CreateWithdrawalInput) {
             payoutCode: numericCode(6),
             idempotencyKey: input.idempotencyKey,
             playerId: input.playerId,
-            agentProfileId: agent.id,
+            agentProfileId: agent?.id ?? null,
             paymentAccountId: input.paymentAccountId,
             method: input.method,
             amount: input.amount,
@@ -87,7 +90,9 @@ export async function createWithdrawal(input: CreateWithdrawalInput) {
           kind: 'WITHDRAWAL_ESCROW',
           refType: 'WithdrawalRequest',
           refId: withdrawal.id,
-          memo: `Withdrawal escrow via agent ${agent.agentCode}`,
+          memo: agent
+            ? `Withdrawal escrow via agent ${agent.agentCode}`
+            : 'Withdrawal escrow (agent assigned at payout)',
           instructions: [
             { ownerKind: 'USER', ownerId: input.playerId, code: 'AVAILABLE', delta: -input.amount },
             { ownerKind: 'USER', ownerId: input.playerId, code: 'ESCROW', delta: input.amount },
@@ -210,7 +215,7 @@ export async function redeemWithdrawal(params: {
     throw Errors.gone(`Withdrawal is ${latest.status.toLowerCase()}`, 'WITHDRAWAL_NOT_OPEN');
   }
 
-  if (live.agentProfileId !== agent.id) {
+  if (live.agentProfileId && live.agentProfileId !== agent.id) {
     throw Errors.forbidden('This payout belongs to another agent', 'WITHDRAWAL_ASSIGNED');
   }
   if (live.expiresAt <= new Date()) {
@@ -284,6 +289,7 @@ export async function redeemWithdrawal(params: {
         where: { id: current.id },
         data: {
           status: 'SETTLED',
+          agentProfileId: agent.id,
           processedById: agent.userId,
           settledAt: new Date(),
           agentNote: params.note,
@@ -332,8 +338,14 @@ export async function listPlayerWithdrawals(playerId: string, status?: Withdrawa
 }
 
 export async function listAgentWithdrawals(agentProfileId: string, status?: WithdrawalStatus) {
+  // Unassigned escrows are visible to every active agent: whoever hands over
+  // the cash claims the payout by redeeming its code.
+  const effective = status ?? 'ESCROWED';
   return prisma.withdrawalRequest.findMany({
-    where: { agentProfileId, ...(status ? { status } : { status: 'ESCROWED' }) },
+    where: {
+      OR: [{ agentProfileId }, { agentProfileId: null, status: 'ESCROWED' }],
+      status: effective,
+    },
     orderBy: { createdAt: 'asc' },
     take: 100,
   });

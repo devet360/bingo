@@ -17,7 +17,7 @@ Error: `{ "error": { "code": "MACHINE_CODE", "message": "human text", "details"?
 | --- | --- |
 | 400 | `VALIDATION_ERROR`, `IDEMPOTENCY_KEY_REQUIRED`, `OTP_INVALID`, `INVALID_CREDITED_AMOUNT` |
 | 401 | `UNAUTHORIZED`, `TELEGRAM_INIT_DATA_INVALID`, `TELEGRAM_INIT_DATA_EXPIRED`, `SESSION_EXPIRED`, `REFRESH_TOKEN_REUSED` |
-| 403 | `ROLE_FORBIDDEN`, `AGENT_REQUIRED`, `AGENT_INACTIVE`, `DEPOSIT_ASSIGNED`, `WITHDRAWAL_ASSIGNED`, `REGISTRATION_DISABLED`, `PLAYER_WEB_LOGIN_DISABLED`, `STAFF_WEB_ONLY`, `PHONE_VERIFICATION_REQUIRED`, `ACCOUNT_INACTIVE` |
+| 403 | `ROLE_FORBIDDEN`, `AGENT_REQUIRED`, `AGENT_INACTIVE`, `DEPOSIT_ASSIGNED`, `WITHDRAWAL_ASSIGNED`, `REGISTRATION_DISABLED`, `PLAYER_WEB_LOGIN_DISABLED`, `PHONE_VERIFICATION_REQUIRED`, `ACCOUNT_INACTIVE` |
 | 404 | `NOT_FOUND` |
 | 409 | `INSUFFICIENT_FUNDS`, `DEPOSIT_ALREADY_CREDITED`, `WITHDRAWAL_OPEN`, `PHONE_TAKEN`, `EMAIL_TAKEN`, `TELEGRAM_ALREADY_LINKED`, `CONCURRENT_UPDATE`, `LAST_SUPER_ADMIN` |
 | 410 | `DEPOSIT_EXPIRED`, `WITHDRAWAL_EXPIRED`, `WITHDRAWAL_NOT_OPEN` |
@@ -38,7 +38,7 @@ session.
 
 | Method | Path | Body | Notes |
 | --- | --- | --- | --- |
-| POST | `/auth/telegram` | `{ initData, startParam? }` | Players only. Verifies HMAC with `BOT_TOKEN`, enforces `auth_date` freshness; staff are rejected with `STAFF_WEB_ONLY` |
+| POST | `/auth/telegram` | `{ initData, startParam? }` | Players and linked staff. Verifies HMAC with `BOT_TOKEN`, enforces `auth_date` freshness; the returned `user.role` routes the Mini App to the player, agent, support or admin surface |
 | POST | `/auth/register` | — | Disabled for everyone: `403 REGISTRATION_DISABLED`. Players are created by the bot; staff by a super admin |
 | POST | `/auth/login` | `{ identifier, password }` | Staff only (`AGENT`/`SUPPORT`/`SUPER_ADMIN`); players get `PLAYER_WEB_LOGIN_DISABLED` |
 | POST | `/auth/otp/request` | `{ identifier, channel?, purpose? }` | Login aid for an existing staff account. Always returns `sent: true`; `devCode` only outside production |
@@ -77,7 +77,13 @@ so the contact share is the only way to satisfy this gate.
 **Staff onboarding.** A super admin creates `AGENT`, `SUPPORT` or `SUPER_ADMIN`
 accounts from `/admin/staff` (or the first one with `npm run admin:create`). The
 temporary password sets `mustChangePassword: true`; `/auth/me` exposes it so the web
-shell forces `POST /auth/password` before anything else. Staff never use Telegram login.
+shell forces `POST /auth/password` before anything else.
+
+**Staff in the Mini App.** A super admin attaches a Telegram id with
+`PATCH /admin/staff/:userId/telegram`, or mints a one-time deep link with
+`POST /admin/staff/:userId/telegram-link` so the staff member links their own id via
+`/start staff_<token>`. Once linked, `/auth/telegram` returns the staff role and the
+Mini App opens the matching dashboard. The password login still works on the web.
 
 **Account linking.** An authenticated account can attach a Telegram identity or a phone
 (`/auth/link/telegram`, `/auth/link/phone`); both identities resolve to the same `User`
@@ -91,10 +97,12 @@ row, so the wallet and game history are shared.
 | --- | --- | --- | --- |
 | GET | `/wallet` | — | `available`, `escrow`, `locked`, lifetime counters |
 | GET | `/wallet/transactions` | `?limit=50` | Journal lines for this user's accounts |
-| POST | `/wallet/deposits` | `{ amount, method, agentProfileId? , agentCode?, paymentAccountId?, externalRef?, receiptUrl?, playerNote? }` | Returns a 6-digit `code`, expires in 30m |
+| GET | `/wallet/deposit-providers` | `?method=` | Enabled rails with receipt prompts; `clientSide` rails geo-block the API |
+| POST | `/wallet/deposits` | `{ amount, method, providerCode?, playerNote? }` | The **server assigns the receiving agent** and returns `code`, `agent`, `paymentAccount` (30m TTL). `409 AGENT_UNAVAILABLE` when no agent accepts the method |
 | GET | `/wallet/deposits` | `?status=PENDING` | |
-| GET | `/wallet/deposits/:id` | — | |
-| POST | `/wallet/withdrawals` | `{ amount, method, agentProfileId, paymentAccountId?, playerNote? }` | Locks funds in escrow immediately, returns `payoutCode`, expires in 60m |
+| GET | `/wallet/deposits/:id` | — | Includes the assigned agent + payment account |
+| POST | `/wallet/deposits/:code/verify-receipt` | `{ receiptReference?, receiptAccount?, receiptPhone?, proofBase64?, proofContentType?, contentType?, bodyBase64? }` | "I have paid": saves the reference/proof, then verifies; see **Deposit receipts** below |
+| POST | `/wallet/withdrawals` | `{ amount, method, playerNote? }` | Locks funds in escrow immediately, returns `payoutCode` (60m). No agent selection; any active agent may redeem |
 | GET | `/wallet/withdrawals` | `?status=ESCROWED` | |
 | POST | `/wallet/withdrawals/:id/cancel` | — | Refunds escrow; only while `ESCROWED` |
 
@@ -103,12 +111,60 @@ Only one `ESCROWED` withdrawal per player is allowed (partial unique index).
 ```http
 POST /wallet/deposits
 Idempotency-Key: 6f1a2c90-player-app
-{ "amount": 500000, "method": "MOBILE_MONEY", "agentCode": "AG7KQ2M9" }
+{ "amount": 500000, "method": "MOBILE_MONEY", "providerCode": "telebirr" }
 
 201
 { "data": { "id": "...", "code": "483921", "status": "PENDING", "amount": "500000",
+            "agent": { "agentCode": "AG7KQ2M9", "displayName": "Abebe K.", "isOnline": true, ... },
+            "paymentAccount": { "accountName": "Abebe K.", "accountNumber": "0911223344", ... },
             "expiresAt": "2026-11-14T09:30:00.000Z", ... }, "replayed": false }
 ```
+
+### Deposit receipts and automation
+
+Every enabled rail in `GET /wallet/deposit-providers` declares what the payer must supply
+(`refHint`, `refPattern`, `accountDigits`, `requiresPhone`). The **server** assigns an
+active agent with a matching receiving account — online, automation-capable and
+higher-rated agents first — and returns that agent plus the exact account in the deposit
+payload. The player never picks an agent.
+
+The player flow is two-step:
+
+1. `POST /wallet/deposits` with the rail and amount; the app shows the agent name, the
+   account to pay, and the receipt inputs.
+2. After paying, the app calls `POST /wallet/deposits/:code/verify-receipt` with the
+   reference (and optionally a proof screenshot). Manual rails and screenshots without a
+   fetchable receipt park the deposit in `MANUAL` for the agent.
+
+Two verification paths exist for supported rails:
+
+- **Server-side** (`clientSide: false`): the API fetches the bank page itself after the
+  reference is submitted, and the player app can poll `GET /wallet/deposits/:id`.
+- **Client-side** (`clientSide: true`, e.g. Telebirr, M-Pesa): the bank blocks foreign
+  IPs, so `verify-receipt` answers `needsClientFetch: true` with a `clientReceiptUrl`.
+  The Mini App fetches that URL (an Ethiopian phone does resolve it), then posts the raw
+  response back as `{ receiptReference, contentType, bodyBase64 }`.
+
+The payload from the phone is **untrusted**. The server re-parses it against the
+code-owned parser, ignores any amount/status the client might claim, stores one
+`ReceiptVerification` row per deposit (`@@unique([providerCode, reference])` rejects
+reused receipts), and only then decides on crediting.
+
+Auto-credit requires **all** of the following, in one transaction with row locks:
+
+1. The deposit has an assigned agent who is `ACTIVE`.
+2. That agent has `autoDepositEnabled: true` and
+   `autoDepositThreshold >= deposit.amount`.
+3. The rail is `enabled` and `supported`; the receipt gate returned `VERIFIED`.
+4. The parsed receipt amount equals the requested amount exactly.
+5. The receipt receiver matches the agent's receiving account.
+6. The reference has not been credited before (partial unique index on
+   `DepositRequest`).
+
+Anything short of that leaves the deposit in `PENDING`/`PROCESSING` for the agent to
+confirm manually with `POST /agent/deposits/:code/credit`. Each attempt is audited with
+its `verificationSource` (`SERVER`, `CLIENT`, `RELAY`) and is visible to staff in
+`GET /support/receipts`.
 
 ---
 
@@ -128,6 +184,11 @@ Commission rates are **not** exposed on public agent profiles.
 | Method | Path | Body | Effect |
 | --- | --- | --- | --- |
 | GET | `/agent/me` | — | Profile with float/commission balances + own wallet |
+| PATCH | `/agent/me` | `{ autoDepositEnabled?, autoDepositThreshold? }` | Enables automation and the per-deposit cap (minor units) |
+| GET | `/agent/payment-accounts` | — | Receiving accounts shown to players, active and inactive |
+| POST | `/agent/payment-accounts` | `{ method, provider?, accountName, accountNumber, instructions?, minAmount?, maxAmount? }` | |
+| PATCH | `/agent/payment-accounts/:id` | any create field + `isActive` | |
+| DELETE | `/agent/payment-accounts/:id` | — | Soft delete (`isActive: false`) |
 | POST | `/agent/presence` | `{ isOnline }` | Availability for the player agent list |
 | GET | `/agent/deposits` | `?status=` | Default: this agent's open work + unassigned `PENDING` |
 | POST | `/agent/deposits/:code/claim` | — | Moves `PENDING → PROCESSING`, assigns to caller |
@@ -171,6 +232,7 @@ client opts into the full envelope for these.
 | GET | `/support/withdrawals` | `?status=&userId=&page=` | |
 | POST | `/support/withdrawals/:withdrawalId/cancel` | — | Only `ESCROWED`; returns the locked funds to the player |
 | GET | `/support/agents` | `?status=` | Float, escrow and commission summary |
+| GET | `/support/receipts` | `?status=&providerCode=&page=` | Receipt verification audit: parsed amount, sender/receiver, attempts, source (`SERVER`/`CLIENT`/`RELAY`) |
 
 ## SuperAdmin (`SUPER_ADMIN`)
 
@@ -181,11 +243,15 @@ client opts into the full envelope for these.
 | POST | `/admin/staff` | `{ role, displayName, email?, phone?, password?, agent? }` | `agent` (`{ region, city?, district? }`) is required for `AGENT`; returns the temporary password when generated |
 | PATCH | `/admin/staff/:userId/status` | `{ status: "ACTIVE" \| "SUSPENDED" }` | Cannot suspend yourself or the last active super admin (`LAST_SUPER_ADMIN`) |
 | POST | `/admin/staff/:userId/reset-password` | `{ password? }` | Forces `mustChangePassword` on next login |
+| PATCH | `/admin/staff/:userId/telegram` | `{ telegramId: "123456789" \| null }` | Links or unlinks the staff Telegram id (Mini App access) |
+| POST | `/admin/staff/:userId/telegram-link` | — | Returns `{ token, expiresAt, url }`; the staff member opens the bot link to attach their own id |
 | GET | `/admin/audit` | `?action=&actorId=&entityType=&page=` | Before/after JSON for every privileged mutation |
 | POST | `/admin/agents` | `{ userId \| telegramId, region, city?, district? }` | Promotes a user, provisions float accounts |
 | GET | `/admin/agents` | `?status=` | |
-| PATCH | `/admin/agents/:agentId` | `{ status?, tier? }` | |
+| PATCH | `/admin/agents/:agentId` | `{ status?, tier?, autoDepositEnabled?, autoDepositThreshold? }` | |
 | POST | `/admin/agents/:agentId/float` | `{ amount, method, externalRef?, proofUrl? }` | `Idempotency-Key` required; posts `SUSPENSE → FLOAT` |
+| GET | `/admin/deposit-providers` | — | Every rail, including disabled ones |
+| PATCH | `/admin/deposit-providers/:code` | `{ name?, enabled?, supported?, requiresPhone?, accountDigits?, opaqueReference?, clientSide?, sortOrder?, instructions?, refPattern?, refHint?, minAmount?, maxAmount? }` | Availability and payer prompts only — parsers and host allowlists stay in code |
 | GET | `/admin/reconciliation` | — | Reads `v_account_drift`; `healthy: true` when caches match the journal |
 
 ---

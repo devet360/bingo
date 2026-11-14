@@ -23,7 +23,7 @@ import {
   type AuthPayload,
   type Tokens,
 } from '@/lib/api';
-import { getTelegramInitData, initTelegram, isTelegramClient } from '@/lib/telegram';
+import { initTelegram, isTelegramClient, resolveTelegramInitData } from '@/lib/telegram';
 import type { Agent, User, Wallet } from '@/lib/types';
 
 const STORAGE_KEY = 'bingo.session.v1';
@@ -112,10 +112,9 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
   const bootstrap = useCallback(async () => {
     initTelegram();
-    const inTelegram = isTelegramClient();
-    setIsTelegram(inTelegram);
+    const initData = await resolveTelegramInitData();
+    setIsTelegram(Boolean(initData) || isTelegramClient());
 
-    const initData = getTelegramInitData();
     if (initData) {
       try {
         const auth = await telegramLogin(initData);

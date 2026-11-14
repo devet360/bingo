@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { AgentStatus, AgentTier, PaymentMethod, UserRole, UserStatus } from '@prisma/client';
 import { z } from 'zod';
+import { env } from '../config/env';
 import { parse } from '../lib/validate';
 import { asyncHandler } from '../lib/async';
 import { Errors } from '../lib/errors';
@@ -9,12 +10,19 @@ import { PHONE_RE } from '../lib/phone';
 import { serializeAgent, serializeUser } from '../lib/serializers';
 import { authenticate, requireRole } from '../middleware/auth';
 import { moneyLimiter } from '../middleware/rateLimit';
-import { createAgent, topUpAgentFloat } from '../services/agents';
+import { createAgent, topUpAgentFloat, updateAutoDepositSettings } from '../services/agents';
 import { writeAudit } from '../services/audit';
 import {
+  listAllProviders,
+  serializeProvider,
+  updateProvider,
+} from '../services/providers';
+import {
   createStaff,
+  createStaffTelegramLink,
   resetStaffPassword,
   setStaffStatus,
+  setStaffTelegram,
   STAFF_ROLES,
 } from '../services/staff';
 import { scopedIdempotencyKey } from '../services/wallet';
@@ -75,9 +83,21 @@ const StaffStatusSchema = z.object({
   status: z.enum(['ACTIVE', 'SUSPENDED']),
 });
 
+const StaffTelegramSchema = z.object({
+  telegramId: z.string().regex(/^\d{1,20}$/, 'Telegram id must be digits').nullable(),
+});
+
 const AgentPatchSchema = z.object({
   status: z.nativeEnum(AgentStatus).optional(),
   tier: z.nativeEnum(AgentTier).optional(),
+  autoDepositEnabled: z.boolean().optional(),
+  autoDepositThreshold: z
+    .number()
+    .int()
+    .positive()
+    .max(Number.MAX_SAFE_INTEGER)
+    .nullable()
+    .optional(),
 });
 
 const AuditQuery = z.object({
@@ -85,6 +105,23 @@ const AuditQuery = z.object({
   actorId: z.string().uuid().optional(),
   entityType: z.string().trim().max(64).optional(),
   page: z.coerce.number().int().min(0).max(2000).default(0),
+});
+
+/** Amounts are minor units; null clears the limit. Parser/endpoint host stay code-owned. */
+const ProviderPatchSchema = z.object({
+  name: z.string().trim().min(1).max(96).optional(),
+  enabled: z.boolean().optional(),
+  supported: z.boolean().optional(),
+  requiresPhone: z.boolean().optional(),
+  accountDigits: z.number().int().min(1).max(12).nullable().optional(),
+  opaqueReference: z.boolean().optional(),
+  clientSide: z.boolean().optional(),
+  sortOrder: z.number().int().min(0).max(10_000).optional(),
+  instructions: z.string().trim().max(1000).nullable().optional(),
+  refPattern: z.string().trim().max(300).nullable().optional(),
+  refHint: z.string().trim().max(200).nullable().optional(),
+  minAmount: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).nullable().optional(),
+  maxAmount: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).nullable().optional(),
 });
 
 const PAGE_SIZE = 50;
@@ -263,6 +300,50 @@ adminRouter.post(
   }),
 );
 
+adminRouter.patch(
+  '/staff/:userId/telegram',
+  asyncHandler(async (req, res) => {
+    const body = parse(StaffTelegramSchema, req.body);
+    const updated = await setStaffTelegram(req.params.userId, body.telegramId);
+    await writeAudit({
+      actorId: req.auth!.userId,
+      actorRole: req.auth!.role,
+      action: 'staff.telegram',
+      entityType: 'User',
+      entityId: updated.id,
+      after: { telegramId: updated.telegramId?.toString() ?? null },
+      ip: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
+    res.json({ data: { user: serializeUser(updated) } });
+  }),
+);
+
+adminRouter.post(
+  '/staff/:userId/telegram-link',
+  asyncHandler(async (req, res) => {
+    const { token, expiresAt } = await createStaffTelegramLink(req.params.userId);
+    await writeAudit({
+      actorId: req.auth!.userId,
+      actorRole: req.auth!.role,
+      action: 'staff.telegram_link',
+      entityType: 'User',
+      entityId: req.params.userId,
+      after: { expiresAt: expiresAt.toISOString() },
+      ip: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
+    const botUsername = env.TELEGRAM_BOT_USERNAME;
+    res.json({
+      data: {
+        token,
+        expiresAt,
+        url: botUsername ? `https://t.me/${botUsername}?start=staff_${token}` : null,
+      },
+    });
+  }),
+);
+
 adminRouter.get(
   '/audit',
   asyncHandler(async (req, res) => {
@@ -336,7 +417,10 @@ adminRouter.get(
     const query = parse(AgentListQuery, req.query);
     const agents = await prisma.agentProfile.findMany({
       where: query.status ? { status: query.status } : {},
-      include: { user: { select: { displayName: true, avatarUrl: true } } },
+      include: {
+        user: { select: { displayName: true, avatarUrl: true } },
+        paymentAccounts: { orderBy: { createdAt: 'asc' } },
+      },
       orderBy: { createdAt: 'desc' },
       take: 200,
     });
@@ -348,12 +432,32 @@ adminRouter.patch(
   '/agents/:agentId',
   asyncHandler(async (req, res) => {
     const body = parse(AgentPatchSchema, req.body);
-    if (!body.status && !body.tier) throw Errors.badRequest('Nothing to update');
+    if (
+      !body.status &&
+      !body.tier &&
+      body.autoDepositEnabled === undefined &&
+      body.autoDepositThreshold === undefined
+    ) {
+      throw Errors.badRequest('Nothing to update');
+    }
     const agent = await prisma.agentProfile.findUnique({
       where: { id: req.params.agentId },
       select: { id: true, status: true, tier: true },
     });
     if (!agent) throw Errors.notFound('Agent');
+
+    if (body.autoDepositEnabled !== undefined || body.autoDepositThreshold !== undefined) {
+      await updateAutoDepositSettings(agent.id, {
+        autoDepositEnabled: body.autoDepositEnabled,
+        autoDepositThreshold:
+          body.autoDepositThreshold === undefined
+            ? undefined
+            : body.autoDepositThreshold === null
+              ? null
+              : BigInt(body.autoDepositThreshold),
+      });
+    }
+
     const updated = await prisma.agentProfile.update({
       where: { id: agent.id },
       data: { ...(body.status ? { status: body.status } : {}), ...(body.tier ? { tier: body.tier } : {}) },
@@ -366,7 +470,12 @@ adminRouter.patch(
       entityType: 'AgentProfile',
       entityId: agent.id,
       before: { status: agent.status, tier: agent.tier },
-      after: { status: updated.status, tier: updated.tier },
+      after: {
+        status: updated.status,
+        tier: updated.tier,
+        autoDepositEnabled: updated.autoDepositEnabled,
+        autoDepositThreshold: updated.autoDepositThreshold?.toString() ?? null,
+      },
       ip: req.ip,
       userAgent: req.headers['user-agent'],
     });
@@ -408,6 +517,53 @@ adminRouter.post(
       },
       replayed,
     });
+  }),
+);
+
+adminRouter.get(
+  '/deposit-providers',
+  asyncHandler(async (_req, res) => {
+    const providers = await listAllProviders();
+    res.json({ data: providers.map(serializeProvider) });
+  }),
+);
+
+adminRouter.patch(
+  '/deposit-providers/:code',
+  asyncHandler(async (req, res) => {
+    const body = parse(ProviderPatchSchema, req.body);
+    const provider = await updateProvider(req.params.code, {
+      ...body,
+      minAmount:
+        body.minAmount === undefined
+          ? undefined
+          : body.minAmount === null
+            ? null
+            : BigInt(body.minAmount),
+      maxAmount:
+        body.maxAmount === undefined
+          ? undefined
+          : body.maxAmount === null
+            ? null
+            : BigInt(body.maxAmount),
+    });
+    await writeAudit({
+      actorId: req.auth!.userId,
+      actorRole: req.auth!.role,
+      action: 'provider.update',
+      entityType: 'DepositProvider',
+      entityId: provider.code,
+      after: {
+        enabled: provider.enabled,
+        supported: provider.supported,
+        clientSide: provider.clientSide,
+        minAmount: provider.minAmount?.toString() ?? null,
+        maxAmount: provider.maxAmount?.toString() ?? null,
+      },
+      ip: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
+    res.json({ data: serializeProvider(provider) });
   }),
 );
 

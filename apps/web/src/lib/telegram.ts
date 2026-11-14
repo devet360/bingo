@@ -51,6 +51,31 @@ export function isTelegramClient(): boolean {
   return Boolean(app && app.initData);
 }
 
+/**
+ * Telegram injects initData after the SDK script loads, which can trail the
+ * first React effect. Only wait when the page really looks like a Mini App so
+ * ordinary browser visitors are not held on the splash screen.
+ */
+function looksLikeTelegramClient(): boolean {
+  if (typeof window === 'undefined') return false;
+  if (/Telegram/i.test(navigator.userAgent)) return true;
+  if (/t\.me|telegram/i.test(document.referrer)) return true;
+  const hash = window.location.hash;
+  return hash.includes('tgWebAppData') || hash.includes('tgWebAppStartParam');
+}
+
+export async function resolveTelegramInitData(timeoutMs = 2_000): Promise<string> {
+  const immediate = getTelegramInitData();
+  if (immediate || !looksLikeTelegramClient()) return immediate;
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const next = getTelegramInitData();
+    if (next) return next;
+  }
+  return '';
+}
+
 /** Boots the Mini App chrome; safe to call outside Telegram. */
 export function initTelegram(): void {
   const app = getTelegramWebApp();

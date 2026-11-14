@@ -180,12 +180,22 @@ Repeat the migrate/constraints commands on every release that changes the schema
   shares their own contact once (`request_contact`) and the bot links the verified
   phone to their Telegram account. Purchases and withdrawals are blocked until
   `phoneVerifiedAt` is set. The Mini App signs in with Telegram `initData`.
-- **Staff — web only.** Agents, support and super admins sign in on the web app with
-  email/phone + password. They are rejected inside Telegram and cannot share a contact
-  to verify a player account.
+- **Staff — web or Telegram Mini App.** Agents, support and super admins sign in on the
+  web app with email/phone + password. A super admin can also attach a Telegram id in
+  **Admin → Staff** (or issue a one-time bot link), after which the same account opens
+  its agent/support/admin dashboard inside the Mini App.
 - First staff account comes from `admin:create` above. After that, a super admin uses
   **Admin → Staff** to provision AGENT/SUPPORT/SUPER_ADMIN accounts, reset passwords,
-  suspend accounts and top up agent float. Every action is written to the audit log.
+  suspend accounts, link Telegram ids and top up agent float. Every action is written to
+  the audit log.
+- **Deposit receipts.** The migration seeds the bank rails in `DepositProvider`
+  (Telebirr and M-Pesa are client-side because the banks block foreign IPs). A super
+  admin turns rails on/off and edits prompts and limits in **Admin → Providers**; the
+  parsers and endpoint host allowlists are code-owned. Agents enable automation and set
+  a threshold in **Agent → Settings**, and register the receiving accounts players pay
+  into. Telebirr/M-Pesa receipts are fetched by the player's phone and verified by the
+  API; auto-credit only happens when the receipt matches the amount, the receiver and
+  the agent's threshold.
 - Support gets read-only views of users, ledger transactions, deposits, withdrawals
   and agents (plus cancel-open-deposit/withdrawal actions). The full console lives at
   `/admin`; support staff land on `/support`.
@@ -222,6 +232,7 @@ Common failures:
 
 | Symptom | Cause / fix |
 | --- | --- |
+| `Invalid environment configuration: { PORT: [...] }` on `worker`/`bot` | Dokku sets `PORT=0` for non-web processes; rebuild the API image (the env schema accepts `0`), then redeploy |
 | `MODULE_NOT_FOUND /app/apps/api/dist/index.js` on `bingo-web` | The web app inherited the API `Procfile`; run `dokku ps:set bingo-web procfile-path Procfile.web`, commit `Procfile.web`, and redeploy |
 | 502 from the proxy | Wrong `ports:set` mapping, or the process is not listening on `PORT`/4000. |
 | `P1001` on `/ready` | `DATABASE_URL` missing; link the Postgres service. |
@@ -232,7 +243,8 @@ Common failures:
 | Bot exits with `409` / `TelegramError: Conflict` | More than one `bot` process is polling; scale `bot=1`. |
 | Player sign-in shows no bot link | `TELEGRAM_BOT_USERNAME` missing on `bingo-web`; set it and restart. |
 | Buy/withdraw says phone required | Player has not shared contact with the bot yet; send them `https://t.me/<bot>?start=verify`. |
-| Staff cannot sign in from Telegram | Expected — staff must use a normal browser. |
+| Staff sees the player view in Telegram | The staff account has no Telegram id; link it from **Admin → Staff** (or send the one-time bot link). |
+| Deposit stays PENDING after the receipt | Auto mode off, amount above the agent threshold, receiver mismatch, or the rail is unsupported; check **Support → Receipts** for the message. |
 
 ## 11. Phase 6 (Flutter) impact
 

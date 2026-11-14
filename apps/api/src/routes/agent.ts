@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { DepositStatus, WithdrawalStatus } from '@prisma/client';
+import { DepositStatus, PaymentMethod, WithdrawalStatus } from '@prisma/client';
 import { z } from 'zod';
 import { parse } from '../lib/validate';
 import { asyncHandler } from '../lib/async';
@@ -8,6 +8,7 @@ import {
   serializeAgent,
   serializeCommission,
   serializeDeposit,
+  serializePaymentAccount,
   serializeWallet,
   serializeWithdrawal,
 } from '../lib/serializers';
@@ -19,11 +20,16 @@ import {
   rejectDeposit,
 } from '../services/deposits';
 import {
+  createPaymentAccount,
+  setAgentPresence,
+  updateAutoDepositSettings,
+  updatePaymentAccount,
+} from '../services/agents';
+import {
   listAgentWithdrawals,
   redeemWithdrawal,
 } from '../services/withdrawals';
 import { getPlayerWallet } from '../services/wallet';
-import { setAgentPresence } from '../services/agents';
 
 const CodeParams = z.object({ code: z.string().regex(/^\d{6}$/, 'Expected a 6-digit code') });
 
@@ -40,6 +46,37 @@ const RedeemSchema = z.object({
 });
 
 const PresenceSchema = z.object({ isOnline: z.boolean() });
+
+const AutoDepositSchema = z
+  .object({
+    autoDepositEnabled: z.boolean().optional(),
+    autoDepositThreshold: z
+      .number()
+      .int()
+      .positive()
+      .max(Number.MAX_SAFE_INTEGER)
+      .nullable()
+      .optional(),
+  })
+  .refine((value) => value.autoDepositEnabled !== undefined || value.autoDepositThreshold !== undefined, {
+    message: 'Nothing to update',
+  });
+
+const PaymentAccountSchema = z.object({
+  method: z.nativeEnum(PaymentMethod),
+  provider: z.string().trim().max(64).nullable().optional(),
+  accountName: z.string().trim().min(1).max(128),
+  accountNumber: z.string().trim().min(1).max(64),
+  instructions: z.string().trim().max(500).nullable().optional(),
+  minAmount: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).nullable().optional(),
+  maxAmount: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).nullable().optional(),
+});
+
+const PaymentAccountPatchSchema = PaymentAccountSchema.partial().extend({
+  isActive: z.boolean().optional(),
+});
+
+const AccountParams = z.object({ id: z.string().uuid() });
 
 const DepositQueueQuery = z.object({ status: z.nativeEnum(DepositStatus).optional() });
 const WithdrawalQueueQuery = z.object({ status: z.nativeEnum(WithdrawalStatus).optional() });
@@ -59,6 +96,91 @@ agentRouter.get(
         wallet: serializeWallet(wallet),
       },
     });
+  }),
+);
+
+agentRouter.patch(
+  '/me',
+  asyncHandler(async (req, res) => {
+    const body = parse(AutoDepositSchema, req.body);
+    const agent = await updateAutoDepositSettings(req.agent!.id, {
+      autoDepositEnabled: body.autoDepositEnabled,
+      autoDepositThreshold:
+        body.autoDepositThreshold === undefined
+          ? undefined
+          : body.autoDepositThreshold === null
+            ? null
+            : BigInt(body.autoDepositThreshold),
+    });
+    res.json({ data: serializeAgent(agent, { includeBalances: true }) });
+  }),
+);
+
+agentRouter.get(
+  '/payment-accounts',
+  asyncHandler(async (req, res) => {
+    const accounts = await prisma.agentPaymentAccount.findMany({
+      where: { agentProfileId: req.agent!.id },
+      orderBy: { createdAt: 'asc' },
+    });
+    res.json({
+      data: accounts.map((account) => ({ ...serializePaymentAccount(account), isActive: account.isActive })),
+    });
+  }),
+);
+
+agentRouter.post(
+  '/payment-accounts',
+  asyncHandler(async (req, res) => {
+    const body = parse(PaymentAccountSchema, req.body);
+    const account = await createPaymentAccount(req.agent!.id, {
+      method: body.method,
+      provider: body.provider,
+      accountName: body.accountName,
+      accountNumber: body.accountNumber,
+      instructions: body.instructions,
+      minAmount: body.minAmount === undefined || body.minAmount === null ? body.minAmount : BigInt(body.minAmount),
+      maxAmount: body.maxAmount === undefined || body.maxAmount === null ? body.maxAmount : BigInt(body.maxAmount),
+    });
+    res.status(201).json({ data: { ...serializePaymentAccount(account), isActive: account.isActive } });
+  }),
+);
+
+agentRouter.patch(
+  '/payment-accounts/:id',
+  asyncHandler(async (req, res) => {
+    const params = parse(AccountParams, req.params);
+    const body = parse(PaymentAccountPatchSchema, req.body);
+    const account = await updatePaymentAccount(req.agent!.id, params.id, {
+      method: body.method,
+      provider: body.provider,
+      accountName: body.accountName,
+      accountNumber: body.accountNumber,
+      instructions: body.instructions,
+      isActive: body.isActive,
+      minAmount:
+        body.minAmount === undefined
+          ? undefined
+          : body.minAmount === null
+            ? null
+            : BigInt(body.minAmount),
+      maxAmount:
+        body.maxAmount === undefined
+          ? undefined
+          : body.maxAmount === null
+            ? null
+            : BigInt(body.maxAmount),
+    });
+    res.json({ data: { ...serializePaymentAccount(account), isActive: account.isActive } });
+  }),
+);
+
+agentRouter.delete(
+  '/payment-accounts/:id',
+  asyncHandler(async (req, res) => {
+    const params = parse(AccountParams, req.params);
+    const account = await updatePaymentAccount(req.agent!.id, params.id, { isActive: false });
+    res.json({ data: { ...serializePaymentAccount(account), isActive: account.isActive } });
   }),
 );
 

@@ -8,12 +8,15 @@ import type {
   Commission,
   CreatedStaff,
   Deposit,
+  DepositProvider,
   DepositStatus,
   FloatRequest,
   LedgerView,
   LobbyRoom,
   Paginated,
+  PaymentAccount,
   PaymentMethod,
+  ReceiptVerificationView,
   Room,
   Role,
   Round,
@@ -27,6 +30,8 @@ import type {
   User,
   UserDetail,
   UserStatus,
+  VerificationStatus,
+  VerifyReceiptResult,
   Wallet,
   Withdrawal,
   WithdrawalStatus,
@@ -305,16 +310,48 @@ export function fetchDeposits(status?: DepositStatus): Promise<Deposit[]> {
   return apiRequest(`/wallet/deposits${status ? `?status=${status}` : ''}`);
 }
 
+export function fetchDepositProviders(method?: PaymentMethod): Promise<DepositProvider[]> {
+  return apiRequest(`/wallet/deposit-providers${method ? `?method=${method}` : ''}`);
+}
+
 export function createDeposit(input: {
   amount: number;
   method: PaymentMethod;
   agentProfileId?: string;
   agentCode?: string;
+  paymentAccountId?: string;
+  providerCode?: string;
+  receiptReference?: string;
+  receiptAccount?: string;
+  receiptPhone?: string;
   playerNote?: string;
   idempotencyKey: string;
 }): Promise<Deposit> {
   const { idempotencyKey, ...body } = input;
   return apiRequest('/wallet/deposits', { method: 'POST', body, idempotencyKey });
+}
+
+export function fetchDeposit(id: string): Promise<Deposit> {
+  return apiRequest(`/wallet/deposits/${id}`);
+}
+
+export function verifyDepositReceipt(
+  code: string,
+  payload?: {
+    contentType?: string;
+    bodyBase64?: string;
+    receiptReference?: string;
+    receiptAccount?: string;
+    receiptPhone?: string;
+    proofBase64?: string;
+    proofContentType?: string;
+  },
+): Promise<VerifyReceiptResult> {
+  return apiRequest(`/wallet/deposits/${encodeURIComponent(code)}/verify-receipt`, {
+    method: 'POST',
+    body: payload ?? {},
+    fullEnvelope: true,
+  });
 }
 
 export function fetchWithdrawals(status?: WithdrawalStatus): Promise<Withdrawal[]> {
@@ -324,7 +361,7 @@ export function fetchWithdrawals(status?: WithdrawalStatus): Promise<Withdrawal[
 export function createWithdrawal(input: {
   amount: number;
   method: PaymentMethod;
-  agentProfileId: string;
+  agentProfileId?: string;
   playerNote?: string;
   idempotencyKey: string;
 }): Promise<Withdrawal> {
@@ -344,6 +381,42 @@ export function fetchAgentProfile(): Promise<{ agent: Agent; wallet: Wallet }> {
 
 export function setAgentPresence(isOnline: boolean): Promise<Agent> {
   return apiRequest('/agent/presence', { method: 'POST', body: { isOnline } });
+}
+
+export function updateAgentSettings(input: {
+  autoDepositEnabled?: boolean;
+  autoDepositThreshold?: number | null;
+}): Promise<Agent> {
+  return apiRequest('/agent/me', { method: 'PATCH', body: input });
+}
+
+export interface PaymentAccountInput {
+  method: PaymentMethod;
+  provider?: string | null;
+  accountName: string;
+  accountNumber: string;
+  instructions?: string | null;
+  minAmount?: number | null;
+  maxAmount?: number | null;
+}
+
+export function fetchPaymentAccounts(): Promise<PaymentAccount[]> {
+  return apiRequest('/agent/payment-accounts');
+}
+
+export function createPaymentAccount(input: PaymentAccountInput): Promise<PaymentAccount> {
+  return apiRequest('/agent/payment-accounts', { method: 'POST', body: input });
+}
+
+export function updatePaymentAccount(
+  id: string,
+  patch: Partial<PaymentAccountInput> & { isActive?: boolean },
+): Promise<PaymentAccount> {
+  return apiRequest(`/agent/payment-accounts/${id}`, { method: 'PATCH', body: patch });
+}
+
+export function deactivatePaymentAccount(id: string): Promise<PaymentAccount> {
+  return apiRequest(`/agent/payment-accounts/${id}`, { method: 'DELETE' });
 }
 
 export function fetchAgentDeposits(status?: DepositStatus): Promise<Deposit[]> {
@@ -449,6 +522,47 @@ export function cancelWithdrawalByStaff(withdrawalId: string): Promise<Withdrawa
 
 export function cancelDepositByStaff(depositId: string): Promise<Deposit> {
   return apiRequest(`/support/deposits/${depositId}/cancel`, { method: 'POST' });
+}
+
+export function fetchStaffReceipts(
+  filter: { status?: VerificationStatus; providerCode?: string; page?: number } = {},
+): Promise<Paginated<ReceiptVerificationView>> {
+  return apiRequest(`/support/receipts${queryString(filter)}`, { fullEnvelope: true });
+}
+
+export function fetchDepositProvidersAdmin(): Promise<DepositProvider[]> {
+  return apiRequest('/admin/deposit-providers');
+}
+
+export interface DepositProviderPatch {
+  name?: string;
+  enabled?: boolean;
+  supported?: boolean;
+  requiresPhone?: boolean;
+  accountDigits?: number | null;
+  opaqueReference?: boolean;
+  clientSide?: boolean;
+  sortOrder?: number;
+  instructions?: string | null;
+  refPattern?: string | null;
+  refHint?: string | null;
+  minAmount?: number | null;
+  maxAmount?: number | null;
+  endpoint?: string | null;
+}
+
+export function updateDepositProvider(code: string, patch: DepositProviderPatch): Promise<DepositProvider> {
+  return apiRequest(`/admin/deposit-providers/${encodeURIComponent(code)}`, { method: 'PATCH', body: patch });
+}
+
+export function setStaffTelegram(userId: string, telegramId: string | null): Promise<{ user: User }> {
+  return apiRequest(`/admin/staff/${userId}/telegram`, { method: 'PATCH', body: { telegramId } });
+}
+
+export function createStaffTelegramLink(
+  userId: string,
+): Promise<{ token: string; expiresAt: string; url: string }> {
+  return apiRequest(`/admin/staff/${userId}/telegram-link`, { method: 'POST' });
 }
 
 export function fetchAdminOverview(): Promise<AdminOverview> {

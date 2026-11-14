@@ -108,11 +108,12 @@ the balanced journal, then refreshes the caches. Callers only mutate business st
   `https://t.me/<bot>?start=verify` and taps *Share contact*; the bot stores the phone
   on the Telegram user. `phoneVerifiedAt` gates card purchases and withdrawals. A
   Telegram login alone is not enough, and `initData` never carries the phone number.
-- **Staff — web only.** Agents, support and super admins sign in with email/phone and
-  password (`POST /auth/login`). Player accounts are rejected there
-  (`PLAYER_WEB_LOGIN_DISABLED`), and staff are rejected inside Telegram
-  (`STAFF_WEB_ONLY`). Accounts are provisioned by `npm run admin:create` or by a super
-  admin in **Admin → Staff**, and a temporary password forces a change on first sign-in.
+- **Staff — web or Telegram Mini App.** Agents, support and super admins sign in with
+  email/phone and password (`POST /auth/login`), or open their dashboard inside the Mini
+  App once a super admin links their Telegram id (**Admin → Staff**, by id or one-time
+  bot link). Player accounts are rejected by the password login
+  (`PLAYER_WEB_LOGIN_DISABLED`). Accounts are provisioned by `npm run admin:create` or by
+  a super admin, and a temporary password forces a change on first sign-in.
 - **OTP** — `POST /auth/otp/request` then `/auth/otp/verify` is a login aid for an
   existing staff account only; it never creates an account. 6 digits, hashed with
   `OTP_HASH_PEPPER`, 5 min TTL, 5 attempts, single-use.
@@ -128,11 +129,29 @@ contract, error code table and idempotency rules are in [docs/API.md](docs/API.m
 
 ## Money flows
 
-Agent float is pre-funded by a SuperAdmin (`PLATFORM.SUSPENSE` → `AGENT.FLOAT`). Deposits
-move float to the player and accrue a platform-funded commission; withdrawals lock the
-player's credits in escrow, and redeeming the payout code moves escrow to the agent's
-float (net) plus the fee to treasury. Details, sequences and the round state machine are
+Agent float is pre-funded by a SuperAdmin (`PLATFORM.SUSPENSE` → `AGENT.FLOAT`). The
+server assigns the receiving agent when a deposit is opened — players choose only the
+method and amount. Deposits move float to the player and accrue a platform-funded
+commission; withdrawals lock the player's credits in escrow, and any active agent can
+redeem the payout code, moving escrow to that agent's float (net) plus the fee to treasury. Details, sequences and the round state machine are
 in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+### Deposit receipts
+
+Deposit rails are `DepositProvider` rows seeded by the migration (Telebirr, M-Pesa, CBE,
+BOA, Dashen, Awash, Zemen, eBirr, …). Verifications are ported from
+[cheki](https://github.com/1RB/cheki): strict reference canonicalization, a static host
+allowlist per parser, size caps, manual redirects and retries only on network/5xx.
+Telebirr and M-Pesa block foreign IPs, so those rails are `clientSide`: the payer's phone
+fetches the bank page and posts the raw response back, and the API re-parses it before
+trusting anything.
+
+An agent can automate confirmation in **Agent → Settings** (`autoDepositEnabled` plus a
+threshold in minor units). A verified receipt auto-credits only when the receipt amount
+equals the deposit exactly, the receiver matches the agent's account, the reference is
+unused and the amount is within the threshold; otherwise the deposit stays for manual
+confirmation. Admin → Providers controls availability, limits and payer prompts — never
+the parser or its host allowlist. Support → Receipts shows every verification attempt.
 
 ## Bingo engine
 
@@ -165,12 +184,16 @@ needs the Redis adapter for broadcast fan-out.
 
 The Next.js app (`apps/web`) covers the lobby, a live table with 5×5 and 3×9 cards,
 card purchases, claim buttons, settlement/refund banners, deposits and payouts, the
-agent queue, and a browser-side provably-fair verifier at `/verify/<roundId>`. The
-staff console adds user lookup, ledger/deposit/withdrawal queues, agent float and
-commission management, staff provisioning, password resets and an audit log.
+agent queue, and a browser-side provably-fair verifier at `/verify/<roundId>`. Deposits
+select a bank rail, render the receipt fields the rail needs, and verify Telebirr/M-Pesa
+receipts from the phone in the background. The agent portal adds auto-deposit settings
+and receiving-account management. The staff console adds user lookup,
+ledger/deposit/withdrawal queues, agent float and commission management, staff
+provisioning, Telegram linking, receipt auditing, rail configuration, password resets and
+an audit log.
 
-Code compiles and 25 unit tests pass (RNG determinism, 75/90-ball card legality, every
-pattern, payout split). The stack has been exercised end to end against live PostgreSQL
+Code compiles and 36 unit tests pass (RNG determinism, 75/90-ball card legality, every
+pattern, payout split, receipt parsing). The stack has been exercised end to end against live PostgreSQL
 and Redis: migrations, constraint/trigger install, seed, a real two-player round
 (purchase → lock → draw → server-detected win → `ROUND_PAYOUT`), the provably-fair
 `/verify` recomputation (`matches: true`), BullMQ sweep jobs, and an empty

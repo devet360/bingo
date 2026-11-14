@@ -6,17 +6,20 @@ import {
   cancelWithdrawal,
   createDeposit,
   createWithdrawal,
-  fetchAgents,
+  fetchDeposit,
+  fetchDepositProviders,
   fetchDeposits,
   fetchTransactions,
   fetchWithdrawals,
   newIdempotencyKey,
+  verifyDepositReceipt,
 } from '@/lib/api';
 import {
   PAYMENT_METHODS,
   creditsToMinor,
   formatCredits,
   formatDateTime,
+  formatStake,
   minorToCreditsInput,
 } from '@/lib/format';
 import { useI18n } from '@/lib/i18n';
@@ -36,11 +39,12 @@ import {
   cn,
 } from '@/components/ui';
 import type {
-  Agent,
   Deposit,
+  DepositProvider,
   DepositStatus,
   PaymentMethod,
   TransactionLine,
+  VerificationStatus,
   Withdrawal,
   WithdrawalStatus,
 } from '@/lib/types';
@@ -58,8 +62,24 @@ const STATUS_TONE: Record<string, 'mint' | 'gold' | 'warn' | 'danger' | 'neutral
   CANCELLED: 'neutral',
 };
 
+const VERIFICATION_TONE: Record<VerificationStatus, 'mint' | 'gold' | 'warn' | 'danger' | 'neutral' | 'blue'> = {
+  NOT_REQUIRED: 'neutral',
+  PENDING: 'gold',
+  VERIFIED: 'mint',
+  FAILED: 'danger',
+  MANUAL: 'blue',
+};
+
 function StatusPill({ status }: { status: DepositStatus | WithdrawalStatus | string }) {
   return <Pill tone={STATUS_TONE[status] ?? 'neutral'}>{status.toLowerCase()}</Pill>;
+}
+
+function VerificationPill({ status }: { status: VerificationStatus }) {
+  return (
+    <Pill tone={VERIFICATION_TONE[status] ?? 'neutral'}>
+      {status.toLowerCase().replaceAll('_', ' ')}
+    </Pill>
+  );
 }
 
 function CodeBlock({
@@ -83,18 +103,64 @@ function CodeBlock({
   );
 }
 
+/** Chunked so a multi-megabyte receipt page does not blow the argument limit. */
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = '';
+  const chunk = 0x8000;
+  for (let index = 0; index < bytes.length; index += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(index, index + chunk));
+  }
+  return btoa(binary);
+}
+
+const MAX_RECEIPT_BYTES = 4_500_000;
+
+/** The bank receipt page, fetched by the payer's device because of geo-blocks. */
+async function fetchBankReceipt(url: string): Promise<{ contentType?: string; bodyBase64: string }> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 20_000);
+  try {
+    const response = await fetch(url, {
+      signal: controller.signal,
+      credentials: 'omit',
+      referrerPolicy: 'no-referrer',
+      cache: 'no-store',
+    });
+    if (!response.ok) throw new Error(`Bank responded ${response.status}`);
+    const body = await response.arrayBuffer();
+    if (body.byteLength > MAX_RECEIPT_BYTES) throw new Error('Receipt page is too large');
+    return {
+      contentType: response.headers.get('content-type') ?? undefined,
+      bodyBase64: bytesToBase64(new Uint8Array(body)),
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function DepositPanel({ onChanged }: { onChanged: () => void }) {
   const { refreshWallet, wallet } = useSession();
   const { t } = useI18n();
   const [amount, setAmount] = useState('');
-  const [method, setMethod] = useState<PaymentMethod>('MOBILE_MONEY');
-  const [agentCode, setAgentCode] = useState('');
+  const [providerCode, setProviderCode] = useState('');
+  const [reference, setReference] = useState('');
+  const [receiptAccount, setReceiptAccount] = useState('');
+  const [receiptPhone, setReceiptPhone] = useState('');
   const [note, setNote] = useState('');
+  const [proof, setProof] = useState<{ contentType: string; base64: string; name: string } | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [created, setCreated] = useState<Deposit | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [pending, setPending] = useState<Deposit[]>([]);
+  const [providers, setProviders] = useState<DepositProvider[]>([]);
+  const [verifying, setVerifying] = useState(false);
   const idempotency = useRef(newIdempotencyKey('dep'));
+
+  const provider = providers.find((item) => item.code === providerCode) ?? null;
+  const createdProvider = providers.find((item) => item.code === created?.providerCode) ?? null;
+  const account = created?.paymentAccount ?? null;
+  const open = Boolean(created && (created.status === 'PENDING' || created.status === 'PROCESSING'));
 
   const loadPending = useCallback(async () => {
     try {
@@ -107,7 +173,118 @@ function DepositPanel({ onChanged }: { onChanged: () => void }) {
 
   useEffect(() => {
     void loadPending();
+    fetchDepositProviders()
+      .then(setProviders)
+      .catch(() => undefined);
   }, [loadPending]);
+
+  const attachProof = async (file: File | null) => {
+    setProof(null);
+    setError(null);
+    if (!file) return;
+    if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type)) {
+      setError(t('wallet.proofType'));
+      return;
+    }
+    if (file.size > MAX_RECEIPT_BYTES) {
+      setError(t('wallet.proofTooLarge'));
+      return;
+    }
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    setProof({ contentType: file.type, base64: bytesToBase64(bytes), name: file.name });
+  };
+
+  /** "I have paid": submit the reference, try the bank page, fall back to proof. */
+  const markPaid = async () => {
+    if (!created) return;
+    if (!reference.trim()) {
+      setError(t('wallet.receiptReferenceRequired'));
+      return;
+    }
+    if (createdProvider?.accountDigits && receiptAccount.replace(/\D/g, '').length < createdProvider.accountDigits) {
+      setError(t('wallet.receiptAccount', { count: createdProvider.accountDigits }));
+      return;
+    }
+    if (createdProvider?.requiresPhone && !receiptPhone.trim()) {
+      setError(t('wallet.receiptPhone'));
+      return;
+    }
+    setVerifying(true);
+    setError(null);
+    setNotice(null);
+    const body = {
+      receiptReference: reference.trim(),
+      receiptAccount: receiptAccount.trim() || undefined,
+      receiptPhone: receiptPhone.trim() || undefined,
+    };
+    const proofBody = proof
+      ? { proofBase64: proof.base64, proofContentType: proof.contentType }
+      : {};
+    try {
+      let result = await verifyDepositReceipt(
+        created.code,
+        createdProvider?.clientSide ? body : { ...body, ...proofBody },
+      );
+      if (result.needsClientFetch && result.data.clientReceiptUrl) {
+        try {
+          const bank = await fetchBankReceipt(result.data.clientReceiptUrl);
+          result = await verifyDepositReceipt(created.code, { ...body, ...bank });
+        } catch {
+          if (!proof) throw new Error('BANK_FETCH_FAILED');
+          result = await verifyDepositReceipt(created.code, { ...body, ...proofBody });
+        }
+      }
+      setCreated(result.data);
+      setNotice(result.autoCredited ? t('wallet.depositCredited') : result.verification.message);
+      await Promise.all([loadPending(), onChanged()]);
+      void refreshWallet();
+    } catch (cause) {
+      if (cause instanceof ApiError) setError(cause.message);
+      else if (cause instanceof Error && cause.message === 'BANK_FETCH_FAILED') {
+        setError(t('wallet.bankFetchFailed'));
+      } else {
+        setError(t('wallet.bankFetchFailed'));
+      }
+    } finally {
+      setVerifying(false);
+    }
+  };
+
+  // Server-side rails are checked in the background; poll until the outcome lands.
+  useEffect(() => {
+    if (!created) return;
+    if (created.status !== 'PENDING' && created.status !== 'PROCESSING') return;
+    if (created.verificationStatus !== 'PENDING') return;
+    if (createdProvider?.clientSide) return;
+    let stopped = false;
+    let attempts = 0;
+    const depositId = created.id;
+    const timer = setInterval(() => {
+      attempts += 1;
+      void fetchDeposit(depositId)
+        .then((next) => {
+          if (stopped) return;
+          setCreated(next);
+          if (next.status === 'CREDITED') {
+            setNotice(t('wallet.depositCredited'));
+            void refreshWallet();
+            void loadPending();
+          } else if (next.verificationStatus !== 'PENDING') {
+            setNotice(next.verificationMessage ?? null);
+          }
+        })
+        .catch(() => undefined)
+        .finally(() => {
+          if (attempts >= 8) clearInterval(timer);
+        });
+    }, 2_500);
+    return () => {
+      stopped = true;
+      clearInterval(timer);
+    };
+    // Only the identity and outcome fields decide whether to keep polling.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [created?.id, created?.status, created?.verificationStatus, createdProvider?.clientSide]);
 
   const submit = async () => {
     const minor = creditsToMinor(amount);
@@ -115,20 +292,37 @@ function DepositPanel({ onChanged }: { onChanged: () => void }) {
       setError(t('wallet.invalidAmount'));
       return;
     }
+    if (!provider) {
+      setError(t('wallet.chooseMethod'));
+      return;
+    }
+    if (provider.minAmount && BigInt(minor) < BigInt(provider.minAmount)) {
+      setError(t('wallet.providerLimits', { min: formatStake(provider.minAmount), max: provider.maxAmount ? formatStake(provider.maxAmount) : '∞' }));
+      return;
+    }
+    if (provider.maxAmount && BigInt(minor) > BigInt(provider.maxAmount)) {
+      setError(t('wallet.providerLimits', { min: formatStake(provider.minAmount), max: formatStake(provider.maxAmount) }));
+      return;
+    }
     setBusy(true);
     setError(null);
+    setNotice(null);
     try {
       const deposit = await createDeposit({
         amount: minor,
-        method,
-        agentCode: agentCode.trim() || undefined,
+        method: provider.method,
+        providerCode: provider.code,
         playerNote: note.trim() || undefined,
         idempotencyKey: idempotency.current,
       });
       idempotency.current = newIdempotencyKey('dep');
       setCreated(deposit);
       setAmount('');
+      setReference('');
+      setReceiptAccount('');
+      setReceiptPhone('');
       setNote('');
+      setProof(null);
       await Promise.all([loadPending(), onChanged()]);
       void refreshWallet();
     } catch (cause) {
@@ -146,31 +340,160 @@ function DepositPanel({ onChanged }: { onChanged: () => void }) {
             <div>
               <h2 className="font-display text-base font-bold">{t('wallet.depositOpened')}</h2>
               <p className="text-[11px] text-muted">
-                {PAYMENT_METHODS.find((item) => item.value === created.method)?.label} ·{' '}
+                {PAYMENT_METHODS.find((item) => item.value === created.method)?.label}
+                {created.providerCode ? ` · ${createdProvider?.name ?? created.providerCode}` : ''} ·{' '}
                 {formatCredits(created.amount)} credits
               </p>
             </div>
-            <StatusPill status={created.status} />
+            <div className="flex flex-col items-end gap-1">
+              <StatusPill status={created.status} />
+              <VerificationPill status={created.verificationStatus} />
+            </div>
           </div>
-          <div className="mt-3">
-            <CodeBlock
-              label={t('wallet.depositCode')}
-              code={created.code}
-              hint={`${t('wallet.depositCodeHint')} ${t('wallet.depositExpires', { when: formatDateTime(created.expiresAt) })}`}
-            />
-          </div>
-          <p className="mt-2 text-[11px] text-muted">
-            {t('wallet.depositBalanceNote')}
-          </p>
+          {open && created.agent ? (
+            <div className="mt-3 rounded-xl border border-mint/30 bg-mint/5 p-3 text-[11px]">
+              <p className="text-[10px] font-semibold uppercase tracking-widest text-mint">
+                {t('wallet.paymentDetails')}
+              </p>
+              <p className="mt-1 font-semibold text-text">
+                {t('wallet.payAgent', {
+                  name: created.agent.displayName ?? created.agent.agentCode,
+                })}
+                {created.agent.isOnline ? ` · ${t('wallet.online')}` : ''}
+              </p>
+              <p className="text-muted">{created.agent.agentCode}</p>
+              {account ? (
+                <div className="mt-2 rounded-lg bg-ink/50 p-2.5">
+                  <p className="text-text">
+                    {account.accountName}
+                    {account.provider ? <span className="text-muted"> · {account.provider}</span> : null}
+                  </p>
+                  <div className="mt-0.5 flex items-center justify-between gap-2">
+                    <span className="font-mono text-sm tracking-wide text-gold">{account.accountNumber}</span>
+                    <CopyButton value={account.accountNumber} />
+                  </div>
+                  {account.instructions ? <p className="mt-1 text-muted">{account.instructions}</p> : null}
+                </div>
+              ) : null}
+              <p className="mt-2 text-muted">
+                {t('wallet.depositCodeHint')}{' '}
+                <span className="font-display font-bold tracking-[0.2em] text-text">{created.code}</span>
+              </p>
+            </div>
+          ) : (
+            <div className="mt-3">
+              <CodeBlock
+                label={t('wallet.depositCode')}
+                code={created.code}
+                hint={`${t('wallet.depositCodeHint')} ${t('wallet.depositExpires', { when: formatDateTime(created.expiresAt) })}`}
+              />
+            </div>
+          )}
+
+          {open && createdProvider ? (
+            <div className="mt-3 space-y-3">
+              <Input
+                label={t('wallet.receiptReference')}
+                placeholder={createdProvider.refHint ?? 'FT…'}
+                value={reference}
+                onChange={(event) => setReference(event.target.value)}
+                hint={createdProvider.refHint ?? undefined}
+              />
+              {createdProvider.accountDigits || createdProvider.requiresPhone ? (
+                <div className="grid gap-3 sm:grid-cols-2">
+                  {createdProvider.accountDigits ? (
+                    <Input
+                      label={t('wallet.receiptAccount', { count: createdProvider.accountDigits })}
+                      inputMode="numeric"
+                      value={receiptAccount}
+                      onChange={(event) => setReceiptAccount(event.target.value)}
+                    />
+                  ) : null}
+                  {createdProvider.requiresPhone ? (
+                    <Input
+                      label={t('wallet.receiptPhone')}
+                      inputMode="tel"
+                      placeholder="+2519…"
+                      value={receiptPhone}
+                      onChange={(event) => setReceiptPhone(event.target.value)}
+                    />
+                  ) : null}
+                </div>
+              ) : null}
+              <label className="block">
+                <span className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-muted">
+                  {t('wallet.proofLabel')}
+                </span>
+                <input
+                  type="file"
+                  accept="image/png,image/jpeg,image/webp"
+                  onChange={(event) => void attachProof(event.target.files?.[0] ?? null)}
+                  className="block w-full text-xs text-muted file:mr-3 file:rounded-lg file:border-0 file:bg-raised file:px-3 file:py-2 file:text-xs file:font-semibold file:text-text"
+                />
+                <span className="mt-1 block text-[10px] text-muted">
+                  {proof ? t('wallet.proofSelected', { name: proof.name }) : t('wallet.proofHint')}
+                </span>
+              </label>
+              <Button className="w-full" loading={verifying} onClick={() => void markPaid()}>
+                {verifying ? t('wallet.verifying') : t('wallet.iHavePaid')}
+              </Button>
+            </div>
+          ) : null}
+
+          {created.receiptReference ? (
+            <p className="mt-2 text-[11px] text-muted">
+              {t('wallet.receiptReference')}: <span className="font-mono text-text">{created.receiptReference}</span>
+            </p>
+          ) : null}
+          {created.verificationMessage ? (
+            <p className="mt-1 text-[11px] text-muted">{created.verificationMessage}</p>
+          ) : null}
+          {notice ? <p className="mt-2 text-[11px] text-mint">{notice}</p> : null}
+          <p className="mt-2 text-[11px] text-muted">{t('wallet.depositBalanceNote')}</p>
         </Panel>
       ) : null}
 
       <Panel className="p-4">
         <h2 className="font-display text-base font-bold">{t('wallet.buyCredits')}</h2>
-        <p className="mt-0.5 text-[11px] text-muted">
-          {t('wallet.buyCreditsBlurb')}
-        </p>
-        <div className="mt-3 grid gap-3 sm:grid-cols-2">
+        <p className="mt-0.5 text-[11px] text-muted">{t('wallet.buyCreditsBlurb')}</p>
+
+        <div className="mt-3">
+          <Select
+            label={t('wallet.provider')}
+            value={providerCode}
+            onChange={(event) => setProviderCode(event.target.value)}
+          >
+            <option value="">{t('wallet.chooseMethod')}</option>
+            {providers.map((item) => (
+              <option key={item.code} value={item.code}>
+                {item.name} · {PAYMENT_METHODS.find((entry) => entry.value === item.method)?.label}
+              </option>
+            ))}
+          </Select>
+          {providers.length === 0 ? (
+            <p className="mt-1 text-[11px] text-warn">{t('wallet.noDepositMethods')}</p>
+          ) : null}
+        </div>
+
+        {provider ? (
+          <div className="mt-3 rounded-xl border border-gold/25 bg-gold/5 p-3 text-[11px] text-muted">
+            <p className="font-semibold text-gold">
+              {provider.name}
+              {provider.minAmount || provider.maxAmount ? (
+                <span className="ml-2 font-normal">
+                  {formatStake(provider.minAmount ?? undefined)} –{' '}
+                  {provider.maxAmount ? formatStake(provider.maxAmount) : '∞'} cr
+                </span>
+              ) : null}
+            </p>
+            {provider.instructions ? <p className="mt-1">{provider.instructions}</p> : null}
+            <p className="mt-1">
+              {provider.supported ? t('wallet.autoCheckOn') : t('wallet.manualConfirm')}
+            </p>
+          </div>
+        ) : null}
+
+        <div className="mt-3">
           <Input
             label={t('wallet.amount')}
             inputMode="decimal"
@@ -178,25 +501,9 @@ function DepositPanel({ onChanged }: { onChanged: () => void }) {
             value={amount}
             onChange={(event) => setAmount(event.target.value)}
           />
-          <Select
-            label={t('wallet.paymentMethod')}
-            value={method}
-            onChange={(event) => setMethod(event.target.value as PaymentMethod)}
-          >
-            {PAYMENT_METHODS.map((option) => (
-              <option key={option.value} value={option.value}>
-                {option.label}
-              </option>
-            ))}
-          </Select>
         </div>
-        <div className="mt-3 grid gap-3 sm:grid-cols-2">
-          <Input
-            label={t('wallet.agentCodeOptional')}
-            placeholder="AG-1234"
-            value={agentCode}
-            onChange={(event) => setAgentCode(event.target.value)}
-          />
+
+        <div className="mt-3">
           <Input
             label={t('wallet.noteOptional')}
             placeholder="Cash at Main Street kiosk"
@@ -209,7 +516,12 @@ function DepositPanel({ onChanged }: { onChanged: () => void }) {
             <ErrorNote>{error}</ErrorNote>
           </div>
         ) : null}
-        <Button className="mt-3 w-full" loading={busy} onClick={() => void submit()}>
+        <Button
+          className="mt-3 w-full"
+          loading={busy}
+          disabled={!provider || providers.length === 0}
+          onClick={() => void submit()}
+        >
           {t('wallet.openDeposit')}
         </Button>
         {wallet ? (
@@ -229,7 +541,10 @@ function DepositPanel({ onChanged }: { onChanged: () => void }) {
               <li key={deposit.id} className="rounded-xl border border-line/70 bg-ink/40 p-3">
                 <div className="flex items-center justify-between gap-2">
                   <span className="font-display text-lg font-bold tracking-[0.2em]">{deposit.code}</span>
-                  <StatusPill status={deposit.status} />
+                  <div className="flex items-center gap-1">
+                    <VerificationPill status={deposit.verificationStatus} />
+                    <StatusPill status={deposit.status} />
+                  </div>
                 </div>
                 <p className="mt-1 text-[11px] text-muted">
                   {formatCredits(deposit.amount)} cr · {formatDateTime(deposit.createdAt)} ·
@@ -249,9 +564,7 @@ function WithdrawPanel({ onChanged }: { onChanged: () => void }) {
   const { t } = useI18n();
   const [amount, setAmount] = useState('');
   const [method, setMethod] = useState<PaymentMethod>('MOBILE_MONEY');
-  const [agentId, setAgentId] = useState('');
   const [note, setNote] = useState('');
-  const [agents, setAgents] = useState<Agent[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [created, setCreated] = useState<Withdrawal | null>(null);
@@ -270,14 +583,6 @@ function WithdrawPanel({ onChanged }: { onChanged: () => void }) {
 
   useEffect(() => {
     void loadOpen();
-    fetchAgents()
-      .then((list) => {
-        setAgents(list);
-        const online = list.find((agent) => agent.isOnline);
-        if (online) setAgentId(online.id);
-        else if (list[0]) setAgentId(list[0].id);
-      })
-      .catch(() => undefined);
   }, [loadOpen]);
 
   const submit = async () => {
@@ -286,17 +591,12 @@ function WithdrawPanel({ onChanged }: { onChanged: () => void }) {
       setError(t('wallet.invalidAmount'));
       return;
     }
-    if (!agentId) {
-      setError('Pick an agent to hand you the payout.');
-      return;
-    }
     setBusy(true);
     setError(null);
     try {
       const withdrawal = await createWithdrawal({
         amount: minor,
         method,
-        agentProfileId: agentId,
         playerNote: note.trim() || undefined,
         idempotencyKey: idempotency.current,
       });
@@ -399,26 +699,9 @@ function WithdrawPanel({ onChanged }: { onChanged: () => void }) {
             ))}
           </Select>
         </div>
-        <div className="mt-3">
-          <Select
-            label={t('wallet.payingAgent')}
-            value={agentId}
-            onChange={(event) => setAgentId(event.target.value)}
-          >
-            <option value="">{t('wallet.chooseAgent')}</option>
-            {agents.map((agent) => (
-              <option key={agent.id} value={agent.id}>
-                {agent.displayName ?? agent.agentCode} · {agent.region}
-                {agent.isOnline ? ' · online' : ' · offline'}
-              </option>
-            ))}
-          </Select>
-          {agents.length === 0 ? (
-            <p className="mt-1 text-[11px] text-muted">
-              {t('wallet.noAgents')}
-            </p>
-          ) : null}
-        </div>
+        <p className="mt-3 rounded-xl border border-line/70 bg-ink/40 px-3 py-2 text-[11px] text-muted">
+          {t('wallet.anyAgentPays')}
+        </p>
         <div className="mt-3">
           <Input
             label={t('wallet.noteOptional')}
@@ -436,7 +719,6 @@ function WithdrawPanel({ onChanged }: { onChanged: () => void }) {
           className="mt-3 w-full"
           variant="gold"
           loading={busy}
-          disabled={agents.length === 0}
           onClick={() => void submit()}
         >
           {t('wallet.requestPayout')}

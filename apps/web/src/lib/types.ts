@@ -10,6 +10,8 @@ export type WinPattern = 'HORIZONTAL' | 'VERTICAL' | 'DIAGONAL' | 'FOUR_CORNERS'
 export type PaymentMethod = 'MOBILE_MONEY' | 'BANK_TRANSFER' | 'CASH' | 'CARD' | 'CRYPTO';
 export type DepositStatus = 'PENDING' | 'PROCESSING' | 'CREDITED' | 'REJECTED' | 'EXPIRED' | 'CANCELLED' | 'DISPUTED';
 export type WithdrawalStatus = 'ESCROWED' | 'SETTLED' | 'CANCELLED' | 'EXPIRED' | 'DISPUTED';
+export type VerificationStatus = 'NOT_REQUIRED' | 'PENDING' | 'VERIFIED' | 'FAILED' | 'MANUAL';
+export type VerificationSource = 'SERVER' | 'CLIENT' | 'RELAY';
 
 export interface User {
   id: string;
@@ -44,12 +46,68 @@ export interface Wallet {
 export interface PaymentAccount {
   id: string;
   method: PaymentMethod;
-  provider: string;
+  provider: string | null;
   accountName: string;
   accountNumber: string;
   instructions: string | null;
   minAmount: string | null;
   maxAmount: string | null;
+  isActive?: boolean;
+}
+
+export interface DepositProvider {
+  code: string;
+  name: string;
+  method: PaymentMethod;
+  requiresPhone: boolean;
+  accountDigits: number | null;
+  opaqueReference: boolean;
+  clientSide: boolean;
+  supported: boolean;
+  enabled: boolean;
+  sortOrder: number;
+  instructions: string | null;
+  refHint: string | null;
+  refPattern: string | null;
+  minAmount: string | null;
+  maxAmount: string | null;
+  parser: string | null;
+  endpoint: string | null;
+}
+
+export interface ReceiptVerificationView {
+  id: string;
+  providerCode: string;
+  providerName: string;
+  reference: string;
+  status: VerificationStatus;
+  source: VerificationSource | null;
+  amount: string | null;
+  currency: string | null;
+  senderName: string | null;
+  senderAccount: string | null;
+  receiverName: string | null;
+  receiverAccount: string | null;
+  transactionDate: string | null;
+  transactionStatus: string | null;
+  message: string | null;
+  attempts: number;
+  verifiedAt: string | null;
+  createdAt: string;
+  deposit: {
+    code: string;
+    amount: string;
+    status: DepositStatus;
+    autoVerified: boolean;
+    player: { displayName: string; phone: string | null };
+  } | null;
+}
+
+export interface VerifyReceiptResult {
+  data: Deposit;
+  verification: { status: VerificationStatus | string; message: string };
+  autoCredited: boolean;
+  needsClientFetch?: boolean;
 }
 
 export interface Agent {
@@ -70,6 +128,8 @@ export interface Agent {
   completedWithdrawals: number;
   depositCommissionBps: number;
   withdrawalCommissionBps: number;
+  autoDepositEnabled: boolean;
+  autoDepositThreshold: string | null;
   paymentAccounts?: PaymentAccount[];
   floatAvailable?: string;
   floatEscrow?: string;
@@ -199,6 +259,14 @@ export interface Deposit {
   creditedAmount: string;
   agentProfileId: string | null;
   paymentAccountId: string | null;
+  providerCode: string | null;
+  receiptReference: string | null;
+  receiptAccount: string | null;
+  verificationStatus: VerificationStatus;
+  verificationMessage: string | null;
+  verificationSource: VerificationSource | null;
+  autoVerified: boolean;
+  verifiedAt: string | null;
   externalRef: string | null;
   receiptUrl: string | null;
   playerNote: string | null;
@@ -207,6 +275,18 @@ export interface Deposit {
   claimedAt: string | null;
   settledAt: string | null;
   createdAt: string;
+  /** Present on player-facing responses when the payer's phone can fetch the bank page. */
+  clientReceiptUrl?: string;
+  agent?: {
+    id: string;
+    agentCode: string;
+    displayName: string | null;
+    avatarUrl: string | null;
+    isOnline: boolean;
+    autoDepositEnabled: boolean;
+    autoDepositThreshold: string | null;
+  } | null;
+  paymentAccount?: PaymentAccount | null;
 }
 
 export interface Withdrawal {

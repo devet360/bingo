@@ -113,6 +113,9 @@ erDiagram
   DepositRequest ||--o| AgentRating : "reviewed in"
   DepositRequest ||--o| AgentCommission : "generates"
   WithdrawalRequest ||--o| AgentCommission : "generates"
+  DepositRequest ||--o| ReceiptVerification : "verified by"
+  DepositProvider ||--o{ DepositRequest : "rail for"
+  DepositProvider ||--o{ ReceiptVerification : "parsed by"
   User ||--o{ User : "referred by"
 
   User {
@@ -161,7 +164,35 @@ erDiagram
     enum method
     bigint amount
     enum status
+    string providerCode
+    string receiptReference
+    enum verificationStatus
+    enum verificationSource
+    boolean autoVerified
     datetime expiresAt
+  }
+  DepositProvider {
+    string code PK
+    string name
+    enum method
+    boolean enabled
+    boolean supported
+    boolean clientSide
+    boolean requiresPhone
+    int accountDigits
+    boolean opaqueReference
+    bigint minAmount
+    bigint maxAmount
+  }
+  ReceiptVerification {
+    uuid id PK
+    string providerCode
+    string reference "unique per provider"
+    uuid depositId UK
+    enum status
+    enum source
+    bigint amount
+    int attempts
   }
   WithdrawalRequest {
     uuid id PK
@@ -300,9 +331,10 @@ sequenceDiagram
   participant S as Socket.io
   actor A as Agent
 
-  P->>API: POST /wallet/deposits { amount, agentId, method, externalRef }
-  API->>DB: INSERT DepositRequest { code, status=PENDING, expiresAt=+30m }
-  API-->>P: { code: "483921", agent payment account }
+  P->>API: POST /wallet/deposits { amount, providerCode }
+  API->>DB: pick ACTIVE agent + payment account for the rail
+  API->>DB: INSERT DepositRequest { code, agentProfileId, paymentAccountId, status=PENDING, expiresAt=+30m }
+  API-->>P: { code: "483921", agent, paymentAccount }
   P->>A: hands cash / sends MoMo, shows 6-digit code
   A->>API: POST /agent/deposits/483921/credit
   API->>DB: BEGIN
@@ -321,6 +353,32 @@ Failure paths: insufficient agent float → `409 FLOAT_INSUFFICIENT`; expired co
 `410`; a second credit attempt for the same `code` is blocked by the
 `(refType, refId, kind)` unique index **and** the idempotency key, so double-tapping the
 agent button is harmless.
+
+#### Receipt verification
+
+A deposit created against a `DepositProvider` carries a receipt reference instead of a
+handshake. Verification lives in `apps/api/src/services/receipts/`: each bank gets a
+parser that canonicalizes the reference, knows which inputs it needs (last account
+digits, phone) and builds the receipt URL from a **static host allowlist**. Fetching
+enforces a response size cap, follows redirects manually, and retries only on network
+errors and 5xx.
+
+Two shapes exist:
+
+- **Server-side** — the API fetches the bank page after creation and records a
+  `ReceiptVerification` row.
+- **Client-side** (Telebirr, M-Pesa) — the bank blocks Ethiopian-IP-only traffic, so the
+  API returns `clientReceiptUrl`; the payer app fetches it and posts the raw body to
+  `/wallet/deposits/:code/verify-receipt`. That payload is untrusted: the server
+  re-parses it, dedupes by `(providerCode, reference)`, and compares the parsed amount
+  and receiver against the deposit before it may credit.
+
+Auto-credit is a single locked transaction and requires: assigned agent `ACTIVE`, agent
+automation on, amount ≤ agent threshold, rail enabled/supported, gate `VERIFIED`, parsed
+amount exactly equal to the deposit, receiver matching the agent's payment account, and
+an unused reference (partial unique index on credited deposits). Any miss leaves the
+deposit for manual agent confirmation. Verification rows store the source
+(`SERVER`/`CLIENT`/`RELAY`) so support can tell attested data from operator action.
 
 ### 3.3 Withdrawal flow
 
@@ -451,6 +509,10 @@ live round.
 | Repeat payout after retry | Ledger idempotency key `round-payout:<roundId>` for the whole pot |
 | Round pot drift | All pot counters written in the same tx as the purchase journal |
 | Agent float race | Row lock on `AGENT.FLOAT` account; credit rejected if `floatAvailable < amount` |
+| Same receipt used twice | `ReceiptVerification @@unique([providerCode, reference])` + partial unique index on credited `DepositRequest.receiptReference` |
+| Forged client receipt body | Treated as untrusted input: re-parsed by the code-owned parser, amount must equal the deposit and the receiver must match the agent account |
+| Auto-credit above agent limit | Threshold checked inside the credit transaction against the locked `DepositRequest.amount` |
+| Two verifications for one deposit | `ReceiptVerification.depositId` is unique (corrections update the row) |
 
 Wallet/agent balances are **caches**. If a cache is ever in doubt, it is rebuilt from
 `LedgerEntry` — the journal is the only financial source of truth.
@@ -465,5 +527,5 @@ Wallet/agent balances are **caches**. If a cache is ever in doubt, it is rebuilt
 | 2 | Express bootstrap, Telegram `initData` + JWT auth, agent deposit/withdrawal APIs, ledger service | ✅ delivered |
 | 3 | Socket.io bingo engine, provably fair RNG, claim verification, BullMQ workers | ✅ delivered |
 | 4 | Next.js TMA: lobby, live board, wallet, agent portal, fairness verifier; Dokku packaging | ✅ delivered |
-| 5 | Telegram bot + phone verification, staff roles, support/admin consoles, Swagger, EN/AM localization | ✅ delivered |
+| 5 | Telegram bot + phone verification, staff roles, support/admin consoles, staff Telegram linking, bank receipt verification + agent auto-deposit, Swagger, EN/AM localization | ✅ delivered |
 | 6 | Flutter mobile app (same REST + Socket.io API) | pending |

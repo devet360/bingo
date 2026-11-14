@@ -4,6 +4,7 @@ import {
   LedgerKind,
   UserRole,
   UserStatus,
+  VerificationStatus,
   WithdrawalStatus,
   type Prisma,
 } from '@prisma/client';
@@ -42,6 +43,12 @@ const ListDepositsQuery = z.object({
 const ListWithdrawalsQuery = z.object({
   status: z.nativeEnum(WithdrawalStatus).optional(),
   userId: z.string().uuid().optional(),
+  page: z.coerce.number().int().min(0).max(2000).default(0),
+});
+
+const ListReceiptsQuery = z.object({
+  status: z.nativeEnum(VerificationStatus).optional(),
+  providerCode: z.string().trim().max(32).optional(),
   page: z.coerce.number().int().min(0).max(2000).default(0),
 });
 
@@ -240,7 +247,71 @@ staffReadRouter.get(
       data: withdrawals.map((withdrawal) => ({
         ...serializeWithdrawal(withdrawal),
         player: withdrawal.player,
-        agentCode: withdrawal.agentProfile.agentCode,
+        agentCode: withdrawal.agentProfile?.agentCode ?? null,
+      })),
+      page: { index: query.page, size: PAGE_SIZE, total },
+    });
+  }),
+);
+
+staffReadRouter.get(
+  '/receipts',
+  asyncHandler(async (req, res) => {
+    const query = parse(ListReceiptsQuery, req.query);
+    const where: Prisma.ReceiptVerificationWhereInput = {
+      ...(query.status ? { status: query.status } : {}),
+      ...(query.providerCode ? { providerCode: query.providerCode } : {}),
+    };
+    const [total, receipts] = await Promise.all([
+      prisma.receiptVerification.count({ where }),
+      prisma.receiptVerification.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        skip: query.page * PAGE_SIZE,
+        take: PAGE_SIZE,
+        include: {
+          provider: { select: { name: true } },
+          deposit: {
+            select: {
+              code: true,
+              amount: true,
+              status: true,
+              autoVerified: true,
+              player: { select: { displayName: true, phone: true } },
+            },
+          },
+        },
+      }),
+    ]);
+    res.json({
+      data: receipts.map((receipt) => ({
+        id: receipt.id,
+        providerCode: receipt.providerCode,
+        providerName: receipt.provider.name,
+        reference: receipt.reference,
+        status: receipt.status,
+        source: receipt.source,
+        amount: receipt.amount,
+        currency: receipt.currency,
+        senderName: receipt.senderName,
+        senderAccount: receipt.senderAccount,
+        receiverName: receipt.receiverName,
+        receiverAccount: receipt.receiverAccount,
+        transactionDate: receipt.transactionDate,
+        transactionStatus: receipt.transactionStatus,
+        message: receipt.message,
+        attempts: receipt.attempts,
+        verifiedAt: receipt.verifiedAt,
+        createdAt: receipt.createdAt,
+        deposit: receipt.deposit
+          ? {
+              code: receipt.deposit.code,
+              amount: receipt.deposit.amount,
+              status: receipt.deposit.status,
+              autoVerified: receipt.deposit.autoVerified,
+              player: receipt.deposit.player,
+            }
+          : null,
       })),
       page: { index: query.page, size: PAGE_SIZE, total },
     });
@@ -253,7 +324,10 @@ staffReadRouter.get(
     const agents = await prisma.agentProfile.findMany({
       orderBy: { createdAt: 'desc' },
       take: 200,
-      include: { user: { select: { displayName: true, avatarUrl: true, status: true } } },
+      include: {
+        user: { select: { displayName: true, avatarUrl: true, status: true } },
+        paymentAccounts: { where: { isActive: true }, orderBy: { createdAt: 'asc' } },
+      },
     });
     res.json({ data: agents.map((agent) => serializeAgent(agent, { includeBalances: true })) });
   }),

@@ -81,7 +81,7 @@ async function main(): Promise<void> {
         stakePerCard: BigInt(seed.stakeCredits) * CREDITS,
         allowedPatterns: seed.patterns,
         rakeBps: 1_000,
-        minPlayersToStart: 2,
+        minPlayersToStart: 1,
         maxCardsPerPlayer: 4,
         purchaseWindowSecs: 20,
         lockWindowSecs: 5,
@@ -93,6 +93,7 @@ async function main(): Promise<void> {
         variant: seed.variant,
         stakePerCard: BigInt(seed.stakeCredits) * CREDITS,
         allowedPatterns: seed.patterns,
+        minPlayersToStart: 1,
       },
     });
   }

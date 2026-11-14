@@ -16,7 +16,12 @@ interface BotCopy {
   notOwnContact: string;
   invalidPhone: string;
   phoneTaken: string;
-  staffWebOnly: string;
+  staffWelcome: string;
+  staffLinked: string;
+  staffLinkInvalid: string;
+  dashboardAdmin: string;
+  dashboardSupport: string;
+  dashboardAgent: string;
   appNotConfigured: string;
   somethingWentWrong: string;
 }
@@ -32,11 +37,16 @@ export const botCopy: Record<BotLocale, BotCopy> = {
       `Your number ${phone} is verified. You can now play. Winnings are credited to your in-game wallet.`,
     contactButtonHint: 'Tap “Share my number” below so we can verify you.',
     help:
-      'Bingo Hall is a real-time bingo game.\n\n/start — open the game\n/verify — re-verify your phone number\n/help — this message',
+      'Bingo Hall is a real-time bingo game.\n\n/start — open the game\n/verify — re-verify your phone number\n/dashboard — staff and agents: open your console\n/help — this message',
     notOwnContact: 'Please share your own number using the button, not a contact card.',
     invalidPhone: 'Telegram sent a number we could not read. Please try again.',
     phoneTaken: 'That number is already linked to another account. Contact support in the app.',
-    staffWebOnly: 'Staff accounts sign in on the web portal, not in the bot.',
+    staffWelcome: 'You are signed in as staff. Open your dashboard below.',
+    staffLinked: 'Your Telegram account is linked. Open your dashboard below.',
+    staffLinkInvalid: 'That staff link has expired or was already used. Ask an admin for a new one.',
+    dashboardAdmin: 'Admin console',
+    dashboardSupport: 'Support desk',
+    dashboardAgent: 'Agent dashboard',
     appNotConfigured: 'The game link is not configured yet. Please try again later.',
     somethingWentWrong: 'Something went wrong. Please try again in a moment.',
   },
@@ -50,11 +60,16 @@ export const botCopy: Record<BotLocale, BotCopy> = {
       `ቁጥርዎ ${phone} ተረጋግጧል። አሁን መጫወት ይችላሉ። የሚያሸንፉት ገንዘብ በጨዋታ ቦርሳዎ ውስጥ ይቀመጣል።`,
     contactButtonHint: 'ማንነትዎን ለማረጋገጥ ከታች “ስልክ ቁጥሬን አጋራ” የሚለውን ይጫኑ።',
     help:
-      'ቢንጎ አዳራሽ የቀጥታ ቢንጎ ጨዋታ ነው።\n\n/start — ጨዋታውን ይክፈቱ\n/verify — ስልክ ቁጥርዎን እንደገና ያረጋግጡ\n/help — ይህ መልእክት',
+      'ቢንጎ አዳራሽ የቀጥታ ቢንጎ ጨዋታ ነው።\n\n/start — ጨዋታውን ይክፈቱ\n/verify — ስልክ ቁጥርዎን እንደገና ያረጋግጡ\n/dashboard — ሰራተኞችና ወኪሎች፦ ኮንሶልዎን ይክፈቱ\n/help — ይህ መልእክት',
     notOwnContact: 'እባክዎ የራስዎን ቁጥር በአዝራሩ ያጋሩ፣ የሌላ ሰው ኮንታክት አይደለም።',
     invalidPhone: 'ቴሌግራም የላከውን ቁጥር ማንበብ አልተቻለም። እባክዎ እንደገና ይሞክሩ።',
     phoneTaken: 'ይህ ቁጥር ከሌላ መዝገብ ጋር ተገናኝቷል። በመተግበሪያው ውስጥ ድጋፍን ያግኙ።',
-    staffWebOnly: 'የሰራተኛ መዝገቦች በድረ-ገጽ ፖርታል ብቻ ይገባሉ።',
+    staffWelcome: 'እንደ ሰራተኛ ገብተዋል። ዳሽቦርድዎን ከታች ይክፈቱ።',
+    staffLinked: 'የቴሌግራም መዝገብዎ ተገናኝቷል። ዳሽቦርድዎን ከታች ይክፈቱ።',
+    staffLinkInvalid: 'ይህ የሰራተኛ አገናኝ ጊዜው አልፏል ወይም አስቀድሞ ጥቅም ላይ ውሏል። አስተዳዳሪን አዲስ አገናኝ ይጠይቁ።',
+    dashboardAdmin: 'የአስተዳዳሪ ኮንሶል',
+    dashboardSupport: 'የድጋፍ ጠረጴዛ',
+    dashboardAgent: 'የወኪል ዳሽቦርድ',
     appNotConfigured: 'የጨዋታ አገናኙ አልተዘጋጀም። እባክዎ በኋላ ይሞክሩ።',
     somethingWentWrong: 'የተሳሳተ ነገር ተከስቷል። እባክዎ ከጥቂት ጊዜ በኋላ ይሞክሩ።',
   },

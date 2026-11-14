@@ -28,3 +28,12 @@ export const moneyLimiter = rateLimit({
   legacyHeaders: false,
   message,
 });
+
+/** Each verification may call a bank; keep the volume close to human pace. */
+export const receiptLimiter = rateLimit({
+  windowMs: 60_000,
+  limit: 20,
+  standardHeaders: 'draft-7',
+  legacyHeaders: false,
+  message,
+});

@@ -1,11 +1,20 @@
-import { DepositStatus, NotificationType, type PaymentMethod } from '@prisma/client';
+import {
+  DepositStatus,
+  NotificationType,
+  VerificationStatus,
+  type DepositProvider,
+  type PaymentMethod,
+} from '@prisma/client';
 import { prisma } from '../lib/prisma';
 import { calculateBps } from '../lib/money';
 import { numericCode } from '../lib/ids';
 import { Errors } from '../lib/errors';
 import { isUniqueViolation, runTransaction, withTxRetry } from '../lib/tx';
 import { postLedger } from './ledger';
-import { getActiveAgentByUserId } from './agents';
+import { assignAgentForPayment, getActiveAgentByUserId } from './agents';
+import { getProvider } from './providers';
+import { normalizeInput } from './receipts/reference';
+import { ReferenceError as ReceiptReferenceError } from './receipts/types';
 
 const DEPOSIT_TTL_MS = 30 * 60_000;
 
@@ -15,14 +24,85 @@ export interface CreateDepositInput {
   paymentAccountId?: string;
   method: PaymentMethod;
   amount: bigint;
+  providerCode?: string;
+  receiptReference?: string;
+  receiptAccount?: string;
+  receiptPhone?: string;
   externalRef?: string;
   receiptUrl?: string;
   playerNote?: string;
   idempotencyKey: string;
 }
 
+/** Validate the provider rail and canonicalise the receipt inputs before storing them. */
+async function resolveProvider(input: CreateDepositInput): Promise<{
+  provider: DepositProvider | null;
+  receiptReference?: string;
+  receiptAccount?: string;
+  receiptPhone?: string;
+}> {
+  if (!input.providerCode) {
+    return {
+      provider: null,
+      receiptReference: input.receiptReference?.trim() || undefined,
+      receiptAccount: input.receiptAccount?.trim() || undefined,
+      receiptPhone: input.receiptPhone?.trim() || undefined,
+    };
+  }
+
+  const provider = await getProvider(input.providerCode, { requireEnabled: true });
+  if (provider.method !== input.method) {
+    throw Errors.badRequest(
+      `${provider.name} is a ${provider.method.toLowerCase().replace('_', ' ')} method`,
+      'PROVIDER_METHOD_MISMATCH',
+    );
+  }
+  if (provider.minAmount !== null && input.amount < provider.minAmount) {
+    throw Errors.badRequest(
+      `The minimum for ${provider.name} is ${(Number(provider.minAmount) / 100).toFixed(2)}`,
+      'AMOUNT_BELOW_PROVIDER_MINIMUM',
+    );
+  }
+  if (provider.maxAmount !== null && input.amount > provider.maxAmount) {
+    throw Errors.badRequest(
+      `The maximum for ${provider.name} is ${(Number(provider.maxAmount) / 100).toFixed(2)}`,
+      'AMOUNT_ABOVE_PROVIDER_MAXIMUM',
+    );
+  }
+
+  // Manual-only rails have no receipt to parse; the agent confirms those.
+  if (!provider.supported) {
+    return {
+      provider,
+      receiptReference: input.receiptReference?.trim() || undefined,
+      receiptAccount: input.receiptAccount?.trim() || undefined,
+      receiptPhone: input.receiptPhone?.trim() || undefined,
+    };
+  }
+
+  try {
+    const normalized = normalizeInput(provider, {
+      reference: input.receiptReference,
+      accountNumber: input.receiptAccount,
+      phoneNumber: input.receiptPhone,
+    });
+    return {
+      provider,
+      receiptReference: normalized.reference,
+      receiptAccount: normalized.accountNumber,
+      receiptPhone: normalized.phoneNumber,
+    };
+  } catch (error) {
+    if (error instanceof ReceiptReferenceError) {
+      throw Errors.badRequest(error.message, 'INVALID_RECEIPT_REFERENCE');
+    }
+    throw error;
+  }
+}
+
 export async function createDeposit(input: CreateDepositInput) {
   let agentProfileId = input.agentProfileId;
+  let paymentAccountId = input.paymentAccountId;
 
   if (!agentProfileId && input.paymentAccountId) {
     const account = await prisma.agentPaymentAccount.findUnique({
@@ -31,6 +111,7 @@ export async function createDeposit(input: CreateDepositInput) {
     });
     if (!account?.isActive) throw Errors.notFound('Payment account');
     agentProfileId = account.agentProfileId;
+    paymentAccountId = input.paymentAccountId;
   }
 
   if (agentProfileId) {
@@ -56,10 +137,28 @@ export async function createDeposit(input: CreateDepositInput) {
     }
   }
 
+  const receipt = await resolveProvider(input);
+
   const existing = await prisma.depositRequest.findUnique({
     where: { idempotencyKey: input.idempotencyKey },
   });
-  if (existing) return { deposit: existing, replayed: true };
+  if (existing) return { deposit: existing, replayed: true, provider: receipt.provider };
+
+  // Players only choose a method; the server picks who will receive the money.
+  if (!agentProfileId) {
+    const assignment = await assignAgentForPayment({
+      method: input.method,
+      amount: input.amount,
+    });
+    if (!assignment) {
+      throw Errors.conflict(
+        `No agent is accepting ${input.method.toLowerCase().replaceAll('_', ' ')} payments right now. Try another method.`,
+        'AGENT_UNAVAILABLE',
+      );
+    }
+    agentProfileId = assignment.agent.id;
+    paymentAccountId = assignment.account.id;
+  }
 
   for (let attempt = 0; attempt < 5; attempt += 1) {
     try {
@@ -69,22 +168,29 @@ export async function createDeposit(input: CreateDepositInput) {
           idempotencyKey: input.idempotencyKey,
           playerId: input.playerId,
           agentProfileId,
-          paymentAccountId: input.paymentAccountId,
+          paymentAccountId,
           method: input.method,
           amount: input.amount,
+          providerCode: receipt.provider?.code,
+          receiptReference: receipt.receiptReference,
+          receiptAccount: receipt.receiptAccount,
+          receiptPhone: receipt.receiptPhone,
+          verificationStatus: receipt.provider?.supported
+            ? VerificationStatus.PENDING
+            : VerificationStatus.NOT_REQUIRED,
           externalRef: input.externalRef,
           receiptUrl: input.receiptUrl,
           playerNote: input.playerNote,
           expiresAt: new Date(Date.now() + DEPOSIT_TTL_MS),
         },
       });
-      return { deposit, replayed: false };
+      return { deposit, replayed: false, provider: receipt.provider };
     } catch (error) {
       if (isUniqueViolation(error, 'idempotencyKey')) {
         const duplicate = await prisma.depositRequest.findUnique({
           where: { idempotencyKey: input.idempotencyKey },
         });
-        if (duplicate) return { deposit: duplicate, replayed: true };
+        if (duplicate) return { deposit: duplicate, replayed: true, provider: receipt.provider };
       }
       if (isUniqueViolation(error, 'code')) continue;
       throw error;
