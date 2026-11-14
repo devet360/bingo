@@ -37,6 +37,11 @@ with `dokku config:set`.
 dokku builder-dockerfile:set bingo-api dockerfile-path Dockerfile.api
 dokku builder-dockerfile:set bingo-web dockerfile-path Dockerfile.web
 
+# Both apps share this repo, so bingo-web must use its own Procfile. Without
+# this, Dokku reads the API Procfile and tries to run apps/api/dist/index.js
+# inside the Next.js image.
+dokku ps:set bingo-web procfile-path Procfile.web
+
 dokku ports:set bingo-api http:80:4000
 dokku ports:set bingo-web http:80:3000
 ```
@@ -129,6 +134,8 @@ dokku ps:scale bingo-api web=1 worker=1 bot=1
   more than one, but one is enough.
 - `bot` long-polls Telegram. Run **exactly one** instance; two pollers hit
   `409 Conflict` and Telegram aborts the newer one (`dokku logs bingo-api -t bot`).
+- `bingo-web` runs only its default `web` process from `Procfile.web`; leave it at
+  `web=1` and do not add worker/bot processes there.
 
 If you prefer a separate app for the worker or bot, create `bingo-worker`, link the same
 Postgres and Redis services, set the same secrets, use
@@ -215,6 +222,7 @@ Common failures:
 
 | Symptom | Cause / fix |
 | --- | --- |
+| `MODULE_NOT_FOUND /app/apps/api/dist/index.js` on `bingo-web` | The web app inherited the API `Procfile`; run `dokku ps:set bingo-web procfile-path Procfile.web`, commit `Procfile.web`, and redeploy |
 | 502 from the proxy | Wrong `ports:set` mapping, or the process is not listening on `PORT`/4000. |
 | `P1001` on `/ready` | `DATABASE_URL` missing; link the Postgres service. |
 | Socket connects to `localhost` | `SOCKET_URL` not set on `bingo-web` (check `/config.js`). |
