@@ -22,12 +22,9 @@ WORKDIR /app
 
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/package.json ./package.json
-COPY --from=build /app/apps/api/package.json ./apps/api/package.json
-COPY --from=build /app/apps/api/dist ./apps/api/dist
-COPY --from=build /app/apps/api/prisma ./apps/api/prisma
-# Kept so `dokku run` can execute prisma/seed.ts and scripts/create-admin.ts with tsx.
-COPY --from=build /app/apps/api/src ./apps/api/src
-COPY --from=build /app/apps/api/scripts ./apps/api/scripts
+# Copies dist, prisma, src and scripts (for `dokku run` with tsx) plus any
+# workspace node_modules npm could not hoist, such as pdf-parse.
+COPY --from=build /app/apps ./apps
 
 # Dokku injects PORT; the app falls back to 4000 for local runs.
 EXPOSE 4000
