@@ -165,12 +165,12 @@ export default function LobbyPage() {
             </p>
           </div>
           <div className="flex gap-2">
-            <Link href="/wallet">
+            <Link href="/wallet?tab=deposit">
               <Button variant="outline" size="sm">
                 {t('lobby.deposit')}
               </Button>
             </Link>
-            <Link href="/wallet">
+            <Link href="/wallet?tab=withdraw">
               <Button variant="gold" size="sm">
                 {t('lobby.withdraw')}
               </Button>

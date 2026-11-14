@@ -43,7 +43,11 @@ export async function serializePlayerDeposit(deposit: DepositWithProvider) {
     deposit.agentProfileId
       ? prisma.agentProfile.findUnique({
           where: { id: deposit.agentProfileId },
-          include: { user: { select: { displayName: true, avatarUrl: true } } },
+          include: {
+            user: {
+              select: { displayName: true, avatarUrl: true, phone: true, telegramUsername: true },
+            },
+          },
         })
       : null,
     deposit.paymentAccountId
@@ -59,6 +63,8 @@ export async function serializePlayerDeposit(deposit: DepositWithProvider) {
           agentCode: agent.agentCode,
           displayName: agent.user.displayName,
           avatarUrl: agent.user.avatarUrl,
+          phone: agent.user.phone,
+          telegramUsername: agent.user.telegramUsername,
           isOnline: agent.isOnline,
           autoDepositEnabled: agent.autoDepositEnabled,
           autoDepositThreshold:

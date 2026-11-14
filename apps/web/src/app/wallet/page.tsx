@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import {
   ApiError,
   cancelWithdrawal,
@@ -21,6 +21,7 @@ import {
   formatDateTime,
   formatStake,
   minorToCreditsInput,
+  timeAgo,
 } from '@/lib/format';
 import { useI18n } from '@/lib/i18n';
 import { useSession } from '@/components/session';
@@ -32,9 +33,7 @@ import {
   Input,
   Panel,
   Pill,
-  Select,
   Spinner,
-  Stat,
   Tabs,
   cn,
 } from '@/components/ui';
@@ -50,6 +49,14 @@ import type {
 } from '@/lib/types';
 
 type Tab = 'deposit' | 'withdraw' | 'history';
+type ActivitySection = 'bets' | 'finances';
+type BetFilter = 'all' | 'won' | 'lost';
+type FinanceFilter = 'all' | 'deposits' | 'withdrawals' | 'bonuses';
+
+const QUICK_AMOUNTS = ['50', '100', '250', '500', '1000', '5000'];
+const MIN_DEPOSIT_MINOR = 1000n;
+const LOW_BALANCE_MINOR = 5000n;
+const LOW_BALANCE_KEY = 'bingo.lowBalanceDismissed.v1';
 
 const STATUS_TONE: Record<string, 'mint' | 'gold' | 'warn' | 'danger' | 'neutral'> = {
   PENDING: 'warn',
@@ -69,6 +76,42 @@ const VERIFICATION_TONE: Record<VerificationStatus, 'mint' | 'gold' | 'warn' | '
   FAILED: 'danger',
   MANUAL: 'blue',
 };
+
+const BET_KINDS = new Set(['CARD_PURCHASE', 'ROUND_PAYOUT', 'ROUND_REFUND', 'PROVIDER_BET', 'PROVIDER_WIN']);
+
+function isWinningBet(kind: string): boolean {
+  return kind === 'ROUND_PAYOUT' || kind === 'PROVIDER_WIN';
+}
+
+function isLosingBet(kind: string): boolean {
+  return kind === 'CARD_PURCHASE' || kind === 'PROVIDER_BET';
+}
+
+function isFinanceKind(kind: string): boolean {
+  return kind.startsWith('BONUS') || kind === 'AFFILIATE_COMMISSION' || kind === 'MANUAL_ADJUSTMENT';
+}
+
+function financeStatus(status: string): { labelKey: string; tone: 'mint' | 'gold' | 'warn' | 'danger' | 'neutral' } {
+  switch (status) {
+    case 'CREDITED':
+      return { labelKey: 'wallet.stCredited', tone: 'mint' };
+    case 'PAID':
+      return { labelKey: 'wallet.stPaid', tone: 'mint' };
+    case 'PENDING':
+      return { labelKey: 'wallet.stPending', tone: 'warn' };
+    case 'PROCESSING':
+    case 'ESCROWED':
+      return { labelKey: 'wallet.stProcessing', tone: 'gold' };
+    case 'REJECTED':
+      return { labelKey: 'wallet.stDeclined', tone: 'danger' };
+    case 'EXPIRED':
+      return { labelKey: 'wallet.stExpired', tone: 'neutral' };
+    case 'CANCELLED':
+      return { labelKey: 'wallet.stCancelled', tone: 'neutral' };
+    default:
+      return { labelKey: status.toLowerCase(), tone: 'neutral' };
+  }
+}
 
 function StatusPill({ status }: { status: DepositStatus | WithdrawalStatus | string }) {
   return <Pill tone={STATUS_TONE[status] ?? 'neutral'}>{status.toLowerCase()}</Pill>;
@@ -100,6 +143,298 @@ function CodeBlock({
       </div>
       {hint ? <p className="mt-1 text-[11px] text-muted">{hint}</p> : null}
     </div>
+  );
+}
+
+function AmountField({
+  label,
+  value,
+  onChange,
+  placeholder,
+  hint,
+  action,
+  disabled,
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  placeholder: string;
+  hint?: string;
+  action?: ReactNode;
+  disabled?: boolean;
+}) {
+  return (
+    <div>
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-[10px] font-semibold uppercase tracking-widest text-muted">{label}</span>
+        {action}
+      </div>
+      <div className="relative mt-1.5">
+        <input
+          inputMode="decimal"
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+          placeholder={placeholder}
+          disabled={disabled}
+          className="h-14 w-full rounded-xl border border-line bg-ink/60 pl-3 pr-12 font-display text-2xl font-bold text-text placeholder:text-sm placeholder:font-normal placeholder:text-muted/60 focus:border-mint/60 focus:outline-none disabled:opacity-50"
+        />
+        <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-[10px] font-semibold uppercase text-muted">
+          cr
+        </span>
+      </div>
+      {hint ? <p className="mt-1 text-[10px] text-muted">{hint}</p> : null}
+    </div>
+  );
+}
+
+function QuickAmounts({ value, onPick }: { value: string; onPick: (value: string) => void }) {
+  return (
+    <div className="mt-2 grid grid-cols-3 gap-2 sm:grid-cols-6">
+      {QUICK_AMOUNTS.map((item) => (
+        <button
+          key={item}
+          type="button"
+          onClick={() => onPick(item)}
+          className={cn(
+            'h-9 rounded-lg border text-xs font-semibold tabular-nums transition',
+            value === item
+              ? 'border-mint/60 bg-mint/10 text-mint'
+              : 'border-line/70 bg-raised/50 text-muted hover:border-mint/40 hover:text-text',
+          )}
+        >
+          {Number(item).toLocaleString()}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function HelpSteps({ title, steps }: { title: string; steps: string[] }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="rounded-xl border border-line/70 bg-ink/40">
+      <button
+        type="button"
+        onClick={() => setOpen((current) => !current)}
+        aria-expanded={open}
+        className="flex w-full items-center justify-between px-3 py-2 text-[11px] font-semibold text-mint"
+      >
+        {title}
+        <span className="text-muted">{open ? '−' : '+'}</span>
+      </button>
+      {open ? (
+        <ol className="space-y-1.5 px-3 pb-3">
+          {steps.map((step, index) => (
+            <li key={step} className="flex gap-2 text-[11px] text-muted">
+              <span className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-mint/15 text-[9px] font-bold text-mint">
+                {index + 1}
+              </span>
+              <span>{step}</span>
+            </li>
+          ))}
+        </ol>
+      ) : null}
+    </div>
+  );
+}
+
+function MiniStat({ label, value, gold }: { label: string; value: string; gold?: boolean }) {
+  return (
+    <div className="rounded-lg bg-ink/40 px-2.5 py-2">
+      <p className="text-[9px] font-semibold uppercase tracking-wider text-muted">{label}</p>
+      <p className={cn('mt-0.5 font-display text-sm font-bold tabular-nums', gold ? 'text-gold' : 'text-text')}>
+        {value}
+      </p>
+    </div>
+  );
+}
+
+function ClockIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="h-7 w-7" aria-hidden="true">
+      <circle cx="12" cy="12" r="9" />
+      <path d="M12 7v5l3 2" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function CheckIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" className="h-7 w-7" aria-hidden="true">
+      <path d="M20 6 9 17l-5-5" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function TelegramIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="currentColor" className="h-4 w-4" aria-hidden="true">
+      <path d="M21.9 4.6 18.9 19c-.2 1-.8 1.2-1.7.8l-4.6-3.4-2.2 2.1c-.2.2-.5.5-.9.5l.3-4.6 8.4-7.6c.4-.3-.1-.5-.6-.2L7.2 12.8l-4.5-1.4c-1-.3-1-1 .2-1.4l17.6-6.8c.8-.3 1.5.2 1.4 1.4Z" />
+    </svg>
+  );
+}
+
+function PhoneIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="h-4 w-4" aria-hidden="true">
+      <path
+        d="M6.6 3h2.7l1.4 4-1.7 1.4a12.7 12.7 0 0 0 6.6 6.6l1.4-1.7 4 1.4v2.7A2.6 2.6 0 0 1 18.4 20 15.4 15.4 0 0 1 4 5.6 2.6 2.6 0 0 1 6.6 3Z"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function TicketIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="h-4 w-4" aria-hidden="true">
+      <path
+        d="M4 8a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v1.5a2.5 2.5 0 0 0 0 5V16a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-1.5a2.5 2.5 0 0 0 0-5V8Z"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path d="M14 6v12" strokeDasharray="2 2" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function CardIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="h-4 w-4" aria-hidden="true">
+      <rect x="2" y="5" width="20" height="14" rx="2" />
+      <path d="M2 10h20" />
+    </svg>
+  );
+}
+
+function TrophyIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="h-4 w-4" aria-hidden="true">
+      <path d="M8 4h8v5a4 4 0 0 1-8 0V4Z" strokeLinejoin="round" />
+      <path d="M8 5H5a3 3 0 0 0 3 5M16 5h3a3 3 0 0 1-3 5" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M12 13v4M9 20h6M10 17h4l1 3H9l1-3Z" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function RefundIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="h-4 w-4" aria-hidden="true">
+      <path d="M4 5v5h5" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M4.5 10a8 8 0 1 1 1.6 6" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function ArrowDownLeftIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="h-4 w-4" aria-hidden="true">
+      <path d="M17 7 7 17M17 17H7V7" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function ArrowUpRightIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="h-4 w-4" aria-hidden="true">
+      <path d="M7 17 17 7M7 7h10v10" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function GiftIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="h-4 w-4" aria-hidden="true">
+      <rect x="3" y="8" width="18" height="4" rx="1" />
+      <path d="M5 12v8a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-8M12 8v13" />
+      <path d="M12 8H8.5a2.5 2.5 0 1 1 0-5C11 3 12 8 12 8ZM12 8h3.5a2.5 2.5 0 1 0 0-5C13 3 12 8 12 8Z" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+/**
+ * What the payer sees right after submitting the reference: either the bank
+ * check credited them, or the agent is confirming by hand. Both states keep
+ * the agent's contact one tap away.
+ */
+function DepositConfirmation({
+  deposit,
+  providerName,
+  onNewDeposit,
+  onViewHistory,
+}: {
+  deposit: Deposit;
+  providerName: string;
+  onNewDeposit: () => void;
+  onViewHistory: () => void;
+}) {
+  const { t } = useI18n();
+  const credited = deposit.status === 'CREDITED' || deposit.verificationStatus === 'VERIFIED';
+  const amount = formatStake(deposit.amount);
+  const agent = deposit.agent ?? null;
+  const agentName = agent?.displayName ?? agent?.agentCode ?? null;
+  const handle = agent?.telegramUsername?.replace(/^@/, '') ?? null;
+  const tel = agent?.phone ? agent.phone.replace(/[^+\d]/g, '') : null;
+  const canContact = Boolean(agentName && (handle || tel));
+
+  return (
+    <Panel className="p-6 text-center">
+      <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-full bg-mint/15 text-mint">
+        {credited ? <CheckIcon /> : <ClockIcon />}
+      </div>
+      <h2 className="mt-3 font-display text-xl font-black">
+        {credited ? t('wallet.depositCreditedTitle') : t('wallet.verificationSentTitle')}
+      </h2>
+      <p className="mx-auto mt-2 max-w-sm text-xs leading-relaxed text-muted">
+        {credited
+          ? t('wallet.depositCreditedBody', { amount, method: providerName })
+          : t('wallet.verificationSentBody', { amount, method: providerName })}
+      </p>
+      <p className="mt-1 text-[11px] text-muted">
+        {credited ? t('wallet.depositCreditedHint') : t('wallet.verificationSentHint')}
+      </p>
+      <p className="mt-2 text-[10px] text-muted">
+        {t('wallet.depositCode')} ·{' '}
+        <span className="font-display text-xs font-bold tracking-[0.2em] text-text">{deposit.code}</span>
+      </p>
+
+      {canContact ? (
+        <div className="mt-4 rounded-xl border border-line/70 bg-ink/40 p-3">
+          <p className="text-[11px] text-muted">{t('wallet.contactAgent')}</p>
+          <p className="mt-0.5 text-xs font-semibold text-text">{agentName}</p>
+          <div className="mt-2 grid grid-cols-2 gap-2">
+            {handle ? (
+              <a
+                href={`https://t.me/${handle}`}
+                target="_blank"
+                rel="noreferrer"
+                className="flex h-10 items-center justify-center gap-1.5 rounded-xl border border-mint/40 bg-mint/10 text-xs font-semibold text-mint transition hover:bg-mint/15"
+              >
+                <TelegramIcon />
+                {t('wallet.contactTelegram')}
+              </a>
+            ) : null}
+            {tel ? (
+              <a
+                href={`tel:${tel}`}
+                className="flex h-10 items-center justify-center gap-1.5 rounded-xl border border-line/70 bg-raised/50 text-xs font-semibold text-text transition hover:border-mint/40"
+              >
+                <PhoneIcon />
+                {t('wallet.callAgent')}
+              </a>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
+
+      <div className="mt-4 grid grid-cols-2 gap-2">
+        <Button variant="outline" onClick={onNewDeposit}>
+          {t('wallet.newDeposit')}
+        </Button>
+        <Button onClick={onViewHistory}>{t('wallet.viewHistory')}</Button>
+      </div>
+    </Panel>
   );
 }
 
@@ -138,8 +473,14 @@ async function fetchBankReceipt(url: string): Promise<{ contentType?: string; bo
   }
 }
 
-function DepositPanel({ onChanged }: { onChanged: () => void }) {
-  const { refreshWallet, wallet } = useSession();
+function DepositPanel({
+  onChanged,
+  onViewHistory,
+}: {
+  onChanged: () => void;
+  onViewHistory: () => void;
+}) {
+  const { refreshWallet } = useSession();
   const { t } = useI18n();
   const [amount, setAmount] = useState('');
   const [providerCode, setProviderCode] = useState('');
@@ -151,6 +492,7 @@ function DepositPanel({ onChanged }: { onChanged: () => void }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [created, setCreated] = useState<Deposit | null>(null);
+  const [submitted, setSubmitted] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [pending, setPending] = useState<Deposit[]>([]);
   const [providers, setProviders] = useState<DepositProvider[]>([]);
@@ -161,6 +503,11 @@ function DepositPanel({ onChanged }: { onChanged: () => void }) {
   const createdProvider = providers.find((item) => item.code === created?.providerCode) ?? null;
   const account = created?.paymentAccount ?? null;
   const open = Boolean(created && (created.status === 'PENDING' || created.status === 'PROCESSING'));
+  const showConfirmation = Boolean(created && submitted && created.verificationStatus !== 'FAILED');
+  const providerMinimum = provider?.minAmount ? BigInt(provider.minAmount) : 0n;
+  const floorMinor = providerMinimum > MIN_DEPOSIT_MINOR ? providerMinimum : MIN_DEPOSIT_MINOR;
+  const minLabel = formatStake(floorMinor.toString());
+  const methodLabel = (method: PaymentMethod) => t(`method.${method}`);
 
   const loadPending = useCallback(async () => {
     try {
@@ -235,6 +582,7 @@ function DepositPanel({ onChanged }: { onChanged: () => void }) {
         }
       }
       setCreated(result.data);
+      setSubmitted(result.data.verificationStatus !== 'FAILED');
       setNotice(result.autoCredited ? t('wallet.depositCredited') : result.verification.message);
       await Promise.all([loadPending(), onChanged()]);
       void refreshWallet();
@@ -296,12 +644,17 @@ function DepositPanel({ onChanged }: { onChanged: () => void }) {
       setError(t('wallet.chooseMethod'));
       return;
     }
-    if (provider.minAmount && BigInt(minor) < BigInt(provider.minAmount)) {
-      setError(t('wallet.providerLimits', { min: formatStake(provider.minAmount), max: provider.maxAmount ? formatStake(provider.maxAmount) : '∞' }));
+    if (BigInt(minor) < floorMinor) {
+      setError(t('wallet.minHint', { amount: minLabel }));
       return;
     }
     if (provider.maxAmount && BigInt(minor) > BigInt(provider.maxAmount)) {
-      setError(t('wallet.providerLimits', { min: formatStake(provider.minAmount), max: formatStake(provider.maxAmount) }));
+      setError(
+        t('wallet.providerLimits', {
+          min: minLabel,
+          max: provider.maxAmount ? formatStake(provider.maxAmount) : '∞',
+        }),
+      );
       return;
     }
     setBusy(true);
@@ -317,6 +670,7 @@ function DepositPanel({ onChanged }: { onChanged: () => void }) {
       });
       idempotency.current = newIdempotencyKey('dep');
       setCreated(deposit);
+      setSubmitted(false);
       setAmount('');
       setReference('');
       setReceiptAccount('');
@@ -332,15 +686,39 @@ function DepositPanel({ onChanged }: { onChanged: () => void }) {
     }
   };
 
+  const startNewDeposit = () => {
+    setCreated(null);
+    setSubmitted(false);
+    setReference('');
+    setReceiptAccount('');
+    setReceiptPhone('');
+    setProof(null);
+    setAmount('');
+    setNote('');
+    setError(null);
+    setNotice(null);
+    idempotency.current = newIdempotencyKey('dep');
+  };
+
   return (
     <div className="space-y-3">
-      {created ? (
+      {created && showConfirmation ? (
+        <DepositConfirmation
+          deposit={created}
+          providerName={createdProvider?.name ?? methodLabel(created.method)}
+          onNewDeposit={startNewDeposit}
+          onViewHistory={onViewHistory}
+        />
+      ) : created ? (
         <Panel className="p-4">
           <div className="flex items-start justify-between gap-2">
             <div>
-              <h2 className="font-display text-base font-bold">{t('wallet.depositOpened')}</h2>
+              <p className="text-[10px] font-semibold uppercase tracking-widest text-muted">
+                {t('wallet.depositOpened')}
+              </p>
+              <h2 className="mt-0.5 font-display text-xl font-black tracking-[0.2em]">{created.code}</h2>
               <p className="text-[11px] text-muted">
-                {PAYMENT_METHODS.find((item) => item.value === created.method)?.label}
+                {methodLabel(created.method)}
                 {created.providerCode ? ` · ${createdProvider?.name ?? created.providerCode}` : ''} ·{' '}
                 {formatCredits(created.amount)} credits
               </p>
@@ -350,10 +728,11 @@ function DepositPanel({ onChanged }: { onChanged: () => void }) {
               <VerificationPill status={created.verificationStatus} />
             </div>
           </div>
+
           {open && created.agent ? (
             <div className="mt-3 rounded-xl border border-mint/30 bg-mint/5 p-3 text-[11px]">
               <p className="text-[10px] font-semibold uppercase tracking-widest text-mint">
-                {t('wallet.paymentDetails')}
+                {t('wallet.stepPay')}
               </p>
               <p className="mt-1 font-semibold text-text">
                 {t('wallet.payAgent', {
@@ -392,6 +771,9 @@ function DepositPanel({ onChanged }: { onChanged: () => void }) {
 
           {open && createdProvider ? (
             <div className="mt-3 space-y-3">
+              <p className="text-[10px] font-semibold uppercase tracking-widest text-muted">
+                {t('wallet.stepSubmit')}
+              </p>
               <Input
                 label={t('wallet.receiptReference')}
                 placeholder={createdProvider.refHint ?? 'FT…'}
@@ -454,54 +836,67 @@ function DepositPanel({ onChanged }: { onChanged: () => void }) {
       ) : null}
 
       <Panel className="p-4">
-        <h2 className="font-display text-base font-bold">{t('wallet.buyCredits')}</h2>
+        <h2 className="font-display text-base font-bold">{t('wallet.deposit')}</h2>
         <p className="mt-0.5 text-[11px] text-muted">{t('wallet.buyCreditsBlurb')}</p>
 
         <div className="mt-3">
-          <Select
-            label={t('wallet.provider')}
-            value={providerCode}
-            onChange={(event) => setProviderCode(event.target.value)}
-          >
-            <option value="">{t('wallet.chooseMethod')}</option>
-            {providers.map((item) => (
-              <option key={item.code} value={item.code}>
-                {item.name} · {PAYMENT_METHODS.find((entry) => entry.value === item.method)?.label}
-              </option>
-            ))}
-          </Select>
+          <AmountField
+            label={t('wallet.depositAmount')}
+            value={amount}
+            onChange={setAmount}
+            placeholder={t('wallet.amountPlaceholder', { min: minLabel })}
+            hint={t('wallet.minHint', { amount: minLabel })}
+          />
+          <QuickAmounts value={amount} onPick={setAmount} />
+        </div>
+
+        <div className="mt-4">
+          <p className="text-[10px] font-semibold uppercase tracking-widest text-muted">
+            {t('wallet.selectPaymentMethod')}
+          </p>
           {providers.length === 0 ? (
             <p className="mt-1 text-[11px] text-warn">{t('wallet.noDepositMethods')}</p>
-          ) : null}
+          ) : (
+            <div className="mt-1.5 grid grid-cols-2 gap-2">
+              {providers.map((item) => {
+                const active = item.code === providerCode;
+                return (
+                  <button
+                    key={item.code}
+                    type="button"
+                    onClick={() => setProviderCode(item.code)}
+                    aria-pressed={active}
+                    className={cn(
+                      'rounded-xl border p-2.5 text-left transition',
+                      active
+                        ? 'border-mint/60 bg-mint/10'
+                        : 'border-line/70 bg-raised/50 hover:border-mint/40',
+                    )}
+                  >
+                    <span className={cn('block text-xs font-semibold', active ? 'text-mint' : 'text-text')}>
+                      {item.name}
+                    </span>
+                    <span className="block text-[10px] text-muted">{methodLabel(item.method)}</span>
+                    {item.minAmount || item.maxAmount ? (
+                      <span className="mt-0.5 block text-[10px] text-muted">
+                        {item.minAmount ? formatStake(item.minAmount) : '0'} –{' '}
+                        {item.maxAmount ? formatStake(item.maxAmount) : '∞'}
+                      </span>
+                    ) : null}
+                  </button>
+                );
+              })}
+            </div>
+          )}
         </div>
 
         {provider ? (
-          <div className="mt-3 rounded-xl border border-gold/25 bg-gold/5 p-3 text-[11px] text-muted">
-            <p className="font-semibold text-gold">
-              {provider.name}
-              {provider.minAmount || provider.maxAmount ? (
-                <span className="ml-2 font-normal">
-                  {formatStake(provider.minAmount ?? undefined)} –{' '}
-                  {provider.maxAmount ? formatStake(provider.maxAmount) : '∞'} cr
-                </span>
-              ) : null}
-            </p>
+          <div className="mt-2 rounded-xl border border-gold/25 bg-gold/5 p-3 text-[11px] text-muted">
+            <p className="font-semibold text-gold">{provider.name}</p>
             {provider.instructions ? <p className="mt-1">{provider.instructions}</p> : null}
-            <p className="mt-1">
-              {provider.supported ? t('wallet.autoCheckOn') : t('wallet.manualConfirm')}
-            </p>
+            <p className="mt-1">{provider.supported ? t('wallet.autoCheckOn') : t('wallet.manualConfirm')}</p>
           </div>
         ) : null}
-
-        <div className="mt-3">
-          <Input
-            label={t('wallet.amount')}
-            inputMode="decimal"
-            placeholder="50"
-            value={amount}
-            onChange={(event) => setAmount(event.target.value)}
-          />
-        </div>
 
         <div className="mt-3">
           <Input
@@ -518,17 +913,26 @@ function DepositPanel({ onChanged }: { onChanged: () => void }) {
         ) : null}
         <Button
           className="mt-3 w-full"
+          size="lg"
           loading={busy}
           disabled={!provider || providers.length === 0}
           onClick={() => void submit()}
         >
-          {t('wallet.openDeposit')}
+          {t('wallet.depositButton')}
         </Button>
-        {wallet ? (
-          <p className="mt-2 text-center text-[10px] text-muted">
-            {t('wallet.currentBalance', { amount: formatCredits(wallet.available) })}
-          </p>
-        ) : null}
+        <div className="mt-3">
+          <HelpSteps
+            title={t('wallet.helpHowToDeposit')}
+            steps={[
+              t('wallet.depositStep1'),
+              t('wallet.depositStep2'),
+              t('wallet.depositStep3'),
+              t('wallet.depositStep4'),
+              t('wallet.depositStep5'),
+              t('wallet.depositStep6'),
+            ]}
+          />
+        </div>
       </Panel>
 
       {pending.length > 0 ? (
@@ -656,60 +1060,66 @@ function WithdrawPanel({ onChanged }: { onChanged: () => void }) {
       ) : null}
 
       <Panel className="p-4">
-        <div className="flex items-start justify-between gap-3">
-          <div>
-            <h2 className="font-display text-base font-bold">{t('wallet.cashOut')}</h2>
-            <p className="mt-0.5 text-[11px] text-muted">
-              {t('wallet.cashOutBlurb')}
-            </p>
-          </div>
-          <span className="text-right text-[10px] text-muted">
-            {t('wallet.available')}
-            <span className="block font-display text-sm font-bold text-gold">
-              {wallet ? formatCredits(wallet.available) : '—'}
-            </span>
-          </span>
+        <h2 className="font-display text-base font-bold">{t('wallet.withdraw')}</h2>
+        <p className="mt-0.5 text-[11px] text-muted">{t('wallet.cashOutBlurb')}</p>
+
+        <div className="mt-3">
+          <AmountField
+            label={t('wallet.withdrawAmount')}
+            value={amount}
+            onChange={setAmount}
+            placeholder={t('wallet.withdrawPlaceholder')}
+            hint={`${t('wallet.available')} ${wallet ? formatCredits(wallet.available) : '—'} cr`}
+            action={
+              <button
+                type="button"
+                onClick={() => setAmount(max)}
+                className="rounded-md bg-raised px-2 py-0.5 text-[10px] font-bold uppercase text-mint"
+              >
+                {t('wallet.max')}
+              </button>
+            }
+          />
         </div>
-        <div className="mt-3 grid gap-3 sm:grid-cols-2">
-          <div className="relative">
-            <Input
-              label={t('wallet.amount')}
-              inputMode="decimal"
-              placeholder="50"
-              value={amount}
-              onChange={(event) => setAmount(event.target.value)}
-            />
-            <button
-              type="button"
-              onClick={() => setAmount(max)}
-              className="absolute right-2 top-[30px] rounded-md bg-raised px-2 py-1 text-[10px] font-bold uppercase text-mint"
-            >
-              {t('wallet.max')}
-            </button>
+
+        <div className="mt-4">
+          <p className="text-[10px] font-semibold uppercase tracking-widest text-muted">
+            {t('wallet.selectPaymentMethod')}
+          </p>
+          <div className="mt-1.5 grid grid-cols-2 gap-2 sm:grid-cols-3">
+            {PAYMENT_METHODS.map((option) => {
+              const active = option.value === method;
+              return (
+                <button
+                  key={option.value}
+                  type="button"
+                  onClick={() => setMethod(option.value)}
+                  aria-pressed={active}
+                  className={cn(
+                    'h-10 rounded-xl border text-xs font-semibold transition',
+                    active
+                      ? 'border-mint/60 bg-mint/10 text-mint'
+                      : 'border-line/70 bg-raised/50 text-muted hover:border-mint/40 hover:text-text',
+                  )}
+                >
+                  {t(`method.${option.value}`)}
+                </button>
+              );
+            })}
           </div>
-          <Select
-            label={t('wallet.paymentMethod')}
-            value={method}
-            onChange={(event) => setMethod(event.target.value as PaymentMethod)}
-          >
-            {PAYMENT_METHODS.map((option) => (
-              <option key={option.value} value={option.value}>
-                {option.label}
-              </option>
-            ))}
-          </Select>
         </div>
-        <p className="mt-3 rounded-xl border border-line/70 bg-ink/40 px-3 py-2 text-[11px] text-muted">
-          {t('wallet.anyAgentPays')}
-        </p>
+
         <div className="mt-3">
           <Input
-            label={t('wallet.noteOptional')}
-            placeholder="Payout at the market stall"
+            label={t('wallet.payoutDetails')}
+            placeholder={t('wallet.payoutDetailsPlaceholder')}
             value={note}
             onChange={(event) => setNote(event.target.value)}
           />
         </div>
+        <p className="mt-3 rounded-xl border border-line/70 bg-ink/40 px-3 py-2 text-[11px] text-muted">
+          {t('wallet.anyAgentPays')}
+        </p>
         {error ? (
           <div className="mt-3">
             <ErrorNote>{error}</ErrorNote>
@@ -717,12 +1127,26 @@ function WithdrawPanel({ onChanged }: { onChanged: () => void }) {
         ) : null}
         <Button
           className="mt-3 w-full"
+          size="lg"
           variant="gold"
           loading={busy}
           onClick={() => void submit()}
         >
-          {t('wallet.requestPayout')}
+          {t('wallet.requestWithdrawal')}
         </Button>
+        <div className="mt-3">
+          <HelpSteps
+            title={t('wallet.helpHowToWithdraw')}
+            steps={[
+              t('wallet.withdrawStep1'),
+              t('wallet.withdrawStep2'),
+              t('wallet.withdrawStep3'),
+              t('wallet.withdrawStep4'),
+              t('wallet.withdrawStep5'),
+              t('wallet.withdrawStep6'),
+            ]}
+          />
+        </div>
       </Panel>
 
       {open.length > 0 ? (
@@ -763,19 +1187,110 @@ function WithdrawPanel({ onChanged }: { onChanged: () => void }) {
   );
 }
 
-function HistoryPanel() {
+interface ActivityRow {
+  id: string;
+  title: string;
+  amount: string;
+  meta: string;
+  createdAt: string;
+  icon: ReactNode;
+  tileClass: string;
+  badge: { label: string; tone: 'mint' | 'gold' | 'warn' | 'danger' | 'neutral' } | null;
+}
+
+function ActivityRowCard({ row }: { row: ActivityRow }) {
+  const negative = row.amount.startsWith('-');
+  return (
+    <div className="flex items-center gap-3 rounded-2xl border border-line/70 bg-panel p-3.5">
+      <div className={cn('flex h-10 w-10 shrink-0 items-center justify-center rounded-xl', row.tileClass)}>
+        {row.icon}
+      </div>
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center justify-between gap-2">
+          <span className="truncate text-[11px] font-semibold uppercase tracking-wide text-text">{row.title}</span>
+          <span
+            className={cn(
+              'shrink-0 font-display text-sm font-bold tabular-nums',
+              negative ? 'text-danger' : 'text-mint',
+            )}
+          >
+            {negative ? '−' : '+'}
+            {formatStake(negative ? row.amount.slice(1) : row.amount)}
+            <span className="ml-1 text-[9px] font-semibold uppercase text-muted">ETB</span>
+          </span>
+        </div>
+        <div className="mt-0.5 flex items-center justify-between gap-2">
+          <span className="truncate text-[10px] text-muted">{row.meta}</span>
+          {row.badge ? <Pill tone={row.badge.tone}>{row.badge.label}</Pill> : null}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function FilterChips<T extends string>({
+  value,
+  options,
+  onChange,
+}: {
+  value: T;
+  options: Array<{ value: T; label: string }>;
+  onChange: (value: T) => void;
+}) {
+  return (
+    <div className="flex gap-1.5 overflow-x-auto pb-1">
+      {options.map((item) => (
+        <button
+          key={item.value}
+          type="button"
+          onClick={() => onChange(item.value)}
+          aria-pressed={value === item.value}
+          className={cn(
+            'shrink-0 rounded-full border px-3 py-1.5 text-[11px] font-semibold transition',
+            value === item.value
+              ? 'border-mint/50 bg-mint/10 text-mint'
+              : 'border-line/70 bg-raised/40 text-muted hover:text-text',
+          )}
+        >
+          {item.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function HistoryPanel({
+  section,
+  onSectionChange,
+}: {
+  section: ActivitySection;
+  onSectionChange: (value: ActivitySection) => void;
+}) {
   const { t } = useI18n();
   const [lines, setLines] = useState<TransactionLine[] | null>(null);
+  const [deposits, setDeposits] = useState<Deposit[]>([]);
+  const [withdrawals, setWithdrawals] = useState<Withdrawal[]>([]);
+  const [providers, setProviders] = useState<DepositProvider[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [betFilter, setBetFilter] = useState<BetFilter>('all');
+  const [financeFilter, setFinanceFilter] = useState<FinanceFilter>('all');
 
   const load = useCallback(async () => {
     try {
-      setLines(await fetchTransactions(60));
+      const [nextLines, nextDeposits, nextWithdrawals] = await Promise.all([
+        fetchTransactions(60),
+        fetchDeposits(),
+        fetchWithdrawals(),
+      ]);
+      setLines(nextLines);
+      setDeposits(nextDeposits);
+      setWithdrawals(nextWithdrawals);
       setError(null);
     } catch {
       setError(t('wallet.historyError'));
     }
-  }, []);
+    setProviders(await fetchDepositProviders().catch(() => []));
+  }, [t]);
 
   useEffect(() => {
     void load();
@@ -789,41 +1304,178 @@ function HistoryPanel() {
       </div>
     );
   }
-  if (lines.length === 0) {
-    return <EmptyState title={t('wallet.noMovements')} body={t('wallet.noMovementsBody')} />;
-  }
+
+  const methodLabel = (method: PaymentMethod) => t(`method.${method}`);
+  const providerName = (code: string | null) => providers.find((item) => item.code === code)?.name ?? code;
+
+  const betTitle = (kind: string): string => {
+    switch (kind) {
+      case 'CARD_PURCHASE':
+        return t('wallet.betCardPurchase');
+      case 'ROUND_PAYOUT':
+        return t('wallet.betRoundWin');
+      case 'ROUND_REFUND':
+        return t('wallet.betRoundRefund');
+      case 'PROVIDER_BET':
+        return t('wallet.betProvider');
+      case 'PROVIDER_WIN':
+        return t('wallet.betProviderWin');
+      default:
+        return kind.replaceAll('_', ' ').toLowerCase();
+    }
+  };
+
+  const betRows: ActivityRow[] = lines
+    .filter((line) => BET_KINDS.has(line.kind))
+    .filter((line) => {
+      if (betFilter === 'won') return isWinningBet(line.kind);
+      if (betFilter === 'lost') return isLosingBet(line.kind);
+      return true;
+    })
+    .map((line) => {
+      const won = isWinningBet(line.kind);
+      const refund = line.kind === 'ROUND_REFUND';
+      return {
+        id: `bet-${line.id}`,
+        title: betTitle(line.kind),
+        amount: line.amount,
+        meta: [line.memo, timeAgo(line.createdAt)].filter(Boolean).join(' · '),
+        createdAt: line.createdAt,
+        icon: refund ? <RefundIcon /> : won ? <TrophyIcon /> : <TicketIcon />,
+        tileClass: refund ? 'bg-raised text-muted' : won ? 'bg-mint/15 text-mint' : 'bg-gold/15 text-gold',
+        badge: refund
+          ? { label: t('wallet.betRefunded'), tone: 'neutral' as const }
+          : won
+            ? { label: t('wallet.betWon'), tone: 'mint' as const }
+            : null,
+      };
+    });
+
+  const depositRows: ActivityRow[] = deposits.map((deposit) => ({
+    id: `dep-${deposit.id}`,
+    title: t('wallet.deposit'),
+    amount: deposit.amount,
+    meta: [providerName(deposit.providerCode) ?? methodLabel(deposit.method), timeAgo(deposit.createdAt)].join(' · '),
+    createdAt: deposit.createdAt,
+    icon: <ArrowDownLeftIcon />,
+    tileClass: 'bg-mint/15 text-mint',
+    badge: { label: t(financeStatus(deposit.status).labelKey), tone: financeStatus(deposit.status).tone },
+  }));
+
+  const withdrawalRows: ActivityRow[] = withdrawals.map((withdrawal) => ({
+    id: `wd-${withdrawal.id}`,
+    title: t('wallet.finWithdrawal'),
+    amount: `-${withdrawal.amount}`,
+    meta: [methodLabel(withdrawal.method), timeAgo(withdrawal.createdAt)].join(' · '),
+    createdAt: withdrawal.createdAt,
+    icon: <ArrowUpRightIcon />,
+    tileClass: 'bg-danger/10 text-danger',
+    badge: { label: t(financeStatus(withdrawal.status).labelKey), tone: financeStatus(withdrawal.status).tone },
+  }));
+
+  const otherRows: ActivityRow[] = lines
+    .filter((line) => isFinanceKind(line.kind))
+    .map((line) => ({
+      id: `fin-${line.id}`,
+      title: line.kind.startsWith('BONUS')
+        ? t('wallet.finBonus')
+        : line.kind === 'AFFILIATE_COMMISSION'
+          ? t('wallet.finCommission')
+          : t('wallet.finAdjustment'),
+      amount: line.amount,
+      meta: [line.memo, timeAgo(line.createdAt)].filter(Boolean).join(' · '),
+      createdAt: line.createdAt,
+      icon: <GiftIcon />,
+      tileClass: 'bg-gold/15 text-gold',
+      badge: null,
+    }));
+
+  const financeRows = [...depositRows, ...withdrawalRows, ...otherRows]
+    .filter((row) => {
+      if (financeFilter === 'deposits') return row.id.startsWith('dep-');
+      if (financeFilter === 'withdrawals') return row.id.startsWith('wd-');
+      if (financeFilter === 'bonuses') return row.id.startsWith('fin-');
+      return true;
+    })
+    .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
+
+  const rows = section === 'bets' ? betRows : financeRows;
+  const empty =
+    section === 'bets'
+      ? {
+          title: betFilter === 'all' ? t('wallet.noBets') : t('wallet.noFiltered'),
+          body: betFilter === 'all' ? t('wallet.noBetsBody') : undefined,
+        }
+      : {
+          title: financeFilter === 'all' ? t('wallet.noFinances') : t('wallet.noFiltered'),
+          body: financeFilter === 'all' ? t('wallet.noFinancesBody') : undefined,
+        };
 
   return (
-    <Panel className="divide-y divide-line/60">
-      {lines.map((line) => {
-        const negative = line.amount.startsWith('-');
-        return (
-          <div key={line.id} className="flex items-center justify-between gap-3 px-4 py-2.5">
-            <div className="min-w-0">
-              <p className="truncate text-xs font-semibold">
-                {line.kind.replaceAll('_', ' ').toLowerCase()}
-                {line.memo ? <span className="font-normal text-muted"> · {line.memo}</span> : null}
-              </p>
-              <p className="text-[10px] text-muted">
-                {line.account} · {formatDateTime(line.createdAt)}
-              </p>
-            </div>
-            <div className="text-right">
-              <p
-                className={cn(
-                  'font-display text-sm font-bold tabular-nums',
-                  negative ? 'text-muted' : 'text-mint',
-                )}
-              >
-                {negative ? '' : '+'}
-                {formatCredits(line.amount)}
-              </p>
-              <p className="text-[10px] text-muted">bal {formatCredits(line.balanceAfter)}</p>
-            </div>
-          </div>
-        );
-      })}
-    </Panel>
+    <div className="space-y-3">
+      <div className="flex items-center justify-between gap-2 px-1">
+        <p className="text-[10px] font-semibold uppercase tracking-widest text-muted">{t('wallet.activity')}</p>
+        <button type="button" onClick={() => void load()} className="text-[11px] font-semibold text-mint">
+          {t('common.refresh')}
+        </button>
+      </div>
+
+      <div className="grid grid-cols-2 gap-1 rounded-xl border border-line/70 bg-ink/40 p-1">
+        {(
+          [
+            { value: 'bets' as const, label: t('wallet.activityBets'), icon: <TicketIcon /> },
+            { value: 'finances' as const, label: t('wallet.activityFinances'), icon: <CardIcon /> },
+          ]
+        ).map((item) => (
+          <button
+            key={item.value}
+            type="button"
+            onClick={() => onSectionChange(item.value)}
+            aria-pressed={section === item.value}
+            className={cn(
+              'flex h-10 items-center justify-center gap-2 rounded-lg text-xs font-semibold transition',
+              section === item.value ? 'bg-mint/15 text-mint shadow-sm' : 'text-muted hover:text-text',
+            )}
+          >
+            {item.icon}
+            {item.label}
+          </button>
+        ))}
+      </div>
+
+      {section === 'bets' ? (
+        <FilterChips<BetFilter>
+          value={betFilter}
+          onChange={setBetFilter}
+          options={[
+            { value: 'all', label: t('wallet.filterAll') },
+            { value: 'won', label: t('wallet.betWon') },
+            { value: 'lost', label: t('wallet.betLost') },
+          ]}
+        />
+      ) : (
+        <FilterChips<FinanceFilter>
+          value={financeFilter}
+          onChange={setFinanceFilter}
+          options={[
+            { value: 'all', label: t('wallet.filterAll') },
+            { value: 'deposits', label: t('wallet.filterDeposits') },
+            { value: 'withdrawals', label: t('wallet.filterWithdrawals') },
+            { value: 'bonuses', label: t('wallet.filterBonuses') },
+          ]}
+        />
+      )}
+
+      {rows.length === 0 ? (
+        <EmptyState title={empty.title} body={empty.body} />
+      ) : (
+        <div className="space-y-2">
+          {rows.map((row) => (
+            <ActivityRowCard key={row.id} row={row} />
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -831,10 +1483,28 @@ export default function WalletPage() {
   const { wallet, refreshWallet } = useSession();
   const { t } = useI18n();
   const [tab, setTab] = useState<Tab>('deposit');
+  const [historySection, setHistorySection] = useState<ActivitySection>('bets');
+  const [lowBalanceDismissed, setLowBalanceDismissed] = useState(true);
 
   const bump = useCallback(async () => {
     await refreshWallet().catch(() => undefined);
   }, [refreshWallet]);
+
+  useEffect(() => {
+    const requested = new URLSearchParams(window.location.search).get('tab');
+    if (requested === 'deposit' || requested === 'withdraw' || requested === 'history') {
+      setTab(requested);
+    }
+    setLowBalanceDismissed(window.sessionStorage.getItem(LOW_BALANCE_KEY) === '1');
+  }, []);
+
+  const dismissLowBalance = () => {
+    setLowBalanceDismissed(true);
+    window.sessionStorage.setItem(LOW_BALANCE_KEY, '1');
+  };
+
+  const lowBalance = Boolean(wallet && BigInt(wallet.available) < LOW_BALANCE_MINOR && !lowBalanceDismissed);
+  const hasLocked = Boolean(wallet && (wallet.escrow !== '0' || wallet.locked !== '0'));
 
   return (
     <div className="space-y-4">
@@ -843,29 +1513,80 @@ export default function WalletPage() {
         <p className="text-xs text-muted">{t('wallet.blurb')}</p>
       </div>
 
-      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-        <Stat label={t('wallet.playable')} value={wallet ? formatCredits(wallet.available) : '—'} />
-        <Stat label={t('wallet.escrow')} value={wallet ? formatCredits(wallet.escrow) : '—'} />
-        <Stat label={t('wallet.inPlay')} value={wallet ? formatCredits(wallet.locked) : '—'} />
-        <Stat
-          label={t('wallet.lifetimeWon')}
-          value={wallet ? formatCredits(wallet.lifetimeWon) : '—'}
-          className="col-span-2 sm:col-span-1"
-        />
-      </div>
+      <Panel className="overflow-hidden">
+        <div className="bg-gradient-to-br from-mint/15 via-panel to-gold/10 p-4">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <p className="text-[10px] font-semibold uppercase tracking-widest text-muted">
+                {t('wallet.totalBalance')}
+              </p>
+              <p className="mt-1 font-display text-4xl font-black tracking-tight text-text">
+                {wallet ? formatCredits(wallet.available) : '—'}
+                <span className="ml-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted">cr</span>
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => void bump()}
+              className="rounded-lg border border-line/70 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-muted transition hover:text-text"
+            >
+              {t('common.refresh')}
+            </button>
+          </div>
 
-      <div className="flex items-center justify-between px-1 text-[11px] text-muted">
-        <span>
-          {t('wallet.depositedWithdrawn', {
-            deposited: wallet ? formatCredits(wallet.lifetimeDeposited) : '—',
-            withdrawn: wallet ? formatCredits(wallet.lifetimeWithdrawn) : '—',
-            wagered: wallet ? formatCredits(wallet.lifetimeWagered) : '—',
-          })}
-        </span>
-        <button type="button" onClick={() => void bump()} className="font-semibold text-mint">
-          {t('common.refresh')}
-        </button>
-      </div>
+          <div className="mt-4 grid grid-cols-3 gap-2">
+            <MiniStat label={t('wallet.won')} value={wallet ? formatCredits(wallet.lifetimeWon) : '—'} />
+            <MiniStat
+              label={t('wallet.deposited')}
+              value={wallet ? formatCredits(wallet.lifetimeDeposited) : '—'}
+            />
+            <MiniStat
+              label={t('wallet.freebets')}
+              value={wallet ? formatCredits(wallet.bonus) : '—'}
+              gold
+            />
+          </div>
+
+          <div className="mt-4 grid grid-cols-2 gap-2">
+            <Button size="lg" onClick={() => setTab('deposit')}>
+              {t('wallet.deposit')}
+            </Button>
+            <Button size="lg" variant="outline" onClick={() => setTab('withdraw')}>
+              {t('wallet.withdraw')}
+            </Button>
+          </div>
+
+          {hasLocked && wallet ? (
+            <p className="mt-2 text-center text-[10px] text-muted">
+              {t('wallet.inEscrowShort', {
+                escrow: formatCredits(wallet.escrow),
+                locked: formatCredits(wallet.locked),
+              })}
+            </p>
+          ) : null}
+        </div>
+      </Panel>
+
+      {lowBalance ? (
+        <div className="flex items-center justify-between gap-3 rounded-xl border border-warn/30 bg-warn/10 px-3 py-2.5">
+          <div>
+            <p className="text-xs font-semibold text-warn">{t('wallet.lowBalance')}</p>
+            <p className="text-[11px] text-muted">{t('wallet.lowBalanceBody')}</p>
+          </div>
+          <div className="flex shrink-0 items-center gap-2">
+            <button
+              type="button"
+              onClick={dismissLowBalance}
+              className="text-[11px] font-semibold text-muted"
+            >
+              {t('wallet.notNow')}
+            </button>
+            <Button size="sm" onClick={() => setTab('deposit')}>
+              {t('wallet.depositNow')}
+            </Button>
+          </div>
+        </div>
+      ) : null}
 
       <Tabs<Tab>
         value={tab}
@@ -877,9 +1598,19 @@ export default function WalletPage() {
         ]}
       />
 
-      {tab === 'deposit' ? <DepositPanel onChanged={bump} /> : null}
+      {tab === 'deposit' ? (
+        <DepositPanel
+          onChanged={bump}
+          onViewHistory={() => {
+            setHistorySection('finances');
+            setTab('history');
+          }}
+        />
+      ) : null}
       {tab === 'withdraw' ? <WithdrawPanel onChanged={bump} /> : null}
-      {tab === 'history' ? <HistoryPanel /> : null}
+      {tab === 'history' ? (
+        <HistoryPanel section={historySection} onSectionChange={setHistorySection} />
+      ) : null}
     </div>
   );
 }

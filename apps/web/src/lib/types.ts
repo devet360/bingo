@@ -284,6 +284,8 @@ export interface Deposit {
     agentCode: string;
     displayName: string | null;
     avatarUrl: string | null;
+    phone: string | null;
+    telegramUsername: string | null;
     isOnline: boolean;
     autoDepositEnabled: boolean;
     autoDepositThreshold: string | null;

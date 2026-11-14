@@ -191,6 +191,16 @@ export const openApiDocument = {
               id: { type: 'string', format: 'uuid' },
               agentCode: { type: 'string' },
               displayName: { type: 'string', nullable: true },
+              phone: {
+                type: 'string',
+                nullable: true,
+                description: 'Contact phone shown to the payer on the confirmation screen.',
+              },
+              telegramUsername: {
+                type: 'string',
+                nullable: true,
+                description: 'Telegram handle (without @) the payer can message for help.',
+              },
               isOnline: { type: 'boolean' },
               autoDepositEnabled: { type: 'boolean' },
               autoDepositThreshold: { ...money, nullable: true },
