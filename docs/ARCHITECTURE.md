@@ -419,17 +419,22 @@ stateDiagram-v2
   [*] --> WAITING
   WAITING --> WAITING: cards sold · pot recalculated
   WAITING --> WAITING: below minPlayersToStart · sales window extended
-  WAITING --> CANCELLED: no cards · or underfilled for 5 minutes
-  WAITING --> LOCKED: purchaseClosesAt elapsed
+  WAITING --> CANCELLED: underfilled for 5 minutes
+  WAITING --> LOCKED: purchaseClosesAt elapsed · with or without cards
   LOCKED --> PLAYING: lockWindowSecs elapsed · ballOrder committed
   PLAYING --> PLAYING: ball drawn every drawIntervalMs
   PLAYING --> CLAIM_VERIFICATION: a card completes an allowed pattern
+  PLAYING --> COMPLETED: preview round · 20 balls · no cards sold
   CLAIM_VERIFICATION --> COMPLETED: claim window closes · payout posted
   CLAIM_VERIFICATION --> CANCELLED: nothing payable · stakes refunded
   PLAYING --> CANCELLED: ball pool exhausted · stakes refunded
   COMPLETED --> [*]
   CANCELLED --> [*]
 ```
+
+A round that sold no cards still starts and draws a short preview (20 balls at a
+faster cadence) so anyone watching sees a real, verifiable draw; it then completes
+with no pot, and the room reopens for sales.
 
 Ownership: `RoundEngine` (inside the API process) owns the clock. It polls each open room
 with a single timer, calls `lockRound` at `purchaseClosesAt`, draws one ball per

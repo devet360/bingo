@@ -4,6 +4,7 @@ import { logger } from '../lib/logger';
 import { AppError } from '../lib/errors';
 import {
   cancelRound,
+  completeEmptyRound,
   drawBall,
   ensureRound,
   lockRound,
@@ -16,6 +17,10 @@ const ACTIVE_STATUSES = ['WAITING', 'LOCKED', 'PLAYING', 'CLAIM_VERIFICATION'] a
 const MIN_DELAY_MS = 20;
 const MAX_DELAY_MS = 5_000;
 const DISCOVERY_INTERVAL_MS = 30_000;
+// Rooms with no sold cards run a short preview draw so spectators see balls
+// moving; its faster cadence keeps the wait before the next sales window short.
+const EMPTY_DRAW_INTERVAL_MS = 800;
+const EMPTY_PREVIEW_BALLS = 20;
 
 function clampDelay(ms: number): number {
   return Math.min(MAX_DELAY_MS, Math.max(MIN_DELAY_MS, Math.round(ms)));
@@ -121,7 +126,8 @@ export class RoundEngine {
         if (outcome.action === 'extended' && outcome.round.purchaseClosesAt) {
           return outcome.round.purchaseClosesAt.getTime() - Date.now();
         }
-        // Idle rooms cycle rounds lazily instead of churning a row every window.
+        // Sales closed; the next tick moves the round to LOCKED (or re-checks a
+        // carded round that was underfilled and had to be refunded).
         return outcome.action === 'cancel' ? 2_000 : 50;
       }
 
@@ -133,15 +139,24 @@ export class RoundEngine {
       }
 
       case 'PLAYING': {
-        const deadline = (round.lastDrawAt?.getTime() ?? now) + round.room.drawIntervalMs;
+        const interval = round.cardsSold === 0 ? EMPTY_DRAW_INTERVAL_MS : round.room.drawIntervalMs;
+        if (round.cardsSold === 0 && round.drawnBalls.length >= EMPTY_PREVIEW_BALLS) {
+          await this.finishEmpty(round.id);
+          return 300;
+        }
+        const deadline = (round.lastDrawAt?.getTime() ?? now) + interval;
         if (now < deadline) return deadline - now;
         const outcome = await drawBall(round.id);
         if (outcome.action === 'exhausted') {
+          if (round.cardsSold === 0) {
+            await this.finishEmpty(round.id);
+            return 300;
+          }
           await cancelRound(round.id, 'ball_pool_exhausted');
           return 200;
         }
         if (outcome.action === 'skipped') return 100;
-        return round.room.drawIntervalMs;
+        return interval;
       }
 
       case 'CLAIM_VERIFICATION': {
@@ -159,6 +174,12 @@ export class RoundEngine {
       default:
         return 1_000;
     }
+  }
+
+  /** Ends a preview round; cancellation is only a fallback for a lost race. */
+  private async finishEmpty(roundId: string): Promise<void> {
+    const finished = await completeEmptyRound(roundId);
+    if (!finished) await cancelRound(roundId, 'preview_finished');
   }
 }
 

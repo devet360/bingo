@@ -160,6 +160,7 @@ export function useRoomLive(
               drawnBalls: drawn,
               currentBall: payload.ball,
               status: payload.status,
+              lastDrawAt: new Date().toISOString(),
             },
           };
         });

@@ -298,15 +298,9 @@ export async function lockRound(roundId: string): Promise<LockRoundOutcome> {
       if (!round) throw Errors.notFound('Round');
       if (round.status !== 'WAITING') return { action: 'skipped' as const, round };
 
-      if (round.cardsSold === 0) {
-        const cancelled = await tx.bingoRound.update({
-          where: { id: round.id },
-          data: { status: 'CANCELLED', completedAt: new Date(), purchaseClosesAt: null },
-        });
-        return { action: 'cancel' as const, round: cancelled, reason: 'no_players' };
-      }
-
-      if (round.uniquePlayers < round.room.minPlayersToStart) {
+      // A round with no cards still locks and draws: spectators watch a real,
+      // verifiable draw instead of an endless "cancelled, sales closed" loop.
+      if (round.cardsSold > 0 && round.uniquePlayers < round.room.minPlayersToStart) {
         const waited = Date.now() - round.createdAt.getTime();
         if (waited >= MAX_UNDERFILLED_WAIT_MS) {
           return { action: 'cancel' as const, round, reason: 'underfilled' };
@@ -775,6 +769,43 @@ export async function settleRound(roundId: string): Promise<SettleOutcome> {
     await emitCancelled(roundId, outcome.reason);
   }
   return outcome;
+}
+
+/**
+ * Closes a preview round that never sold a card. There is no pot, so nothing is
+ * paid out or refunded; the draw is finished and its seed revealed like any
+ * other round, which lets the room move straight into the next sales window.
+ */
+export async function completeEmptyRound(roundId: string): Promise<boolean> {
+  const round = await withTxRetry(() =>
+    runTransaction(async (tx) => {
+      await advisoryXactLock(tx, `round:${roundId}`);
+      const live = await tx.bingoRound.findUnique({ where: { id: roundId } });
+      if (!live) throw Errors.notFound('Round');
+      if (live.cardsSold > 0) return null;
+      if (live.status !== 'PLAYING' && live.status !== 'LOCKED') return null;
+      return tx.bingoRound.update({
+        where: { id: live.id },
+        data: {
+          status: 'COMPLETED',
+          completedAt: new Date(),
+          seedRevealedAt: new Date(),
+        },
+      });
+    }),
+  );
+
+  if (!round) return false;
+  bingoEvents.publish({
+    type: 'settled',
+    roomId: round.roomId,
+    roundId: round.id,
+    winners: [],
+    rake: round.rakeAmount.toString(),
+    prizePool: round.prizePool.toString(),
+    serverSeed: round.serverSeed,
+  });
+  return true;
 }
 
 export async function cancelRound(roundId: string, reason: string): Promise<void> {

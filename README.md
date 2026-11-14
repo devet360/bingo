@@ -158,7 +158,9 @@ the parser or its host allowlist. Support → Receipts shows every verification 
 `RoundEngine` keeps one timer per open room. A round moves
 `WAITING → LOCKED → PLAYING → CLAIM_VERIFICATION → COMPLETED`; card sales debit
 `AVAILABLE → LOCKED`, the payout journal debits every `LOCKED` stake and credits the
-winners plus `PLATFORM.RAKE`. Cancelled or underfilled rounds refund in full.
+winners plus `PLATFORM.RAKE`. Cancelled or underfilled rounds refund in full. A round
+that sold no cards still draws a short 20-ball preview and completes with no pot, so
+people in the room always see live balls instead of an idle, cancelled table.
 
 The draw order is committed before the first ball: `serverSeedHash` is published with the
 round, `ballOrder` is derived from `HMAC_SHA256(serverSeed, clientSeed:nonce)` plus
