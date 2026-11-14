@@ -1,0 +1,34 @@
+# syntax=docker/dockerfile:1
+# API + worker image for Dokku (apps/api). Build context is the repo root.
+FROM node:22-bookworm-slim AS build
+WORKDIR /app
+
+COPY package.json package-lock.json ./
+COPY apps/api/package.json apps/api/package.json
+COPY apps/web/package.json apps/web/package.json
+RUN npm ci
+
+COPY apps/api apps/api
+RUN npx prisma generate --schema apps/api/prisma/schema.prisma \
+  && npm run build -w @bingo/api \
+  && npm prune --omit=dev \
+  && npx prisma generate --schema apps/api/prisma/schema.prisma \
+  && npx prisma --version \
+  && npx tsx --version
+
+FROM node:22-bookworm-slim AS runtime
+ENV NODE_ENV=production
+WORKDIR /app
+
+COPY --from=build /app/node_modules ./node_modules
+COPY --from=build /app/package.json ./package.json
+COPY --from=build /app/apps/api/package.json ./apps/api/package.json
+COPY --from=build /app/apps/api/dist ./apps/api/dist
+COPY --from=build /app/apps/api/prisma ./apps/api/prisma
+# Kept so `dokku run` can execute prisma/seed.ts and scripts/create-admin.ts with tsx.
+COPY --from=build /app/apps/api/src ./apps/api/src
+COPY --from=build /app/apps/api/scripts ./apps/api/scripts
+
+# Dokku injects PORT; the app falls back to 4000 for local runs.
+EXPOSE 4000
+CMD ["node", "apps/api/dist/index.js"]

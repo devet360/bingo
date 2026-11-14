@@ -1,0 +1,795 @@
+// ═══════════════════════════════════════════════════════════════════════════════
+// Bingo Casino Platform — Canonical Data Model (Phase 1)
+//
+// MONEY
+//   Every monetary column is BigInt minor units (1 credit = 100 minor units).
+//   Never Float/Decimal for money. Wallet currency is platform credits.
+//
+// LEDGER
+//   TransactionLedger is the immutable double-entry journal.
+//   LedgerEntry.amount is SIGNED: +credit / -debit, and
+//   SUM(amount) over one TransactionLedger MUST be exactly 0.
+//   Wallet / AgentProfile / LedgerAccount balances are caches. They are written
+//   only inside the same $transaction as the journal entries that justify them.
+//
+// BUSINESS ↔ LEDGER LINKS
+//   Business tables do not carry ledger foreign keys. A TransactionLedger points
+//   back via (refType, refId, kind); a partial unique index (see sql/constraints.sql)
+//   guarantees at most one journal entry per business event per kind.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "debian-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ═══════════════════════════════════ ENUMS ════════════════════════════════════
+
+enum UserRole {
+  PLAYER
+  AGENT
+  SUPER_ADMIN
+  SUPPORT
+}
+
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+  BANNED
+  DELETED
+}
+
+enum KycStatus {
+  UNVERIFIED
+  PENDING
+  VERIFIED
+  REJECTED
+}
+
+enum ClientPlatform {
+  TELEGRAM_MINI_APP
+  IOS
+  ANDROID
+  WEB
+  AGENT_PORTAL
+}
+
+enum OtpChannel {
+  SMS
+  EMAIL
+  TELEGRAM
+}
+
+enum OtpPurpose {
+  LOGIN
+  LINK_PHONE
+  LINK_EMAIL
+  PASSWORD_RESET
+  WITHDRAWAL_CONFIRM
+}
+
+enum AgentStatus {
+  PENDING
+  ACTIVE
+  SUSPENDED
+  TERMINATED
+}
+
+enum AgentTier {
+  BRONZE
+  SILVER
+  GOLD
+  PLATINUM
+}
+
+enum PaymentMethod {
+  MOBILE_MONEY
+  BANK_TRANSFER
+  CASH
+  CARD
+  CRYPTO
+}
+
+enum DepositStatus {
+  PENDING // request created, waiting for an agent
+  PROCESSING // agent claimed it, money not yet credited
+  CREDITED // player wallet credited
+  REJECTED
+  CANCELLED
+  EXPIRED
+  DISPUTED
+}
+
+enum WithdrawalStatus {
+  ESCROWED // player funds locked, payout code issued
+  SETTLED // agent redeemed payout code, escrow moved to agent float
+  CANCELLED
+  EXPIRED
+  DISPUTED
+}
+
+// LedgerAccount.ownerKind determines which account codes are legal for it:
+//   USER     -> AVAILABLE | ESCROW | LOCKED
+//   AGENT    -> FLOAT | FLOAT_ESCROW | COMMISSION
+//   PLATFORM -> RAKE | COMMISSION_EXPENSE | TREASURY | SUSPENSE
+enum AccountOwnerKind {
+  USER
+  AGENT
+  PLATFORM
+}
+
+enum AccountCode {
+  AVAILABLE
+  ESCROW
+  LOCKED
+  FLOAT
+  FLOAT_ESCROW
+  COMMISSION
+  RAKE
+  COMMISSION_EXPENSE
+  TREASURY
+  SUSPENSE
+}
+
+enum LedgerKind {
+  AGENT_FLOAT_TOP_UP
+  AGENT_FLOAT_CASH_OUT
+  AGENT_FLOAT_ADJUSTMENT
+  DEPOSIT
+  DEPOSIT_COMMISSION
+  WITHDRAWAL_ESCROW
+  WITHDRAWAL_SETTLEMENT
+  WITHDRAWAL_COMMISSION
+  WITHDRAWAL_REFUND
+  WITHDRAWAL_FEE
+  CARD_PURCHASE
+  ROUND_PAYOUT
+  ROUND_REFUND
+  MANUAL_ADJUSTMENT
+}
+
+enum CommissionKind {
+  DEPOSIT
+  WITHDRAWAL
+}
+
+enum FloatRequestDirection {
+  TOP_UP // agent wires money to platform, float increases
+  CASH_OUT // agent withdraws earned float to bank/mobile money
+}
+
+enum FloatRequestStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum BingoVariant {
+  US_75
+  UK_90
+}
+
+enum WinPattern {
+  HORIZONTAL
+  VERTICAL
+  DIAGONAL
+  FOUR_CORNERS
+  FULL_HOUSE
+}
+
+enum RoomStatus {
+  OPEN
+  MAINTENANCE
+  CLOSED
+}
+
+enum RoundStatus {
+  WAITING // countdown, cards on sale
+  LOCKED // final seconds, sales closed
+  PLAYING // balls being drawn
+  CLAIM_VERIFICATION // claims being validated, draw paused
+  COMPLETED // paid out and archived
+  CANCELLED // round aborted, all stakes refunded
+}
+
+enum CardStatus {
+  ACTIVE
+  WON
+  LOST
+  REFUNDED
+}
+
+enum ClaimStatus {
+  PENDING
+  VALID
+  INVALID
+  PAID
+}
+
+enum NotificationType {
+  DEPOSIT_CREDITED
+  DEPOSIT_REJECTED
+  WITHDRAWAL_SETTLED
+  WITHDRAWAL_EXPIRED
+  COMMISSION_PAID
+  ROUND_RESULT
+  AGENT_ALERT
+  SYSTEM
+}
+
+// ═══════════════════════════════ IDENTITY & ACCESS ════════════════════════════
+
+model User {
+  id               String     @id @default(uuid()) @db.Uuid
+  // Telegram is the primary identity for the Mini App. Null for phone-only users.
+  telegramId       BigInt?    @unique
+  telegramUsername String?
+  phone            String?    @unique
+  // Set only when the number arrived via the Telegram bot's contact share, which
+  // is the sole signup path for players.
+  phoneVerifiedAt  DateTime?
+  email            String?    @unique
+  passwordHash     String?
+  mustChangePassword Boolean  @default(false)
+  displayName      String
+  avatarUrl        String?
+  locale           String     @default("en")
+  countryCode      String?
+  role             UserRole   @default(PLAYER)
+  status           UserStatus @default(ACTIVE)
+  kycStatus        KycStatus  @default(UNVERIFIED)
+  kycReviewedAt    DateTime?
+  referralCode     String     @unique
+  referredById     String?    @db.Uuid
+  lastLoginAt      DateTime?
+  createdAt        DateTime   @default(now())
+  updatedAt        DateTime   @updatedAt
+
+  referredBy            User?               @relation("UserReferrals", fields: [referredById], references: [id], onDelete: SetNull)
+  referrals             User[]              @relation("UserReferrals")
+  wallet                Wallet?
+  agentProfile          AgentProfile?
+  sessions              AuthSession[]
+  bingoCards            BingoCard[]
+  bingoClaims           BingoClaim[]
+  roundWins             RoundWinner[]
+  ratingsGiven          AgentRating[]       @relation("RatingAuthor")
+  notifications         Notification[]
+  auditLogs             AuditLog[]          @relation("AuditActor")
+  ledgersCreated        TransactionLedger[] @relation("LedgerCreator")
+  depositsAsPlayer      DepositRequest[]    @relation("DepositPlayer")
+  depositsProcessed     DepositRequest[]    @relation("DepositProcessor")
+  withdrawalsAsPlayer   WithdrawalRequest[] @relation("WithdrawalPlayer")
+  withdrawalsProcessed  WithdrawalRequest[] @relation("WithdrawalProcessor")
+  floatRequestsReviewed AgentFloatRequest[] @relation("FloatReviewer")
+
+  @@index([role, status])
+  @@index([createdAt])
+}
+
+// One row per issued refresh token. Rotating refresh tokens revoke the old row.
+model AuthSession {
+  id               String         @id @default(uuid()) @db.Uuid
+  userId           String         @db.Uuid
+  refreshTokenHash String         @unique
+  platform         ClientPlatform
+  deviceId         String?
+  userAgent        String?
+  ip               String?
+  expiresAt        DateTime
+  revokedAt        DateTime?
+  lastUsedAt       DateTime       @default(now())
+  createdAt        DateTime       @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, revokedAt])
+}
+
+// Hashed OTP codes for phone/email login and account linking. Never store plaintext.
+model OtpCode {
+  id          String     @id @default(uuid()) @db.Uuid
+  identifier  String // E.164 phone or lowercased email
+  channel     OtpChannel
+  purpose     OtpPurpose
+  codeHash    String
+  attempts    Int        @default(0)
+  maxAttempts Int        @default(5)
+  expiresAt   DateTime
+  consumedAt  DateTime?
+  ip          String?
+  createdAt   DateTime   @default(now())
+
+  @@index([identifier, purpose, createdAt])
+}
+
+// ═══════════════════════════════ AGENT NETWORK ════════════════════════════════
+
+model AgentProfile {
+  id                      String      @id @default(uuid()) @db.Uuid
+  userId                  String      @unique @db.Uuid
+  agentCode               String      @unique // public code shown in the player app
+  status                  AgentStatus @default(PENDING)
+  tier                    AgentTier   @default(BRONZE)
+  region                  String
+  city                    String?
+  district                String?
+  isOnline                Boolean     @default(false)
+  lastSeenAt              DateTime?
+  ratingAvg               Decimal     @default(0) @db.Decimal(3, 2)
+  ratingCount             Int         @default(0)
+  completedDeposits       Int         @default(0)
+  completedWithdrawals    Int         @default(0)
+  depositCommissionBps    Int         @default(300) // 3.00%
+  withdrawalCommissionBps Int         @default(200) // 2.00%
+  perTxnLimit             BigInt?
+  dailyDepositLimit       BigInt?
+  dailyWithdrawalLimit    BigInt?
+  // Denormalised caches of the AGENT ledger accounts. Rebuildable from the journal.
+  floatAvailable          BigInt      @default(0)
+  floatEscrow             BigInt      @default(0) // float locked by pending cash-out
+  commissionEarned        BigInt      @default(0)
+  version                 Int         @default(0) // optimistic lock, bumped on every balance write
+  internalNote            String?
+  approvedById            String?     @db.Uuid
+  approvedAt              DateTime?
+  createdAt               DateTime    @default(now())
+  updatedAt               DateTime    @updatedAt
+
+  user            User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  paymentAccounts AgentPaymentAccount[]
+  deposits        DepositRequest[]
+  withdrawals     WithdrawalRequest[]
+  commissions     AgentCommission[]
+  ratings         AgentRating[]
+  floatRequests   AgentFloatRequest[]
+
+  @@index([status, isOnline, region])
+  @@index([tier, status])
+}
+
+// Payment rails an agent accepts for deposits / pays out on withdrawals.
+model AgentPaymentAccount {
+  id             String        @id @default(uuid()) @db.Uuid
+  agentProfileId String        @db.Uuid
+  method         PaymentMethod
+  provider       String? // "MTN MoMo", "Airtel Money", "GTBank", ...
+  accountName    String
+  accountNumber  String
+  instructions   String?
+  minAmount      BigInt?
+  maxAmount      BigInt?
+  isActive       Boolean       @default(true)
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  agentProfile AgentProfile        @relation(fields: [agentProfileId], references: [id], onDelete: Cascade)
+  deposits     DepositRequest[]
+  withdrawals  WithdrawalRequest[]
+
+  @@unique([agentProfileId, method, accountNumber])
+  @@index([agentProfileId, isActive])
+}
+
+model AgentRating {
+  id             String   @id @default(uuid()) @db.Uuid
+  agentProfileId String   @db.Uuid
+  authorId       String   @db.Uuid
+  depositId      String?  @unique @db.Uuid
+  score          Int // 1..5, CHECK enforced in SQL
+  comment        String?
+  createdAt      DateTime @default(now())
+
+  agentProfile AgentProfile    @relation(fields: [agentProfileId], references: [id], onDelete: Cascade)
+  author       User            @relation("RatingAuthor", fields: [authorId], references: [id], onDelete: Cascade)
+  deposit      DepositRequest? @relation(fields: [depositId], references: [id], onDelete: SetNull)
+
+  @@index([agentProfileId, createdAt])
+}
+
+// Agent ↔ SuperAdmin cash settlement (wire in / wire out of float).
+model AgentFloatRequest {
+  id             String                @id @default(uuid()) @db.Uuid
+  idempotencyKey String                @unique
+  agentProfileId String                @db.Uuid
+  direction      FloatRequestDirection
+  amount         BigInt
+  method         PaymentMethod
+  externalRef    String? // bank/UTR/tx hash
+  proofUrl       String?
+  status         FloatRequestStatus    @default(PENDING)
+  reviewedById   String?               @db.Uuid
+  reviewNote     String?
+  reviewedAt     DateTime?
+  createdAt      DateTime              @default(now())
+  updatedAt      DateTime              @updatedAt
+
+  agentProfile AgentProfile @relation(fields: [agentProfileId], references: [id], onDelete: Restrict)
+  reviewedBy   User?        @relation("FloatReviewer", fields: [reviewedById], references: [id], onDelete: SetNull)
+
+  @@index([status, createdAt])
+  @@index([agentProfileId, createdAt])
+}
+
+// ═══════════════════════════ DOUBLE-ENTRY LEDGER ══════════════════════════════
+
+// Chart of accounts. Balance is a cache: SUM of its journal entries.
+// Negative balances are only legal on the platform bridge/expense accounts
+// (SUSPENSE, COMMISSION_EXPENSE); every other account must stay >= 0.
+model LedgerAccount {
+  id        String           @id @default(uuid()) @db.Uuid
+  ownerKind AccountOwnerKind
+  ownerId   String // user/agent UUID, or "platform" for platform accounts
+  code      AccountCode
+  balance   BigInt           @default(0)
+  version   Int              @default(0)
+  createdAt DateTime         @default(now())
+  updatedAt DateTime         @updatedAt
+
+  entries LedgerEntry[]
+
+  @@unique([ownerKind, ownerId, code])
+  @@index([code])
+}
+
+// The journal header. idempotencyKey makes every financial command replay-safe:
+// a retried HTTP request or a redelivered BullMQ job cannot post twice.
+model TransactionLedger {
+  id             String     @id @default(uuid()) @db.Uuid
+  idempotencyKey String     @unique
+  kind           LedgerKind
+  refType        String? // "DepositRequest" | "WithdrawalRequest" | "BingoRound" | ...
+  refId          String?
+  memo           String?
+  createdById    String?    @db.Uuid
+  createdAt      DateTime   @default(now())
+
+  entries   LedgerEntry[]
+  createdBy User?         @relation("LedgerCreator", fields: [createdById], references: [id], onDelete: SetNull)
+
+  @@index([refType, refId])
+  @@index([createdAt])
+}
+
+// Append-only journal line. amount is signed; balanceAfter snapshots the account.
+// UPDATE and DELETE are blocked by a trigger (sql/constraints.sql).
+model LedgerEntry {
+  id           BigInt   @id @default(autoincrement())
+  ledgerId     String   @db.Uuid
+  accountId    String   @db.Uuid
+  amount       BigInt // +credit / -debit, never 0
+  balanceAfter BigInt
+  createdAt    DateTime @default(now())
+
+  ledger  TransactionLedger @relation(fields: [ledgerId], references: [id], onDelete: Restrict)
+  account LedgerAccount     @relation(fields: [accountId], references: [id], onDelete: Restrict)
+
+  // One net movement per account per journal entry.
+  @@unique([ledgerId, accountId])
+  @@index([accountId, id])
+}
+
+// Commission actually paid to an agent, per settled transaction. Reporting mirror
+// of the DEPOSIT_COMMISSION / WITHDRAWAL_COMMISSION journal entries.
+model AgentCommission {
+  id             String         @id @default(uuid()) @db.Uuid
+  agentProfileId String         @db.Uuid
+  kind           CommissionKind
+  depositId      String?        @unique @db.Uuid
+  withdrawalId   String?        @unique @db.Uuid
+  baseAmount     BigInt // amount the bps were applied to
+  bps            Int
+  amount         BigInt
+  createdAt      DateTime       @default(now())
+
+  agentProfile AgentProfile       @relation(fields: [agentProfileId], references: [id], onDelete: Restrict)
+  deposit      DepositRequest?    @relation(fields: [depositId], references: [id], onDelete: Restrict)
+  withdrawal   WithdrawalRequest? @relation(fields: [withdrawalId], references: [id], onDelete: Restrict)
+
+  @@index([agentProfileId, createdAt])
+}
+
+// Default commission per tier/method; AgentProfile columns override when set.
+model CommissionRule {
+  id            String        @id @default(uuid()) @db.Uuid
+  tier          AgentTier
+  method        PaymentMethod
+  depositBps    Int           @default(300)
+  withdrawalBps Int           @default(200)
+  minAmount     BigInt?
+  maxAmount     BigInt?
+  isActive      Boolean       @default(true)
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  @@unique([tier, method])
+}
+
+// ═════════════════════════════ PLAYER WALLET ══════════════════════════════════
+
+// Playable funds only. Agent float lives on AgentProfile, never here.
+model Wallet {
+  id                String   @id @default(uuid()) @db.Uuid
+  userId            String   @unique @db.Uuid
+  available         BigInt   @default(0)
+  escrow            BigInt   @default(0) // withdrawal escrow
+  locked            BigInt   @default(0) // staked in an active bingo round
+  lifetimeDeposited BigInt   @default(0)
+  lifetimeWithdrawn BigInt   @default(0)
+  lifetimeWagered   BigInt   @default(0)
+  lifetimeWon       BigInt   @default(0)
+  version           Int      @default(0) // optimistic lock / audit
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+// ═══════════════════════ AGENT-ASSISTED MONEY MOVEMENT ════════════════════════
+
+model DepositRequest {
+  id               String        @id @default(uuid()) @db.Uuid
+  // 6-digit code the player shows the agent. Unique only among open requests
+  // (partial index in sql/constraints.sql) so the 1M namespace can be recycled.
+  code             String
+  idempotencyKey   String        @unique
+  playerId         String        @db.Uuid
+  agentProfileId   String?       @db.Uuid // null = open to any online agent
+  paymentAccountId String?       @db.Uuid
+  method           PaymentMethod
+  amount           BigInt
+  creditedAmount   BigInt?
+  status           DepositStatus @default(PENDING)
+  receiptUrl       String?
+  externalRef      String? // MoMo/bank reference typed by the player
+  playerNote       String?
+  agentNote        String?
+  processedById    String?       @db.Uuid
+  expiresAt        DateTime
+  claimedAt        DateTime? // agent opened/claimed the request
+  settledAt        DateTime? // wallet credited
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+
+  player         User                 @relation("DepositPlayer", fields: [playerId], references: [id], onDelete: Restrict)
+  agentProfile   AgentProfile?        @relation(fields: [agentProfileId], references: [id], onDelete: SetNull)
+  paymentAccount AgentPaymentAccount? @relation(fields: [paymentAccountId], references: [id], onDelete: SetNull)
+  processedBy    User?                @relation("DepositProcessor", fields: [processedById], references: [id], onDelete: SetNull)
+  commission     AgentCommission?
+  rating         AgentRating?
+
+  @@index([agentProfileId, status, createdAt])
+  @@index([playerId, status])
+  @@index([status, expiresAt])
+  @@index([code])
+}
+
+model WithdrawalRequest {
+  id               String           @id @default(uuid()) @db.Uuid
+  // Bearer code the agent types to release escrow. Unique among live requests only,
+  // so codes are recyclable once a request settles or expires.
+  payoutCode       String
+  idempotencyKey   String           @unique
+  playerId         String           @db.Uuid
+  agentProfileId   String           @db.Uuid
+  paymentAccountId String?          @db.Uuid
+  method           PaymentMethod
+  amount           BigInt // gross, debited from player
+  fee              BigInt           @default(0)
+  netAmount        BigInt // amount the agent hands over in cash
+  status           WithdrawalStatus @default(ESCROWED)
+  playerNote       String?
+  agentNote        String?
+  processedById    String?          @db.Uuid
+  expiresAt        DateTime
+  settledAt        DateTime? // agent redeemed the payout code
+  cancelledAt      DateTime?
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
+
+  player         User                 @relation("WithdrawalPlayer", fields: [playerId], references: [id], onDelete: Restrict)
+  agentProfile   AgentProfile         @relation(fields: [agentProfileId], references: [id], onDelete: Restrict)
+  paymentAccount AgentPaymentAccount? @relation(fields: [paymentAccountId], references: [id], onDelete: SetNull)
+  processedBy    User?                @relation("WithdrawalProcessor", fields: [processedById], references: [id], onDelete: SetNull)
+  commission     AgentCommission?
+
+  @@index([agentProfileId, status, createdAt])
+  @@index([playerId, status])
+  @@index([status, expiresAt])
+  @@index([payoutCode])
+}
+
+// ═══════════════════════════════ BINGO ENGINE ═════════════════════════════════
+
+model BingoRoom {
+  id                 String       @id @default(uuid()) @db.Uuid
+  code               String       @unique // "us75-10", "uk90-500"
+  name               String
+  variant            BingoVariant
+  stakePerCard       BigInt
+  maxCardsPerPlayer  Int          @default(4)
+  minPlayersToStart  Int          @default(2)
+  rakeBps            Int          @default(1000) // 10.00%
+  allowedPatterns    WinPattern[]
+  status             RoomStatus   @default(OPEN)
+  purchaseWindowSecs Int          @default(15)
+  lockWindowSecs     Int          @default(5)
+  drawIntervalMs     Int          @default(3500)
+  claimWindowSecs    Int          @default(20)
+  autoDaubEnabled    Boolean      @default(true)
+  createdAt          DateTime     @default(now())
+  updatedAt          DateTime     @updatedAt
+
+  rounds BingoRound[]
+
+  @@index([status, variant])
+}
+
+// One row per round. The seed commitment is published while the round is WAITING;
+// serverSeed is revealed only once the round is COMPLETED.
+model BingoRound {
+  id               String       @id @default(uuid()) @db.Uuid
+  roomId           String       @db.Uuid
+  roundNumber      Int
+  status           RoundStatus  @default(WAITING)
+  // Room economics are snapshotted per round: editing a room never rewrites an
+  // in-flight or historical round.
+  variant          BingoVariant
+  stakePerCard     BigInt
+  rakeBps          Int
+  allowedPatterns  WinPattern[]
+  serverSeed       String // secret until reveal
+  serverSeedHash   String // published in advance (sha256(serverSeed))
+  clientSeed       String? // aggregated player contributions, hashed
+  clientSeedCount  Int          @default(0)
+  nonce            Int          @default(0)
+  rngVersion       String       @default("hmac-sha256-fisher-yates-v1")
+  ballOrder        Int[]        @default([]) // full shuffled pool (75 or 90 balls)
+  drawnBalls       Int[]        @default([]) // prefix of ballOrder
+  currentBall      Int?
+  cardsSold        Int          @default(0)
+  uniquePlayers    Int          @default(0)
+  grossPot         BigInt       @default(0)
+  rakeAmount       BigInt       @default(0)
+  prizePool        BigInt       @default(0)
+  winningPattern   WinPattern?
+  claimsOpenAt     DateTime?
+  claimsCloseAt    DateTime?
+  // Sales close at purchaseClosesAt; the engine extends it while a round is
+  // under-filled. lastDrawAt makes the draw cadence recoverable after restart.
+  purchaseClosesAt DateTime?
+  startedAt        DateTime?
+  lastDrawAt       DateTime?
+  completedAt      DateTime?
+  seedRevealedAt   DateTime?
+  createdAt        DateTime     @default(now())
+  updatedAt        DateTime     @updatedAt
+
+  room    BingoRoom     @relation(fields: [roomId], references: [id], onDelete: Restrict)
+  cards   BingoCard[]
+  claims  BingoClaim[]
+  winners RoundWinner[]
+
+  @@unique([roomId, roundNumber])
+  @@index([status, createdAt])
+}
+
+model BingoCard {
+  id             String       @id @default(uuid()) @db.Uuid
+  roundId        String       @db.Uuid
+  userId         String       @db.Uuid
+  cardIndex      Int // 0..3 within the player's purchase
+  stake          BigInt
+  variant        BingoVariant
+  // Variant-shaped matrix. US_75: 5x5 with FREE centre. UK_90: 3x9 with 15 numbers.
+  cells          Json
+  markedNumbers  Int[]        @default([])
+  autoDaub       Boolean      @default(false)
+  // Player entropy folded into the round's aggregate clientSeed at lock time.
+  clientSeed     String?
+  // Per-request idempotency: a retried purchase returns these cards, never new ones.
+  idempotencyKey String?      @unique
+  status         CardStatus   @default(ACTIVE)
+  wonPattern     WinPattern?
+  purchasedAt    DateTime     @default(now())
+
+  round  BingoRound   @relation(fields: [roundId], references: [id], onDelete: Cascade)
+  user   User         @relation(fields: [userId], references: [id], onDelete: Restrict)
+  claims BingoClaim[]
+  win    RoundWinner?
+
+  @@unique([roundId, userId, cardIndex])
+  @@index([roundId, status])
+  @@index([userId, purchasedAt])
+}
+
+model BingoClaim {
+  id              String      @id @default(uuid()) @db.Uuid
+  roundId         String      @db.Uuid
+  cardId          String      @db.Uuid
+  userId          String      @db.Uuid
+  pattern         WinPattern
+  status          ClaimStatus @default(PENDING)
+  drawnSnapshot   Int[] // balls drawn when the claim landed: audit evidence
+  rejectionReason String?
+  claimedAt       DateTime    @default(now())
+  validatedAt     DateTime?
+
+  round BingoRound @relation(fields: [roundId], references: [id], onDelete: Cascade)
+  card  BingoCard  @relation(fields: [cardId], references: [id], onDelete: Cascade)
+  user  User       @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@index([roundId, status])
+  @@index([cardId])
+}
+
+model RoundWinner {
+  id         String     @id @default(uuid()) @db.Uuid
+  roundId    String     @db.Uuid
+  cardId     String     @unique @db.Uuid
+  userId     String     @db.Uuid
+  pattern    WinPattern
+  payout     BigInt
+  isSplitPot Boolean    @default(false)
+  createdAt  DateTime   @default(now())
+
+  round BingoRound @relation(fields: [roundId], references: [id], onDelete: Cascade)
+  card  BingoCard  @relation(fields: [cardId], references: [id], onDelete: Cascade)
+  user  User       @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@index([roundId])
+}
+
+// ═══════════════════════════════ PLATFORM OPS ═════════════════════════════════
+
+model Notification {
+  id        String           @id @default(uuid()) @db.Uuid
+  userId    String           @db.Uuid
+  type      NotificationType
+  title     String
+  body      String
+  data      Json?
+  readAt    DateTime?
+  // Set once the bot has pushed this notification to Telegram, so the worker
+  // sweep can retry without double-sending.
+  telegramSentAt DateTime?
+  createdAt DateTime         @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, readAt])
+  @@index([createdAt])
+  @@index([telegramSentAt, createdAt])
+}
+
+model AuditLog {
+  id         BigInt    @id @default(autoincrement())
+  actorId    String?   @db.Uuid
+  actorRole  UserRole?
+  action     String // "deposit.credit", "agent.suspend", "config.update", ...
+  entityType String?
+  entityId   String?
+  before     Json?
+  after      Json?
+  ip         String?
+  userAgent  String?
+  createdAt  DateTime  @default(now())
+
+  actor User? @relation("AuditActor", fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([actorId, createdAt])
+  @@index([entityType, entityId])
+}
+
+model SystemConfig {
+  key         String   @id
+  value       Json
+  description String?
+  updatedById String?  @db.Uuid
+  updatedAt   DateTime @updatedAt
+}

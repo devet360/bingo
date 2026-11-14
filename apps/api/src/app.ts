@@ -1,0 +1,81 @@
+import cors from 'cors';
+import express from 'express';
+import helmet from 'helmet';
+import pinoHttp from 'pino-http';
+import swaggerUi from 'swagger-ui-express';
+import { env } from './config/env';
+import { logger } from './lib/logger';
+import { prisma } from './lib/prisma';
+import { asyncHandler } from './lib/async';
+import { openApiDocument } from './docs/openapi';
+import { errorHandler, notFoundHandler } from './middleware/error';
+import { authLimiter } from './middleware/rateLimit';
+import { authRouter } from './routes/auth';
+import { agentsRouter } from './routes/agents';
+import { walletRouter } from './routes/wallet';
+import { agentRouter } from './routes/agent';
+import { adminRouter } from './routes/admin';
+import { staffReadRouter } from './routes/staffRead';
+import { bingoRouter } from './routes/bingo';
+
+export function createApp() {
+  const app = express();
+
+  app.disable('x-powered-by');
+  app.set('trust proxy', 1);
+  // Every monetary value is a bigint; serialize as decimal strings, never floats.
+  app.set('json replacer', (_key: string, value: unknown) =>
+    typeof value === 'bigint' ? value.toString() : value,
+  );
+
+  // JSON-only API; Swagger UI at /docs needs its inline scripts, so no CSP here.
+  app.use(helmet({ contentSecurityPolicy: false }));
+  app.use(
+    cors({
+      origin: env.corsOrigins.length > 0 ? env.corsOrigins : false,
+      credentials: true,
+    }),
+  );
+  app.use(express.json({ limit: '1mb' }));
+  app.use(
+    pinoHttp({
+      logger,
+      autoLogging: { ignore: (req) => req.url === '/health' || req.url === '/ready' },
+    }),
+  );
+
+  app.get('/health', (_req, res) => {
+    res.json({ status: 'ok', uptime: process.uptime() });
+  });
+
+  app.get(
+    '/ready',
+    asyncHandler(async (_req, res) => {
+      try {
+        await prisma.$queryRaw`SELECT 1`;
+        res.json({ status: 'ready' });
+      } catch {
+        res.status(503).json({ status: 'unavailable', dependency: 'postgres' });
+      }
+    }),
+  );
+
+  app.use('/auth', authLimiter, authRouter);
+  app.use('/agents', agentsRouter);
+  app.use('/wallet', walletRouter);
+  app.use('/agent', agentRouter);
+  app.use('/support', staffReadRouter);
+  // Support-level reads are also reachable by a super admin, then admin-only routes.
+  app.use('/admin', staffReadRouter, adminRouter);
+  app.use('/bingo', bingoRouter);
+
+  app.get('/openapi.json', (_req, res) => {
+    res.json(openApiDocument);
+  });
+  app.use('/docs', swaggerUi.serve, swaggerUi.setup(openApiDocument, { customSiteTitle: 'Bingo Hall API' }));
+
+  app.use(notFoundHandler);
+  app.use(errorHandler);
+
+  return app;
+}
