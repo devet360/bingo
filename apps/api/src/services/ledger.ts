@@ -34,11 +34,12 @@ export interface PostLedgerResult {
 }
 
 const ALLOWED_CODES: Record<AccountOwnerKind, AccountCode[]> = {
-  USER: [AccountCode.AVAILABLE, AccountCode.ESCROW, AccountCode.LOCKED],
+  USER: [AccountCode.AVAILABLE, AccountCode.ESCROW, AccountCode.LOCKED, AccountCode.BONUS],
   AGENT: [AccountCode.FLOAT, AccountCode.FLOAT_ESCROW, AccountCode.COMMISSION],
   PLATFORM: [
     AccountCode.RAKE,
     AccountCode.COMMISSION_EXPENSE,
+    AccountCode.BONUS_EXPENSE,
     AccountCode.TREASURY,
     AccountCode.SUSPENSE,
   ],
@@ -48,12 +49,14 @@ const ALLOWED_CODES: Record<AccountOwnerKind, AccountCode[]> = {
 const MAY_GO_NEGATIVE: ReadonlySet<AccountCode> = new Set([
   AccountCode.SUSPENSE,
   AccountCode.COMMISSION_EXPENSE,
+  AccountCode.BONUS_EXPENSE,
 ]);
 
 type Bucket =
   | 'available'
   | 'escrow'
   | 'locked'
+  | 'bonus'
   | 'floatAvailable'
   | 'floatEscrow'
   | 'commissionEarned';
@@ -62,6 +65,7 @@ const BUCKETS: Partial<Record<AccountCode, Bucket>> = {
   [AccountCode.AVAILABLE]: 'available',
   [AccountCode.ESCROW]: 'escrow',
   [AccountCode.LOCKED]: 'locked',
+  [AccountCode.BONUS]: 'bonus',
   [AccountCode.FLOAT]: 'floatAvailable',
   [AccountCode.FLOAT_ESCROW]: 'floatEscrow',
   [AccountCode.COMMISSION]: 'commissionEarned',
@@ -241,6 +245,7 @@ async function applyBalanceCaches(
         ...(deltas.available ? { available: { increment: deltas.available } } : {}),
         ...(deltas.escrow ? { escrow: { increment: deltas.escrow } } : {}),
         ...(deltas.locked ? { locked: { increment: deltas.locked } } : {}),
+        ...(deltas.bonus ? { bonus: { increment: deltas.bonus } } : {}),
       },
     });
     if (result.count !== 1) {

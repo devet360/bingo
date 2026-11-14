@@ -39,10 +39,10 @@ const money = { type: 'string', pattern: '^-?\\d+$', description: 'Minor units (
 export const openApiDocument = {
   openapi: '3.0.3',
   info: {
-    title: 'Bingo Hall API',
+    title: 'Bingo 251 API',
     version: '1.0.0',
     description:
-      'REST + Socket.io API for the Bingo Hall Telegram Mini App, agent network and staff dashboards. ' +
+      'REST + Socket.io API for the Bingo 251 Telegram Mini App, agent network and staff dashboards. ' +
       'Money is always an integer number of minor units rendered as a decimal string. ' +
       'Player signup happens only through the Telegram bot (`/start` → share contact). ' +
       'Staff (agent, support, super admin) sign in with email/phone + password, or open their dashboard in the ' +
@@ -55,6 +55,10 @@ export const openApiDocument = {
     { name: 'Public agents' },
     { name: 'Agent portal' },
     { name: 'Bingo' },
+    { name: 'Marketing' },
+    { name: 'Bonuses' },
+    { name: 'Referrals' },
+    { name: 'Games' },
     { name: 'Support' },
     { name: 'Admin' },
     { name: 'Ops' },
@@ -599,6 +603,259 @@ export const openApiDocument = {
           bodyBase64: { type: 'string', maxLength: 7200000 },
           proofBase64: { type: 'string', maxLength: 6000000, description: 'Screenshot/photo of the receipt' },
           proofContentType: { type: 'string', enum: ['image/png', 'image/jpeg', 'image/webp'] },
+        },
+      },
+      Campaign: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', format: 'uuid' },
+          kind: { type: 'string', enum: ['BANNER', 'POPUP'] },
+          audience: { type: 'string', enum: ['ALL', 'PLAYERS', 'AGENTS'] },
+          locale: { type: 'string', enum: ['en', 'am'] },
+          title: { type: 'string' },
+          body: { type: 'string' },
+          imageUrl: { type: 'string', nullable: true },
+          linkUrl: { type: 'string', nullable: true },
+          linkLabel: { type: 'string', nullable: true },
+          enabled: { type: 'boolean' },
+          priority: { type: 'integer' },
+          dismissHours: { type: 'integer', description: 'Hidden on the player device for this many hours; 0 shows every launch' },
+          startsAt: { type: 'string', format: 'date-time', nullable: true },
+          endsAt: { type: 'string', format: 'date-time', nullable: true },
+          createdById: { type: 'string', format: 'uuid', nullable: true },
+          createdAt: { type: 'string', format: 'date-time' },
+        },
+      },
+      CampaignBody: {
+        type: 'object',
+        required: ['kind', 'title', 'body'],
+        properties: {
+          kind: { type: 'string', enum: ['BANNER', 'POPUP'] },
+          audience: { type: 'string', enum: ['ALL', 'PLAYERS', 'AGENTS'], default: 'ALL' },
+          locale: { type: 'string', enum: ['en', 'am'], default: 'en' },
+          title: { type: 'string', maxLength: 120 },
+          body: { type: 'string', maxLength: 2000 },
+          imageUrl: { type: 'string', format: 'uri', nullable: true },
+          linkUrl: { type: 'string', format: 'uri', nullable: true },
+          linkLabel: { type: 'string', maxLength: 40, nullable: true },
+          enabled: { type: 'boolean', default: true },
+          priority: { type: 'integer', minimum: 0, maximum: 1000, default: 0 },
+          dismissHours: { type: 'integer', minimum: 0, maximum: 720, default: 24 },
+          startsAt: { type: 'string', format: 'date-time', nullable: true },
+          endsAt: { type: 'string', format: 'date-time', nullable: true },
+        },
+      },
+      Bonus: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', format: 'uuid' },
+          kind: { type: 'string', enum: ['PROMO', 'GRANT', 'DEPOSIT'] },
+          amount: money,
+          wagered: money,
+          target: money,
+          multiplier: { type: 'integer' },
+          status: { type: 'string', enum: ['ACTIVE', 'COMPLETED', 'EXPIRED', 'CANCELLED'] },
+          expiresAt: { type: 'string', format: 'date-time', nullable: true },
+          completedAt: { type: 'string', format: 'date-time', nullable: true },
+          createdAt: { type: 'string', format: 'date-time' },
+          promotionId: { type: 'string', format: 'uuid', nullable: true },
+        },
+      },
+      BonusWithPlayer: {
+        allOf: [
+          { $ref: '#/components/schemas/Bonus' },
+          {
+            type: 'object',
+            properties: {
+              user: {
+                type: 'object',
+                properties: {
+                  id: { type: 'string', format: 'uuid' },
+                  displayName: { type: 'string' },
+                  phone: { type: 'string', nullable: true },
+                },
+              },
+            },
+          },
+        ],
+      },
+      BonusPromotion: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', format: 'uuid' },
+          code: { type: 'string' },
+          name: { type: 'string' },
+          percentBps: { type: 'integer', nullable: true },
+          fixedAmount: { type: 'string', nullable: true, description: 'Minor units' },
+          maxBonus: { type: 'string', nullable: true },
+          minDeposit: { type: 'string', nullable: true },
+          wageringMultiplier: { type: 'integer' },
+          expiresInDays: { type: 'integer' },
+          enabled: { type: 'boolean' },
+          startsAt: { type: 'string', format: 'date-time', nullable: true },
+          endsAt: { type: 'string', format: 'date-time', nullable: true },
+          maxRedemptions: { type: 'integer', nullable: true },
+          redemptionCount: { type: 'integer' },
+          createdAt: { type: 'string', format: 'date-time' },
+        },
+      },
+      BonusPromotionBody: {
+        type: 'object',
+        description: 'Set exactly one of percentBps or fixedAmount.',
+        required: ['code', 'name', 'wageringMultiplier', 'expiresInDays'],
+        properties: {
+          code: { type: 'string', minLength: 3, maxLength: 32 },
+          name: { type: 'string', maxLength: 120 },
+          percentBps: { type: 'integer', minimum: 1, maximum: 10000, nullable: true },
+          fixedAmount: { type: 'integer', minimum: 1, nullable: true, description: 'Minor units' },
+          maxBonus: { type: 'integer', minimum: 1, nullable: true },
+          minDeposit: { type: 'integer', minimum: 1, nullable: true },
+          wageringMultiplier: { type: 'integer', minimum: 1, maximum: 100 },
+          expiresInDays: { type: 'integer', minimum: 1, maximum: 365 },
+          enabled: { type: 'boolean', default: true },
+          startsAt: { type: 'string', format: 'date-time', nullable: true },
+          endsAt: { type: 'string', format: 'date-time', nullable: true },
+          maxRedemptions: { type: 'integer', minimum: 1, nullable: true },
+        },
+      },
+      BonusGrant: {
+        type: 'object',
+        required: ['userId', 'amount'],
+        properties: {
+          userId: { type: 'string', format: 'uuid' },
+          amount: { type: 'integer', minimum: 1, description: 'Minor units' },
+          multiplier: { type: 'integer', minimum: 1, maximum: 100, description: 'Defaults to the platform setting' },
+          expiresInDays: { type: 'integer', minimum: 1, maximum: 365 },
+          note: { type: 'string', maxLength: 200 },
+        },
+      },
+      ReferralCommission: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', format: 'uuid' },
+          playerId: { type: 'string', format: 'uuid' },
+          playerName: { type: 'string' },
+          roundId: { type: 'string', format: 'uuid' },
+          rakeBase: money,
+          bps: { type: 'integer' },
+          amount: money,
+          createdAt: { type: 'string', format: 'date-time' },
+        },
+      },
+      ReferralOverview: {
+        type: 'object',
+        properties: {
+          code: { type: 'string', description: 'Empty when the account has no referral code yet' },
+          inviteLink: { type: 'string', nullable: true },
+          commissionBps: { type: 'integer' },
+          referredCount: { type: 'integer' },
+          activeReferrals: { type: 'integer' },
+          totalEarned: money,
+          recent: { type: 'array', items: { $ref: '#/components/schemas/ReferralCommission' } },
+        },
+      },
+      ReferralSettings: {
+        type: 'object',
+        required: ['commissionBps'],
+        properties: {
+          commissionBps: { type: 'integer', minimum: 0, maximum: 5000, description: 'Share of round rake paid to the referrer' },
+          minRakeToPay: { type: 'integer', minimum: 0, description: 'Skip rounds whose rake is below this (minor units)' },
+        },
+      },
+      BonusSettings: {
+        type: 'object',
+        required: ['defaultWageringMultiplier', 'defaultExpiryDays'],
+        properties: {
+          defaultWageringMultiplier: { type: 'integer', minimum: 1, maximum: 100 },
+          defaultExpiryDays: { type: 'integer', minimum: 1, maximum: 365 },
+        },
+      },
+      GameProvider: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', format: 'uuid' },
+          code: { type: 'string', example: 'pragmatic' },
+          name: { type: 'string' },
+          kind: { type: 'string', enum: ['NATIVE', 'AGGREGATOR'] },
+          apiBaseUrl: { type: 'string', nullable: true },
+          hasSecret: { type: 'boolean', description: 'The webhook secret is write-only' },
+          enabled: { type: 'boolean' },
+          sortOrder: { type: 'integer' },
+          config: { nullable: true },
+          createdAt: { type: 'string', format: 'date-time' },
+        },
+      },
+      GameProviderBody: {
+        type: 'object',
+        required: ['name'],
+        properties: {
+          name: { type: 'string', maxLength: 96 },
+          kind: { type: 'string', enum: ['NATIVE', 'AGGREGATOR'], default: 'AGGREGATOR' },
+          apiBaseUrl: { type: 'string', format: 'uri', nullable: true },
+          webhookSecret: { type: 'string', minLength: 16, maxLength: 128, nullable: true, description: 'Write-only; omit to keep the current secret' },
+          enabled: { type: 'boolean', default: false },
+          sortOrder: { type: 'integer', minimum: 0, maximum: 10000 },
+          config: { nullable: true },
+        },
+      },
+      ProviderGame: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', format: 'uuid' },
+          providerId: { type: 'string', format: 'uuid' },
+          providerCode: { type: 'string' },
+          providerName: { type: 'string' },
+          externalId: { type: 'string' },
+          name: { type: 'string' },
+          category: { type: 'string', nullable: true },
+          thumbnailUrl: { type: 'string', nullable: true },
+          launchUrlTemplate: { type: 'string', nullable: true, description: 'Supports {token}, {sessionId}, {lang} and {currency}' },
+          minStake: { type: 'string', nullable: true },
+          maxStake: { type: 'string', nullable: true },
+          enabled: { type: 'boolean' },
+          sortOrder: { type: 'integer' },
+        },
+      },
+      ProviderGameBody: {
+        type: 'object',
+        required: ['externalId', 'name'],
+        properties: {
+          externalId: { type: 'string', maxLength: 64 },
+          name: { type: 'string', maxLength: 96 },
+          category: { type: 'string', maxLength: 48, nullable: true },
+          thumbnailUrl: { type: 'string', format: 'uri', nullable: true },
+          launchUrlTemplate: { type: 'string', maxLength: 2048, nullable: true },
+          minStake: { type: 'integer', minimum: 1, nullable: true },
+          maxStake: { type: 'integer', minimum: 1, nullable: true },
+          enabled: { type: 'boolean', default: true },
+          sortOrder: { type: 'integer', minimum: 0, maximum: 10000 },
+        },
+      },
+      ProviderSession: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', format: 'uuid' },
+          providerId: { type: 'string', format: 'uuid' },
+          gameId: { type: 'string', format: 'uuid' },
+          externalSessionId: { type: 'string' },
+          status: { type: 'string' },
+          launchUrl: { type: 'string' },
+          createdAt: { type: 'string', format: 'date-time' },
+        },
+      },
+      ProviderCallback: {
+        type: 'object',
+        required: ['sessionId', 'type', 'txnId', 'amount'],
+        description:
+          'Signed with HMAC-SHA256 over the raw request body in the `x-provider-signature` header. ' +
+          '`txnId` is idempotent per provider; rollbacks reference the original bet txnId.',
+        properties: {
+          sessionId: { type: 'string', format: 'uuid' },
+          type: { type: 'string', enum: ['bet', 'win', 'rollback'] },
+          txnId: { type: 'string', maxLength: 128 },
+          amount: { type: 'string', pattern: '^\\d+$', description: 'Minor units' },
+          currency: { type: 'string' },
+          roundId: { type: 'string' },
         },
       },
     },
@@ -1368,6 +1625,330 @@ export const openApiDocument = {
       get: {
         tags: ['Admin'],
         summary: 'Ledger drift check (v_account_drift)',
+        responses: { '200': ok({ type: 'object' }) },
+      },
+    },
+
+    // ─────────────────────────────── marketing ───────────────────────────────
+    '/marketing/campaigns': {
+      get: {
+        tags: ['Marketing'],
+        summary: 'Active banners and popups for the signed-in role and language',
+        parameters: [{ name: 'locale', in: 'query', schema: { type: 'string', enum: ['en', 'am'], default: 'en' } }],
+        responses: { '200': ok(dataArrayRef('Campaign')) },
+      },
+    },
+    '/admin/campaigns': {
+      get: {
+        tags: ['Admin'],
+        summary: 'Every campaign, including paused ones',
+        responses: { '200': ok(dataArrayRef('Campaign')) },
+      },
+      post: {
+        tags: ['Admin'],
+        summary: 'Create a banner or popup',
+        requestBody: { required: true, content: { 'application/json': { schema: { $ref: '#/components/schemas/CampaignBody' } } } },
+        responses: { '201': ok(dataRef('Campaign')) },
+      },
+    },
+    '/admin/campaigns/{id}': {
+      patch: {
+        tags: ['Admin'],
+        summary: 'Edit a campaign',
+        parameters: [idParam('id')],
+        requestBody: { required: true, content: { 'application/json': { schema: { $ref: '#/components/schemas/CampaignBody' } } } },
+        responses: { '200': ok(dataRef('Campaign')), '404': errorResponse('Campaign not found') },
+      },
+      delete: {
+        tags: ['Admin'],
+        summary: 'Delete a campaign',
+        parameters: [idParam('id')],
+        responses: { '200': ok({ type: 'object' }), '404': errorResponse('Campaign not found') },
+      },
+    },
+
+    // ──────────────────────────────── bonuses ────────────────────────────────
+    '/bonuses': {
+      get: {
+        tags: ['Bonuses'],
+        summary: 'Active bonus, grant history and the wallet balance including bonus credits',
+        responses: {
+          '200': ok({
+            type: 'object',
+            properties: {
+              data: {
+                type: 'object',
+                properties: {
+                  active: { allOf: [{ $ref: '#/components/schemas/Bonus' }], nullable: true },
+                  history: { type: 'array', items: { $ref: '#/components/schemas/Bonus' } },
+                  wallet: { $ref: '#/components/schemas/Wallet' },
+                },
+              },
+            },
+          }),
+        },
+      },
+    },
+    '/bonuses/redeem': {
+      post: {
+        tags: ['Bonuses'],
+        summary: 'Redeem a promo code',
+        description:
+          'Requires a Telegram-verified phone. A bonus is not stakeable: it converts to available credits only ' +
+          'after real-money card stakes reach `amount × multiplier`.',
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                required: ['code'],
+                properties: { code: { type: 'string', minLength: 3, maxLength: 32 } },
+              },
+            },
+          },
+        },
+        responses: {
+          '201': ok({
+            type: 'object',
+            properties: {
+              data: {
+                type: 'object',
+                properties: {
+                  bonus: { $ref: '#/components/schemas/Bonus' },
+                  wallet: { $ref: '#/components/schemas/Wallet' },
+                },
+              },
+            },
+          }),
+          '404': errorResponse('PROMO_NOT_FOUND'),
+          '409': errorResponse('BONUS_ALREADY_ACTIVE / PROMO_EXHAUSTED'),
+        },
+      },
+    },
+    '/admin/bonus-promotions': {
+      get: {
+        tags: ['Admin'],
+        summary: 'List promo codes',
+        responses: { '200': ok(dataArrayRef('BonusPromotion')) },
+      },
+      post: {
+        tags: ['Admin'],
+        summary: 'Create a promo code',
+        requestBody: { required: true, content: { 'application/json': { schema: { $ref: '#/components/schemas/BonusPromotionBody' } } } },
+        responses: { '201': ok(dataRef('BonusPromotion')), '400': errorResponse('PROMOTION_TERMS_INVALID') },
+      },
+    },
+    '/admin/bonus-promotions/{id}': {
+      patch: {
+        tags: ['Admin'],
+        summary: 'Edit a promo code',
+        parameters: [idParam('id')],
+        requestBody: { required: true, content: { 'application/json': { schema: { $ref: '#/components/schemas/BonusPromotionBody' } } } },
+        responses: { '200': ok(dataRef('BonusPromotion')), '404': errorResponse('Promotion not found') },
+      },
+      delete: {
+        tags: ['Admin'],
+        summary: 'Delete a promo code',
+        parameters: [idParam('id')],
+        responses: { '200': ok({ type: 'object' }), '404': errorResponse('Promotion not found') },
+      },
+    },
+    '/admin/bonuses': {
+      get: {
+        tags: ['Admin'],
+        summary: 'Granted bonuses with the player they belong to',
+        parameters: [
+          { name: 'userId', in: 'query', schema: { type: 'string', format: 'uuid' } },
+          pageParam,
+        ],
+        responses: {
+          '200': ok({
+            type: 'object',
+            properties: {
+              data: { type: 'array', items: { $ref: '#/components/schemas/BonusWithPlayer' } },
+              page: { $ref: '#/components/schemas/Page' },
+            },
+          }),
+        },
+      },
+    },
+    '/admin/bonuses/grant': {
+      post: {
+        tags: ['Admin'],
+        summary: 'Grant a manual bonus to a player',
+        security: [{ bearerAuth: [] }, { idempotency: [] }],
+        requestBody: { required: true, content: { 'application/json': { schema: { $ref: '#/components/schemas/BonusGrant' } } } },
+        responses: { '201': ok(dataRef('Bonus')), '409': errorResponse('BONUS_ALREADY_ACTIVE') },
+      },
+    },
+
+    // ─────────────────────────────── referrals ───────────────────────────────
+    '/referrals': {
+      get: {
+        tags: ['Referrals'],
+        summary: 'Referral code, invite link, counts and commission history',
+        responses: { '200': ok(dataRef('ReferralOverview')) },
+      },
+    },
+    '/admin/referrals': {
+      get: {
+        tags: ['Admin'],
+        summary: 'Referral leaderboard (top 50 by commission paid)',
+        responses: {
+          '200': ok({
+            type: 'object',
+            properties: {
+              data: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  properties: {
+                    referrerId: { type: 'string', format: 'uuid' },
+                    referrerName: { type: 'string', nullable: true },
+                    referrerPhone: { type: 'string', nullable: true },
+                    payments: { type: 'integer' },
+                    rakeBase: money,
+                    amount: money,
+                  },
+                },
+              },
+            },
+          }),
+        },
+      },
+    },
+    '/admin/settings': {
+      get: {
+        tags: ['Admin'],
+        summary: 'Platform referral and bonus defaults',
+        responses: {
+          '200': ok({
+            type: 'object',
+            properties: {
+              data: {
+                type: 'object',
+                properties: {
+                  referral: {
+                    type: 'object',
+                    properties: {
+                      commissionBps: { type: 'integer' },
+                      minRakeToPay: money,
+                    },
+                  },
+                  bonus: { $ref: '#/components/schemas/BonusSettings' },
+                },
+              },
+            },
+          }),
+        },
+      },
+    },
+    '/admin/settings/referrals': {
+      put: {
+        tags: ['Admin'],
+        summary: 'Set the affiliate commission share of round rake',
+        requestBody: { required: true, content: { 'application/json': { schema: { $ref: '#/components/schemas/ReferralSettings' } } } },
+        responses: { '200': ok({ type: 'object' }) },
+      },
+    },
+    '/admin/settings/bonuses': {
+      put: {
+        tags: ['Admin'],
+        summary: 'Set the default wagering multiplier and expiry',
+        requestBody: { required: true, content: { 'application/json': { schema: { $ref: '#/components/schemas/BonusSettings' } } } },
+        responses: { '200': ok({ type: 'object' }) },
+      },
+    },
+
+    // ──────────────────────────── external game providers ────────────────────────────
+    '/games': {
+      get: {
+        tags: ['Games'],
+        summary: 'Enabled providers with their playable games',
+        responses: { '200': ok(dataArrayRef('GameProvider')) },
+      },
+    },
+    '/games/{gameId}/launch': {
+      post: {
+        tags: ['Games'],
+        summary: 'Create a provider session and return the launch URL',
+        parameters: [idParam('gameId')],
+        requestBody: {
+          required: false,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                properties: { lang: { type: 'string', enum: ['en', 'am'], default: 'en' } },
+              },
+            },
+          },
+        },
+        responses: { '201': ok(dataRef('ProviderSession')), '409': errorResponse('GAME_NOT_AVAILABLE') },
+      },
+    },
+    '/games/sessions/{sessionId}/close': {
+      post: {
+        tags: ['Games'],
+        summary: 'Close a provider session',
+        parameters: [idParam('sessionId')],
+        responses: { '200': ok({ type: 'object' }), '404': errorResponse('Session not found') },
+      },
+    },
+    '/games/callback/{providerCode}': {
+      post: {
+        tags: ['Games'],
+        summary: 'Provider wallet callback (bet · win · rollback)',
+        description:
+          'Signed with HMAC-SHA256 over the raw body in `x-provider-signature`. Every txnId is applied at most ' +
+          'once; replays return `{ replayed: true }`. Callbacks are not session-authenticated.',
+        security: [],
+        parameters: [idParam('providerCode')],
+        requestBody: { required: true, content: { 'application/json': { schema: { $ref: '#/components/schemas/ProviderCallback' } } } },
+        responses: {
+          '201': ok({ type: 'object' }),
+          '200': ok({ type: 'object' }),
+          '403': errorResponse('SIGNATURE_INVALID'),
+        },
+      },
+    },
+    '/admin/game-providers': {
+      get: {
+        tags: ['Admin'],
+        summary: 'Provider catalog with games',
+        responses: { '200': ok(dataArrayRef('GameProvider')) },
+      },
+    },
+    '/admin/game-providers/{code}': {
+      put: {
+        tags: ['Admin'],
+        summary: 'Create or update a provider (secret is write-only)',
+        parameters: [idParam('code')],
+        requestBody: { required: true, content: { 'application/json': { schema: { $ref: '#/components/schemas/GameProviderBody' } } } },
+        responses: { '200': ok(dataRef('GameProvider')) },
+      },
+      delete: {
+        tags: ['Admin'],
+        summary: 'Delete a provider and its games',
+        parameters: [idParam('code')],
+        responses: { '200': ok({ type: 'object' }) },
+      },
+    },
+    '/admin/game-providers/{code}/games': {
+      post: {
+        tags: ['Admin'],
+        summary: 'Add or update a game in a provider catalog',
+        parameters: [idParam('code')],
+        requestBody: { required: true, content: { 'application/json': { schema: { $ref: '#/components/schemas/ProviderGameBody' } } } },
+        responses: { '201': ok({ type: 'object' }) },
+      },
+    },
+    '/admin/game-providers/{code}/games/{externalId}': {
+      delete: {
+        tags: ['Admin'],
+        summary: 'Remove a game from a provider catalog',
+        parameters: [idParam('code'), idParam('externalId')],
         responses: { '200': ok({ type: 'object' }) },
       },
     },

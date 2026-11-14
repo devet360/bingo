@@ -524,7 +524,58 @@ Wallet/agent balances are **caches**. If a cache is ever in doubt, it is rebuilt
 
 ---
 
-## 6. Phase roadmap
+## 6. Growth suite
+
+### 6.1 Theme
+
+Colors are CSS variables on `:root` and `[data-theme='light']`; Tailwind maps every token
+through `rgb(var(--c-*) / <alpha-value>)`, so components never hardcode a palette. The
+theme is stored in `localStorage` (`bingo.theme.v1`), defaults to the OS preference, and
+is applied before first paint by a `beforeInteractive` script. The same value drives
+`documentElement.style.colorScheme` and the Telegram `setHeaderColor` /
+`setBackgroundColor` calls.
+
+### 6.2 Campaigns
+
+`Campaign` rows are `BANNER` or `POPUP`, scoped to `ALL` / `PLAYERS` / `AGENTS`, an
+`en`/`am` locale, an optional start/end window and a priority. The player app fetches
+`GET /marketing/campaigns?locale=` every five minutes and filters by role server-side.
+A banner renders inline at the top of the shell; only the highest-priority popup opens,
+once per session. Dismissal stores an expiry timestamp per campaign id, honouring
+`dismissHours` (0 = show every launch).
+
+### 6.3 Bonuses and wagering
+
+A bonus is a `BONUS` balance bucket, not spendable credits: card purchases always debit
+`AVAILABLE`. Every real-money card stake inside a settlement transaction calls
+`accrueWagering`, which increments `Bonus.wagered`. When `wagered >= amount ×
+multiplier`, a `BONUS_CONVERT` journal moves the grant from the user's `BONUS` account to
+`AVAILABLE`. Expiry posts `BONUS_FORFEIT` to `PLATFORM.BONUS_EXPENSE`. A partial unique
+index permits one `ACTIVE` bonus per user. Grants and promo terms (percent vs fixed, cap,
+minimum deposit, expiry, redemption limit) are admin-owned; the wagering multiplier is
+validated 1–100 and defaults come from `SystemConfig`.
+
+### 6.4 Referrals
+
+Each user has a referral code. `settleReferralCommissions` runs inside the round
+settlement transaction: for each referred player it computes `rake = stake × rakeBps`,
+`commission = rake × commissionBps / 10000`, skips rounds below `minRakeToPay`, and posts
+one `AFFILIATE_COMMISSION` journal per referrer per round with idempotency key
+`referral:<roundId>:<referrerId>`. `ReferralCommission` is unique on
+`(referrerId, playerId, roundId)`, so retries cannot double-pay.
+
+### 6.5 External game providers
+
+Providers authenticate callbacks with a per-provider HMAC-SHA256 over the raw request
+body (`x-provider-signature`). Launching a game creates a `ProviderSession` (2h TTL) and
+expands the game's `launchUrlTemplate` with `{token}`, `{sessionId}`, `{lang}` and
+`{currency}=CREDIT`. Callbacks are typed `bet`, `win` or `rollback` and post ledger
+journals keyed `provider:<code>:<txnId>` and `provider:<code>:rollback:<txnId>`, so a
+replayed callback is a no-op. The webhook secret is write-only: `GET` responses expose
+only `hasSecret`. Admin edits can add providers and games but cannot reach the deposit
+receipt parser allowlist.
+
+## 7. Phase roadmap
 
 | Phase | Scope | Status |
 | --- | --- | --- |
@@ -533,4 +584,5 @@ Wallet/agent balances are **caches**. If a cache is ever in doubt, it is rebuilt
 | 3 | Socket.io bingo engine, provably fair RNG, claim verification, BullMQ workers | ✅ delivered |
 | 4 | Next.js TMA: lobby, live board, wallet, agent portal, fairness verifier; Dokku packaging | ✅ delivered |
 | 5 | Telegram bot + phone verification, staff roles, support/admin consoles, staff Telegram linking, bank receipt verification + agent auto-deposit, Swagger, EN/AM localization | ✅ delivered |
-| 6 | Flutter mobile app (same REST + Socket.io API) | pending |
+| 6 | Bingo 251 brand, dark/light theme, announcement banners + popups, wagering bonuses, affiliate referrals, external game provider seam | ✅ delivered |
+| 7 | Flutter mobile app (same REST + Socket.io API) | pending |

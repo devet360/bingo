@@ -71,6 +71,32 @@ The Mini App needs the API running and `CORS_ORIGINS` to include `http://localho
 Players sign in from Telegram `initData`; staff sign in on the web with email/phone and
 password (`/admin` for super admins, `/support` for support). There is no web sign-up.
 
+## Growth, rewards and external games
+
+- **Theme.** Dark by default, light available from the header toggle. Both palettes are
+  CSS variables (`--c-*` in `apps/web/src/app/globals.css`), the choice persists in
+  `localStorage`, and the Telegram header/background colors follow it. A
+  `beforeInteractive` script sets the attribute before paint, so there is no flash.
+- **Announcements and popups.** Super admins create `BANNER` and `POPUP` campaigns in
+  **Admin → Marketing**, targeted by audience, `en`/`am` locale and date window, ordered
+  by priority. Players can dismiss a campaign for a configurable number of hours.
+- **Bonuses with wagering.** Promo codes and direct grants land in the wallet's bonus
+  bucket and are **not** stakeable. Real-money card purchases accrue wagering progress;
+  the grant converts to available credits once it reaches
+  `amount × multiplier`. The super admin sets default multiplier/expiry in
+  **Admin → Bonuses** and can grant or revoke per player. Expiry forfeits the remainder.
+- **Referrals.** Every player has a code and `https://t.me/<bot>?start=ref_<code>` invite
+  link. The super admin sets the commission as a share of each round's rake; commissions
+  post to the referrer's available balance inside the settlement transaction.
+- **External game providers.** Providers are registered in **Admin → Games** with a
+  write-only HMAC secret, API base and game catalog. Players launch a game, receive a
+  signed session URL and play in an embedded page; provider callbacks (`bet`, `win`,
+  `rollback`) post to `/games/callback/<code>` and settle the same ledger. Secrets are
+  never returned by the API.
+- **Brand assets.** Logo, poster and Telegram artwork prompts are in
+  [docs/marketing-prompts.md](docs/marketing-prompts.md); the app icon is
+  `apps/web/public/icon.svg`.
+
 ## Deploying (Dokku)
 
 Dokku hosts one app for the API (`web`, `worker` and `bot` processes) and one for the
@@ -182,7 +208,8 @@ needs the Redis adapter for broadcast fan-out.
 | 3 | Bingo engine, provably fair RNG, claim verification, Socket.io, BullMQ worker | done |
 | 4 | Next.js TMA: lobby, live 75/90 board, wallet, agent portal, fairness verifier; Dokku packaging | done |
 | 5 | Telegram bot + phone verification, staff roles, support/admin dashboards, Swagger, EN/AM | done |
-| 6 | Flutter mobile app | next |
+| 6 | Bingo 251 brand, dark/light theme, campaigns, wagering bonuses, referrals, external game providers | done |
+| 7 | Flutter mobile app | next |
 
 The Next.js app (`apps/web`) covers the lobby, a live table with 5×5 and 3×9 cards,
 card purchases, claim buttons, settlement/refund banners, deposits and payouts, the

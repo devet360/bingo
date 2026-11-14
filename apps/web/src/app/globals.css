@@ -2,24 +2,75 @@
 @tailwind components;
 @tailwind utilities;
 
-:root {
+/*
+ * HSL-free RGB triplets so Tailwind's `rgb(var(--c-x) / <alpha-value>)`
+ * colours can fade without extra classes. Both palettes keep the same
+ * luminance ordering so contrast holds in either theme.
+ */
+:root,
+[data-theme='dark'] {
   color-scheme: dark;
+  --c-ink: 5 13 11;
+  --c-panel: 11 26 21;
+  --c-raised: 16 36 29;
+  --c-line: 29 58 48;
+  --c-text: 238 246 241;
+  --c-muted: 138 167 154;
+  --c-gold: 243 201 105;
+  --c-mint: 55 224 160;
+  --c-danger: 255 107 107;
+  --c-warn: 255 179 71;
+  --c-blue: 125 200 255;
+  --glow-mint: 0.12;
+  --glow-gold: 0.07;
+  --scroll-thumb: #1d3a30;
+  --shadow-card: 0 18px 40px -28px rgb(0 0 0 / 0.9);
+  --shadow-float: 0 24px 60px -32px rgb(0 0 0 / 0.85);
+}
+
+[data-theme='light'] {
+  color-scheme: light;
+  --c-ink: 244 248 244;
+  --c-panel: 255 255 255;
+  --c-raised: 236 244 238;
+  --c-line: 205 222 212;
+  --c-text: 14 32 25;
+  --c-muted: 92 116 104;
+  --c-gold: 176 122 12;
+  --c-mint: 5 150 105;
+  --c-danger: 190 40 40;
+  --c-warn: 158 94 6;
+  --c-blue: 20 100 190;
+  --glow-mint: 0.16;
+  --glow-gold: 0.14;
+  --scroll-thumb: #c3d6c9;
+  --shadow-card: 0 18px 40px -30px rgb(16 42 32 / 0.35);
+  --shadow-float: 0 24px 60px -34px rgb(16 42 32 / 0.45);
 }
 
 html {
-  background-color: #050d0b;
+  background-color: rgb(var(--c-ink));
 }
 
 body {
   background-image:
-    radial-gradient(1200px 500px at 50% -10%, rgba(55, 224, 160, 0.12), transparent 70%),
-    radial-gradient(900px 400px at 100% 0%, rgba(243, 201, 105, 0.07), transparent 65%);
+    radial-gradient(
+      1200px 500px at 50% -10%,
+      rgb(var(--c-mint) / var(--glow-mint)),
+      transparent 70%
+    ),
+    radial-gradient(
+      900px 400px at 100% 0%,
+      rgb(var(--c-gold) / var(--glow-gold)),
+      transparent 65%
+    );
   background-repeat: no-repeat;
   -webkit-tap-highlight-color: transparent;
+  transition: background-color 0.2s ease;
 }
 
 ::selection {
-  background: rgba(55, 224, 160, 0.3);
+  background: rgb(var(--c-mint) / 0.3);
 }
 
 input[type='number']::-webkit-outer-spin-button,
@@ -34,7 +85,7 @@ input[type='number']::-webkit-inner-spin-button {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #1d3a30;
+  background: var(--scroll-thumb);
   border-radius: 999px;
 }
 
@@ -54,4 +105,9 @@ input[type='number']::-webkit-inner-spin-button {
 
 .ball-enter {
   animation: ball-in 0.4s ease-out;
+}
+
+/* The Telegram WebApp paints its own chrome; keep it in step with the theme. */
+[data-theme='light'] .tg-theme-bg {
+  background-color: rgb(var(--c-ink));
 }

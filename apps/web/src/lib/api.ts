@@ -1,8 +1,16 @@
 import { getRuntimeConfig } from './runtime-config';
 import type {
   AdminOverview,
+  AdminReferralRow,
+  AdminSettings,
   Agent,
   AuditEntry,
+  Bonus,
+  BonusPromotion,
+  BonusWithPlayer,
+  Campaign,
+  CampaignAudience,
+  CampaignKind,
   Card,
   Claim,
   Commission,
@@ -11,14 +19,19 @@ import type {
   DepositProvider,
   DepositStatus,
   FloatRequest,
+  GameProvider,
+  GameProviderGame,
   LedgerView,
   LobbyRoom,
   Paginated,
   PaymentAccount,
   PaymentMethod,
+  ProviderKind,
+  ProviderSession,
   ReceiptVerificationView,
-  Room,
+  ReferralOverview,
   Role,
+  Room,
   Round,
   RoundProof,
   RoomView,
@@ -88,7 +101,7 @@ export function newIdempotencyKey(prefix: string): string {
 }
 
 interface RequestOptions {
-  method?: 'GET' | 'POST' | 'PATCH' | 'DELETE';
+  method?: 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE';
   body?: unknown;
   idempotencyKey?: string;
   auth?: boolean;
@@ -620,4 +633,201 @@ export function topUpAgentFloat(input: {
     body,
     idempotencyKey,
   });
+}
+
+// ─────────────────────────────── marketing ───────────────────────────────
+
+export function fetchCampaigns(locale: 'en' | 'am'): Promise<Campaign[]> {
+  return apiRequest(`/marketing/campaigns?locale=${locale}`);
+}
+
+export interface CampaignInput {
+  kind: CampaignKind;
+  audience: CampaignAudience;
+  locale: 'en' | 'am';
+  title: string;
+  body: string;
+  imageUrl?: string | null;
+  linkUrl?: string | null;
+  linkLabel?: string | null;
+  enabled: boolean;
+  priority: number;
+  dismissHours: number;
+  startsAt?: string | null;
+  endsAt?: string | null;
+}
+
+export function fetchAdminCampaigns(): Promise<Campaign[]> {
+  return apiRequest('/admin/campaigns');
+}
+
+export function createCampaign(input: CampaignInput): Promise<Campaign> {
+  return apiRequest('/admin/campaigns', { method: 'POST', body: input });
+}
+
+export function updateCampaign(id: string, patch: Partial<CampaignInput>): Promise<Campaign> {
+  return apiRequest(`/admin/campaigns/${id}`, { method: 'PATCH', body: patch });
+}
+
+export function deleteCampaign(id: string): Promise<{ deleted: true }> {
+  return apiRequest(`/admin/campaigns/${id}`, { method: 'DELETE' });
+}
+
+// ─────────────────────────────── bonuses ───────────────────────────────
+
+export function fetchBonuses(): Promise<{ active: Bonus | null; history: Bonus[]; wallet: Wallet }> {
+  return apiRequest('/bonuses');
+}
+
+export function redeemPromoCode(code: string): Promise<{ bonus: Bonus; wallet: Wallet }> {
+  return apiRequest('/bonuses/redeem', { method: 'POST', body: { code } });
+}
+
+export function fetchBonusPromotions(): Promise<BonusPromotion[]> {
+  return apiRequest('/admin/bonus-promotions');
+}
+
+export interface BonusPromotionInput {
+  code: string;
+  name: string;
+  percentBps?: number | null;
+  fixedAmount?: number | null;
+  maxBonus?: number | null;
+  minDeposit?: number | null;
+  wageringMultiplier: number;
+  expiresInDays: number;
+  enabled: boolean;
+  startsAt?: string | null;
+  endsAt?: string | null;
+  maxRedemptions?: number | null;
+}
+
+export function createBonusPromotion(input: BonusPromotionInput): Promise<BonusPromotion> {
+  return apiRequest('/admin/bonus-promotions', { method: 'POST', body: input });
+}
+
+export function updateBonusPromotion(
+  id: string,
+  patch: Partial<BonusPromotionInput>,
+): Promise<BonusPromotion> {
+  return apiRequest(`/admin/bonus-promotions/${id}`, { method: 'PATCH', body: patch });
+}
+
+export function deleteBonusPromotion(id: string): Promise<{ deleted: true }> {
+  return apiRequest(`/admin/bonus-promotions/${id}`, { method: 'DELETE' });
+}
+
+export function fetchAdminBonuses(
+  filter: { userId?: string; page?: number } = {},
+): Promise<Paginated<BonusWithPlayer>> {
+  return apiRequest(`/admin/bonuses${queryString(filter)}`, { fullEnvelope: true });
+}
+
+export function grantBonus(input: {
+  userId: string;
+  amount: number;
+  multiplier?: number;
+  expiresInDays?: number;
+  note?: string;
+}): Promise<Bonus> {
+  return apiRequest('/admin/bonuses/grant', { method: 'POST', body: input });
+}
+
+// ─────────────────────────────── referrals ───────────────────────────────
+
+export function fetchReferralOverview(): Promise<ReferralOverview> {
+  return apiRequest('/referrals');
+}
+
+export function fetchAdminReferrals(): Promise<AdminReferralRow[]> {
+  return apiRequest('/admin/referrals');
+}
+
+export function fetchAdminSettings(): Promise<AdminSettings> {
+  return apiRequest('/admin/settings');
+}
+
+export function updateReferralSettings(input: {
+  commissionBps: number;
+  minRakeToPay?: number;
+}): Promise<{ commissionBps: number; minRakeToPay?: number }> {
+  return apiRequest('/admin/settings/referrals', { method: 'PUT', body: input });
+}
+
+export function updateBonusSettings(input: {
+  defaultWageringMultiplier: number;
+  defaultExpiryDays: number;
+}): Promise<{ defaultWageringMultiplier: number; defaultExpiryDays: number }> {
+  return apiRequest('/admin/settings/bonuses', { method: 'PUT', body: input });
+}
+
+// ─────────────────────────────── external game providers ───────────────────────────────
+
+export function fetchPlayableGames(): Promise<GameProvider[]> {
+  return apiRequest('/games');
+}
+
+export function launchGame(gameId: string, lang: 'en' | 'am'): Promise<ProviderSession> {
+  return apiRequest(`/games/${gameId}/launch`, { method: 'POST', body: { lang } });
+}
+
+export function closeGameSession(sessionId: string): Promise<{ closed: true }> {
+  return apiRequest(`/games/sessions/${sessionId}/close`, { method: 'POST' });
+}
+
+export function fetchGameProviders(): Promise<GameProvider[]> {
+  return apiRequest('/admin/game-providers');
+}
+
+export interface GameProviderInput {
+  name: string;
+  kind: ProviderKind;
+  apiBaseUrl?: string | null;
+  webhookSecret?: string | null;
+  enabled: boolean;
+  sortOrder?: number;
+  config?: unknown;
+}
+
+export function upsertGameProvider(code: string, input: GameProviderInput): Promise<GameProvider> {
+  return apiRequest(`/admin/game-providers/${encodeURIComponent(code)}`, {
+    method: 'PUT',
+    body: input,
+  });
+}
+
+export function deleteGameProvider(code: string): Promise<{ deleted: true }> {
+  return apiRequest(`/admin/game-providers/${encodeURIComponent(code)}`, { method: 'DELETE' });
+}
+
+export interface GameProviderGameInput {
+  externalId: string;
+  name: string;
+  category?: string | null;
+  thumbnailUrl?: string | null;
+  launchUrlTemplate?: string | null;
+  minStake?: number | null;
+  maxStake?: number | null;
+  enabled: boolean;
+  sortOrder?: number;
+}
+
+export function upsertGameProviderGame(
+  code: string,
+  input: GameProviderGameInput,
+): Promise<Pick<GameProviderGame, 'id' | 'externalId' | 'name' | 'enabled'>> {
+  return apiRequest(`/admin/game-providers/${encodeURIComponent(code)}/games`, {
+    method: 'POST',
+    body: input,
+  });
+}
+
+export function deleteGameProviderGame(
+  code: string,
+  externalId: string,
+): Promise<{ deleted: true }> {
+  return apiRequest(
+    `/admin/game-providers/${encodeURIComponent(code)}/games/${encodeURIComponent(externalId)}`,
+    { method: 'DELETE' },
+  );
 }

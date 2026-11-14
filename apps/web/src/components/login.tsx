@@ -36,10 +36,10 @@ export function LoginPanel() {
   return (
     <div className="mx-auto mt-10 w-full max-w-md animate-rise space-y-4">
       <div className="text-center">
-        <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-2xl bg-gradient-to-br from-gold to-mint text-2xl font-black text-ink shadow-glow">
-          B
+        <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-gradient-to-br from-gold via-[#f7d98a] to-gold text-base font-black tracking-tight text-[#1a1204] shadow-glow ring-2 ring-mint/40">
+          251
         </div>
-        <h1 className="mt-4 font-display text-3xl font-bold tracking-tight">Bingo Hall</h1>
+        <h1 className="mt-4 font-display text-3xl font-bold tracking-tight">Bingo 251</h1>
         <p className="mt-1 text-sm text-muted">{t('login.playersBlurb')}</p>
       </div>
 
@@ -94,7 +94,7 @@ export function LoginPanel() {
                 label={t('login.identifier')}
                 name="identifier"
                 autoComplete="username"
-                placeholder="you@bingo.hall or +2519…"
+                placeholder="you@bingo251.et or +2519…"
                 value={identifier}
                 onChange={(event) => setIdentifier(event.target.value)}
               />

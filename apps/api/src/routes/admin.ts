@@ -26,6 +26,34 @@ import {
   STAFF_ROLES,
 } from '../services/staff';
 import { scopedIdempotencyKey } from '../services/wallet';
+import {
+  createCampaign,
+  deleteCampaign,
+  listAllCampaigns,
+  serializeCampaign,
+  updateCampaign,
+} from '../services/campaigns';
+import {
+  getBonusSettings,
+  getReferralSettings,
+  setConfig,
+  BONUS_CONFIG_KEY,
+  REFERRAL_CONFIG_KEY,
+} from '../services/config';
+import {
+  grantBonus,
+  listBonusHistory,
+  serializeBonus,
+  serializeBonusPromotion,
+} from '../services/bonuses';
+import {
+  deleteGame,
+  deleteProvider,
+  listProviderCatalog,
+  serializeProvider as serializeGameProvider,
+  upsertGame,
+  upsertProvider,
+} from '../services/gameProviders';
 
 const CreateAgentSchema = z
   .object({
@@ -125,6 +153,89 @@ const ProviderPatchSchema = z.object({
 });
 
 const PAGE_SIZE = 50;
+
+const CampaignBodySchema = z.object({
+  kind: z.enum(['BANNER', 'POPUP']),
+  audience: z.enum(['ALL', 'PLAYERS', 'AGENTS']).default('ALL'),
+  locale: z.enum(['en', 'am']).default('en'),
+  title: z.string().trim().min(1).max(120),
+  body: z.string().trim().min(1).max(2000),
+  imageUrl: z.string().url().max(2048).nullable().optional(),
+  linkUrl: z.string().url().max(2048).nullable().optional(),
+  linkLabel: z.string().trim().max(40).nullable().optional(),
+  enabled: z.boolean().default(true),
+  priority: z.number().int().min(0).max(1000).default(0),
+  dismissHours: z.number().int().min(0).max(720).default(24),
+  startsAt: z.coerce.date().nullable().optional(),
+  endsAt: z.coerce.date().nullable().optional(),
+});
+
+const CampaignPatchSchema = CampaignBodySchema.partial();
+
+const moneyOrNull = z
+  .number()
+  .int()
+  .positive()
+  .max(Number.MAX_SAFE_INTEGER)
+  .nullable()
+  .optional();
+
+const PromotionBodySchema = z.object({
+  code: z.string().trim().min(3).max(32),
+  name: z.string().trim().min(1).max(120),
+  percentBps: z.number().int().min(1).max(10000).nullable().optional(),
+  fixedAmount: moneyOrNull,
+  maxBonus: moneyOrNull,
+  minDeposit: moneyOrNull,
+  wageringMultiplier: z.number().int().min(1).max(100),
+  expiresInDays: z.number().int().min(1).max(365),
+  enabled: z.boolean().default(true),
+  startsAt: z.coerce.date().nullable().optional(),
+  endsAt: z.coerce.date().nullable().optional(),
+  maxRedemptions: z.number().int().positive().max(1_000_000).nullable().optional(),
+});
+
+const PromotionPatchSchema = PromotionBodySchema.partial();
+
+const GrantBonusSchema = z.object({
+  userId: z.string().uuid(),
+  amount: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+  multiplier: z.number().int().min(1).max(100).optional(),
+  expiresInDays: z.number().int().min(1).max(365).optional(),
+  note: z.string().trim().max(200).optional(),
+});
+
+const ReferralSettingsSchema = z.object({
+  commissionBps: z.number().int().min(0).max(5000),
+  minRakeToPay: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).optional(),
+});
+
+const BonusSettingsSchema = z.object({
+  defaultWageringMultiplier: z.number().int().min(1).max(100),
+  defaultExpiryDays: z.number().int().min(1).max(365),
+});
+
+const ProviderBodySchema = z.object({
+  name: z.string().trim().min(1).max(96),
+  kind: z.enum(['NATIVE', 'AGGREGATOR']).default('AGGREGATOR'),
+  apiBaseUrl: z.string().url().max(2048).nullable().optional(),
+  webhookSecret: z.string().min(16).max(128).nullable().optional(),
+  enabled: z.boolean().default(false),
+  sortOrder: z.number().int().min(0).max(10_000).optional(),
+  config: z.unknown().optional(),
+});
+
+const GameBodySchema = z.object({
+  externalId: z.string().trim().min(1).max(64),
+  name: z.string().trim().min(1).max(96),
+  category: z.string().trim().max(48).nullable().optional(),
+  thumbnailUrl: z.string().url().max(2048).nullable().optional(),
+  launchUrlTemplate: z.string().trim().max(2048).nullable().optional(),
+  minStake: moneyOrNull,
+  maxStake: moneyOrNull,
+  enabled: z.boolean().default(true),
+  sortOrder: z.number().int().min(0).max(10_000).optional(),
+});
 
 export const adminRouter = Router();
 
@@ -575,5 +686,489 @@ adminRouter.get(
       'SELECT * FROM "v_account_drift" LIMIT 200',
     );
     res.json({ data: { healthy: drift.length === 0, drift } });
+  }),
+);
+
+// ═══════════════════════════════ MARKETING ═══════════════════════════════════
+
+adminRouter.get(
+  '/campaigns',
+  asyncHandler(async (_req, res) => {
+    const campaigns = await listAllCampaigns();
+    res.json({ data: campaigns.map(serializeCampaign) });
+  }),
+);
+
+adminRouter.post(
+  '/campaigns',
+  asyncHandler(async (req, res) => {
+    const body = parse(CampaignBodySchema, req.body);
+    const campaign = await createCampaign({ ...body, createdById: req.auth!.userId });
+    await writeAudit({
+      actorId: req.auth!.userId,
+      actorRole: req.auth!.role,
+      action: 'campaign.create',
+      entityType: 'Campaign',
+      entityId: campaign.id,
+      after: { kind: campaign.kind, title: campaign.title, audience: campaign.audience },
+      ip: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
+    res.status(201).json({ data: serializeCampaign(campaign) });
+  }),
+);
+
+adminRouter.patch(
+  '/campaigns/:id',
+  asyncHandler(async (req, res) => {
+    const body = parse(CampaignPatchSchema, req.body);
+    const campaign = await updateCampaign(req.params.id, body);
+    await writeAudit({
+      actorId: req.auth!.userId,
+      actorRole: req.auth!.role,
+      action: 'campaign.update',
+      entityType: 'Campaign',
+      entityId: campaign.id,
+      after: { enabled: campaign.enabled, title: campaign.title, priority: campaign.priority },
+      ip: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
+    res.json({ data: serializeCampaign(campaign) });
+  }),
+);
+
+adminRouter.delete(
+  '/campaigns/:id',
+  asyncHandler(async (req, res) => {
+    await deleteCampaign(req.params.id);
+    await writeAudit({
+      actorId: req.auth!.userId,
+      actorRole: req.auth!.role,
+      action: 'campaign.delete',
+      entityType: 'Campaign',
+      entityId: req.params.id,
+      ip: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
+    res.json({ data: { deleted: true } });
+  }),
+);
+
+// ═════════════════════════════ BONUS PROGRAMME ═══════════════════════════════
+
+adminRouter.get(
+  '/bonus-promotions',
+  asyncHandler(async (_req, res) => {
+    const promotions = await prisma.bonusPromotion.findMany({
+      orderBy: { createdAt: 'desc' },
+    });
+    res.json({ data: promotions.map(serializeBonusPromotion) });
+  }),
+);
+
+function assertPromotionTerms(percentBps: number | null, fixedAmount: bigint | null): void {
+  if ((percentBps === null) === (fixedAmount === null)) {
+    throw Errors.badRequest(
+      'Set exactly one of percentBps or fixedAmount',
+      'PROMOTION_TERMS_INVALID',
+    );
+  }
+}
+
+adminRouter.post(
+  '/bonus-promotions',
+  asyncHandler(async (req, res) => {
+    const body = parse(PromotionBodySchema, req.body);
+    const percentBps = body.percentBps ?? null;
+    const fixedAmount = body.fixedAmount === undefined || body.fixedAmount === null
+      ? null
+      : BigInt(body.fixedAmount);
+    assertPromotionTerms(percentBps, fixedAmount);
+
+    const promotion = await prisma.bonusPromotion.create({
+      data: {
+        code: body.code.trim().toUpperCase(),
+        name: body.name,
+        percentBps,
+        fixedAmount,
+        maxBonus: body.maxBonus == null ? null : BigInt(body.maxBonus),
+        minDeposit: body.minDeposit == null ? null : BigInt(body.minDeposit),
+        wageringMultiplier: body.wageringMultiplier,
+        expiresInDays: body.expiresInDays,
+        enabled: body.enabled,
+        startsAt: body.startsAt ?? null,
+        endsAt: body.endsAt ?? null,
+        maxRedemptions: body.maxRedemptions ?? null,
+        createdById: req.auth!.userId,
+      },
+    });
+    await writeAudit({
+      actorId: req.auth!.userId,
+      actorRole: req.auth!.role,
+      action: 'promotion.create',
+      entityType: 'BonusPromotion',
+      entityId: promotion.id,
+      after: { code: promotion.code, percentBps, fixedAmount: fixedAmount?.toString() ?? null },
+      ip: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
+    res.status(201).json({ data: serializeBonusPromotion(promotion) });
+  }),
+);
+
+adminRouter.patch(
+  '/bonus-promotions/:id',
+  asyncHandler(async (req, res) => {
+    const body = parse(PromotionPatchSchema, req.body);
+    const current = await prisma.bonusPromotion.findUnique({ where: { id: req.params.id } });
+    if (!current) throw Errors.notFound('Promotion');
+
+    const percentBps = body.percentBps === undefined ? current.percentBps : body.percentBps;
+    const fixedAmount =
+      body.fixedAmount === undefined
+        ? current.fixedAmount
+        : body.fixedAmount === null
+          ? null
+          : BigInt(body.fixedAmount);
+    assertPromotionTerms(percentBps, fixedAmount);
+
+    const promotion = await prisma.bonusPromotion.update({
+      where: { id: current.id },
+      data: {
+        ...(body.code !== undefined ? { code: body.code.trim().toUpperCase() } : {}),
+        ...(body.name !== undefined ? { name: body.name } : {}),
+        percentBps,
+        fixedAmount,
+        ...(body.maxBonus !== undefined
+          ? { maxBonus: body.maxBonus === null ? null : BigInt(body.maxBonus) }
+          : {}),
+        ...(body.minDeposit !== undefined
+          ? { minDeposit: body.minDeposit === null ? null : BigInt(body.minDeposit) }
+          : {}),
+        ...(body.wageringMultiplier !== undefined
+          ? { wageringMultiplier: body.wageringMultiplier }
+          : {}),
+        ...(body.expiresInDays !== undefined ? { expiresInDays: body.expiresInDays } : {}),
+        ...(body.enabled !== undefined ? { enabled: body.enabled } : {}),
+        ...(body.startsAt !== undefined ? { startsAt: body.startsAt } : {}),
+        ...(body.endsAt !== undefined ? { endsAt: body.endsAt } : {}),
+        ...(body.maxRedemptions !== undefined ? { maxRedemptions: body.maxRedemptions } : {}),
+      },
+    });
+    await writeAudit({
+      actorId: req.auth!.userId,
+      actorRole: req.auth!.role,
+      action: 'promotion.update',
+      entityType: 'BonusPromotion',
+      entityId: promotion.id,
+      before: { enabled: current.enabled },
+      after: { enabled: promotion.enabled },
+      ip: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
+    res.json({ data: serializeBonusPromotion(promotion) });
+  }),
+);
+
+adminRouter.delete(
+  '/bonus-promotions/:id',
+  asyncHandler(async (req, res) => {
+    const removed = await prisma.bonusPromotion.deleteMany({ where: { id: req.params.id } });
+    if (removed.count === 0) throw Errors.notFound('Promotion');
+    await writeAudit({
+      actorId: req.auth!.userId,
+      actorRole: req.auth!.role,
+      action: 'promotion.delete',
+      entityType: 'BonusPromotion',
+      entityId: req.params.id,
+      ip: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
+    res.json({ data: { deleted: true } });
+  }),
+);
+
+adminRouter.get(
+  '/bonuses',
+  asyncHandler(async (req, res) => {
+    const query = parse(
+      z.object({
+        userId: z.string().uuid().optional(),
+        page: z.coerce.number().int().min(0).max(2000).default(0),
+      }),
+      req.query,
+    );
+    const where = query.userId ? { userId: query.userId } : {};
+    const [total, bonuses] = await Promise.all([
+      prisma.bonus.count({ where }),
+      prisma.bonus.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        skip: query.page * PAGE_SIZE,
+        take: PAGE_SIZE,
+        include: { user: { select: { displayName: true, phone: true } } },
+      }),
+    ]);
+    res.json({
+      data: bonuses.map((bonus) => ({
+        ...serializeBonus(bonus),
+        playerName: bonus.user.displayName,
+        playerPhone: bonus.user.phone,
+      })),
+      page: { index: query.page, size: PAGE_SIZE, total },
+    });
+  }),
+);
+
+adminRouter.post(
+  '/bonuses/grant',
+  asyncHandler(async (req, res) => {
+    const body = parse(GrantBonusSchema, req.body);
+    const bonus = await grantBonus({
+      userId: body.userId,
+      amount: BigInt(body.amount),
+      multiplier: body.multiplier,
+      expiresInDays: body.expiresInDays,
+      grantedById: req.auth!.userId,
+      note: body.note,
+    });
+    await writeAudit({
+      actorId: req.auth!.userId,
+      actorRole: req.auth!.role,
+      action: 'bonus.grant',
+      entityType: 'Bonus',
+      entityId: bonus.id,
+      after: {
+        userId: bonus.userId,
+        amount: bonus.amount.toString(),
+        target: bonus.target.toString(),
+      },
+      ip: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
+    res.status(201).json({ data: serializeBonus(bonus) });
+  }),
+);
+
+// ═══════════════════════════════ SETTINGS ════════════════════════════════════
+
+adminRouter.get(
+  '/settings',
+  asyncHandler(async (_req, res) => {
+    const [referral, bonus] = await Promise.all([getReferralSettings(), getBonusSettings()]);
+    res.json({
+      data: {
+        referral: {
+          commissionBps: referral.commissionBps,
+          minRakeToPay: referral.minRakeToPay.toString(),
+        },
+        bonus,
+      },
+    });
+  }),
+);
+
+adminRouter.put(
+  '/settings/referrals',
+  asyncHandler(async (req, res) => {
+    const body = parse(ReferralSettingsSchema, req.body);
+    await setConfig(
+      REFERRAL_CONFIG_KEY,
+      {
+        commissionBps: body.commissionBps,
+        ...(body.minRakeToPay !== undefined ? { minRakeToPay: String(body.minRakeToPay) } : {}),
+      },
+      req.auth!.userId,
+      'Referral programme: share of rake paid to referrers',
+    );
+    await writeAudit({
+      actorId: req.auth!.userId,
+      actorRole: req.auth!.role,
+      action: 'settings.referral',
+      entityType: 'SystemConfig',
+      entityId: REFERRAL_CONFIG_KEY,
+      after: body,
+      ip: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
+    res.json({ data: body });
+  }),
+);
+
+adminRouter.put(
+  '/settings/bonuses',
+  asyncHandler(async (req, res) => {
+    const body = parse(BonusSettingsSchema, req.body);
+    await setConfig(
+      BONUS_CONFIG_KEY,
+      body,
+      req.auth!.userId,
+      'Bonus programme defaults for admin grants',
+    );
+    await writeAudit({
+      actorId: req.auth!.userId,
+      actorRole: req.auth!.role,
+      action: 'settings.bonus',
+      entityType: 'SystemConfig',
+      entityId: BONUS_CONFIG_KEY,
+      after: body,
+      ip: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
+    res.json({ data: body });
+  }),
+);
+
+// ═══════════════════════════════ REFERRALS ═══════════════════════════════════
+
+adminRouter.get(
+  '/referrals',
+  asyncHandler(async (_req, res) => {
+    const grouped = await prisma.referralCommission.groupBy({
+      by: ['referrerId'],
+      _sum: { amount: true, rakeBase: true },
+      _count: { _all: true },
+      orderBy: { _sum: { amount: 'desc' } },
+      take: 50,
+    });
+    const users = await prisma.user.findMany({
+      where: { id: { in: grouped.map((row) => row.referrerId) } },
+      select: { id: true, displayName: true, phone: true },
+    });
+    const byId = new Map(users.map((user) => [user.id, user]));
+    res.json({
+      data: grouped.map((row) => ({
+        referrerId: row.referrerId,
+        referrerName: byId.get(row.referrerId)?.displayName ?? null,
+        referrerPhone: byId.get(row.referrerId)?.phone ?? null,
+        payments: row._count._all,
+        rakeBase: (row._sum.rakeBase ?? 0n).toString(),
+        amount: (row._sum.amount ?? 0n).toString(),
+      })),
+    });
+  }),
+);
+
+// ═══════════════════════════ EXTERNAL GAME PROVIDERS ═════════════════════════
+
+adminRouter.get(
+  '/game-providers',
+  asyncHandler(async (_req, res) => {
+    const providers = await listProviderCatalog();
+    res.json({
+      data: providers.map((provider) => ({
+        ...serializeGameProvider(provider),
+        games: provider.games.map((game) => ({
+          id: game.id,
+          externalId: game.externalId,
+          name: game.name,
+          category: game.category,
+          thumbnailUrl: game.thumbnailUrl,
+          launchUrlTemplate: game.launchUrlTemplate,
+          minStake: game.minStake?.toString() ?? null,
+          maxStake: game.maxStake?.toString() ?? null,
+          enabled: game.enabled,
+          sortOrder: game.sortOrder,
+        })),
+      })),
+    });
+  }),
+);
+
+adminRouter.put(
+  '/game-providers/:code',
+  asyncHandler(async (req, res) => {
+    const body = parse(ProviderBodySchema, req.body);
+    const provider = await upsertProvider({
+      code: req.params.code,
+      name: body.name,
+      kind: body.kind,
+      apiBaseUrl: body.apiBaseUrl,
+      webhookSecret: body.webhookSecret,
+      enabled: body.enabled,
+      sortOrder: body.sortOrder,
+      config: body.config,
+    });
+    await writeAudit({
+      actorId: req.auth!.userId,
+      actorRole: req.auth!.role,
+      action: 'provider.game_upsert',
+      entityType: 'GameProvider',
+      entityId: provider.code,
+      after: { enabled: provider.enabled, kind: provider.kind },
+      ip: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
+    res.json({ data: serializeGameProvider(provider) });
+  }),
+);
+
+adminRouter.delete(
+  '/game-providers/:code',
+  asyncHandler(async (req, res) => {
+    await deleteProvider(req.params.code);
+    await writeAudit({
+      actorId: req.auth!.userId,
+      actorRole: req.auth!.role,
+      action: 'provider.game_delete',
+      entityType: 'GameProvider',
+      entityId: req.params.code,
+      ip: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
+    res.json({ data: { deleted: true } });
+  }),
+);
+
+adminRouter.post(
+  '/game-providers/:code/games',
+  asyncHandler(async (req, res) => {
+    const body = parse(GameBodySchema, req.body);
+    const game = await upsertGame(req.params.code, {
+      externalId: body.externalId,
+      name: body.name,
+      category: body.category,
+      thumbnailUrl: body.thumbnailUrl,
+      launchUrlTemplate: body.launchUrlTemplate,
+      minStake: body.minStake == null ? null : BigInt(body.minStake),
+      maxStake: body.maxStake == null ? null : BigInt(body.maxStake),
+      enabled: body.enabled,
+      sortOrder: body.sortOrder,
+    });
+    await writeAudit({
+      actorId: req.auth!.userId,
+      actorRole: req.auth!.role,
+      action: 'provider.game_catalog',
+      entityType: 'ProviderGame',
+      entityId: game.id,
+      after: { provider: req.params.code, externalId: game.externalId },
+      ip: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
+    res.status(201).json({
+      data: {
+        id: game.id,
+        externalId: game.externalId,
+        name: game.name,
+        enabled: game.enabled,
+      },
+    });
+  }),
+);
+
+adminRouter.delete(
+  '/game-providers/:code/games/:externalId',
+  asyncHandler(async (req, res) => {
+    await deleteGame(req.params.code, req.params.externalId);
+    await writeAudit({
+      actorId: req.auth!.userId,
+      actorRole: req.auth!.role,
+      action: 'provider.game_remove',
+      entityType: 'ProviderGame',
+      entityId: `${req.params.code}:${req.params.externalId}`,
+      ip: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
+    res.json({ data: { deleted: true } });
   }),
 );

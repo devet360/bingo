@@ -2,10 +2,12 @@ import { DepositStatus, WithdrawalStatus } from '@prisma/client';
 import { prisma } from '../lib/prisma';
 import { expireWithdrawal } from './withdrawals';
 import { sendTelegramMessage } from './telegramNotify';
+import { expireDueBonuses } from './bonuses';
 
 export interface SweepResult {
   expiredWithdrawals: number;
   expiredDeposits: number;
+  expiredBonuses: number;
   telegramPushes: number;
 }
 
@@ -77,10 +79,12 @@ export async function maintenanceSweep(): Promise<SweepResult> {
   });
 
   const telegramPushes = await flushTelegramNotifications();
+  const expiredBonuses = await expireDueBonuses();
 
   return {
     expiredWithdrawals: dueWithdrawals.length,
     expiredDeposits: expiredDeposits.count,
+    expiredBonuses,
     telegramPushes,
   };
 }

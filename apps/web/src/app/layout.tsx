@@ -3,12 +3,14 @@ import Script from 'next/script';
 import './globals.css';
 import { SessionProvider } from '@/components/session';
 import { Shell } from '@/components/shell';
+import { CampaignsProvider } from '@/components/campaigns';
 import { I18nProvider } from '@/lib/i18n';
+import { THEME_INIT_SCRIPT, ThemeProvider } from '@/lib/theme';
 
 export const metadata: Metadata = {
-  title: 'Bingo Hall',
-  description: 'Live 75-ball and 90-ball bingo with agent cash-in and cash-out.',
-  applicationName: 'Bingo Hall',
+  title: 'Bingo 251',
+  description: 'Live 75-ball and 90-ball bingo for Ethiopia — agent cash-in, cash-out and instant payouts.',
+  applicationName: 'Bingo 251',
   icons: { icon: '/icon.svg' },
 };
 
@@ -23,15 +25,22 @@ export const viewport: Viewport = {
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en">
+    <html lang="en" suppressHydrationWarning>
       <body className="min-h-dvh bg-ink font-sans text-text antialiased">
+        <Script id="bingo-theme" strategy="beforeInteractive">
+          {THEME_INIT_SCRIPT}
+        </Script>
         <Script src="https://telegram.org/js/telegram-web-app.js" strategy="beforeInteractive" />
         <Script src="/config.js" strategy="beforeInteractive" />
-        <SessionProvider>
-          <I18nProvider>
-            <Shell>{children}</Shell>
-          </I18nProvider>
-        </SessionProvider>
+        <ThemeProvider>
+          <SessionProvider>
+            <I18nProvider>
+              <CampaignsProvider>
+                <Shell>{children}</Shell>
+              </CampaignsProvider>
+            </I18nProvider>
+          </SessionProvider>
+        </ThemeProvider>
       </body>
     </html>
   );

@@ -78,12 +78,12 @@ export function Panel({
 type Tone = 'neutral' | 'mint' | 'gold' | 'danger' | 'warn' | 'blue';
 
 const TONES: Record<Tone, string> = {
-  neutral: 'bg-white/5 text-muted border-white/10',
+  neutral: 'bg-raised text-muted border-line',
   mint: 'bg-mint/10 text-mint border-mint/25',
   gold: 'bg-gold/10 text-gold border-gold/25',
   danger: 'bg-danger/10 text-danger border-danger/25',
   warn: 'bg-warn/10 text-warn border-warn/25',
-  blue: 'bg-sky-400/10 text-sky-300 border-sky-400/25',
+  blue: 'bg-blue/10 text-blue border-blue/25',
 };
 
 export function Pill({

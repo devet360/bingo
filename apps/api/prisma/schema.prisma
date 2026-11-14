@@ -133,9 +133,9 @@ enum WithdrawalStatus {
 }
 
 // LedgerAccount.ownerKind determines which account codes are legal for it:
-//   USER     -> AVAILABLE | ESCROW | LOCKED
+//   USER     -> AVAILABLE | ESCROW | LOCKED | BONUS
 //   AGENT    -> FLOAT | FLOAT_ESCROW | COMMISSION
-//   PLATFORM -> RAKE | COMMISSION_EXPENSE | TREASURY | SUSPENSE
+//   PLATFORM -> RAKE | COMMISSION_EXPENSE | TREASURY | SUSPENSE | BONUS_EXPENSE
 enum AccountOwnerKind {
   USER
   AGENT
@@ -146,11 +146,13 @@ enum AccountCode {
   AVAILABLE
   ESCROW
   LOCKED
+  BONUS // promotional credits: withdrawable only once wagering clears
   FLOAT
   FLOAT_ESCROW
   COMMISSION
   RAKE
   COMMISSION_EXPENSE
+  BONUS_EXPENSE // promotional grants; carries a debit (negative) balance
   TREASURY
   SUSPENSE
 }
@@ -169,6 +171,13 @@ enum LedgerKind {
   CARD_PURCHASE
   ROUND_PAYOUT
   ROUND_REFUND
+  BONUS_GRANT
+  BONUS_CONVERT
+  BONUS_FORFEIT
+  AFFILIATE_COMMISSION
+  PROVIDER_BET
+  PROVIDER_WIN
+  PROVIDER_ROLLBACK
   MANUAL_ADJUSTMENT
 }
 
@@ -291,6 +300,11 @@ model User {
   withdrawalsAsPlayer   WithdrawalRequest[] @relation("WithdrawalPlayer")
   withdrawalsProcessed  WithdrawalRequest[] @relation("WithdrawalProcessor")
   floatRequestsReviewed AgentFloatRequest[] @relation("FloatReviewer")
+  bonuses               Bonus[]              @relation("BonusOwner")
+  bonusesGranted        Bonus[]              @relation("BonusGrantor")
+  referralCommissions   ReferralCommission[] @relation("ReferralCommissions")
+  referralPlays         ReferralCommission[] @relation("ReferralPlayer")
+  providerSessions      ProviderSession[]
 
   @@index([role, status])
   @@index([createdAt])
@@ -549,6 +563,7 @@ model Wallet {
   available         BigInt   @default(0)
   escrow            BigInt   @default(0) // withdrawal escrow
   locked            BigInt   @default(0) // staked in an active bingo round
+  bonus             BigInt   @default(0) // promotional credits awaiting wagering
   lifetimeDeposited BigInt   @default(0)
   lifetimeWithdrawn BigInt   @default(0)
   lifetimeWagered   BigInt   @default(0)
@@ -911,4 +926,214 @@ model SystemConfig {
   description String?
   updatedById String?  @db.Uuid
   updatedAt   DateTime @updatedAt
+}
+
+// ═══════════════════════════════ MARKETING ════════════════════════════════════
+
+enum CampaignKind {
+  BANNER // slim strip pinned under the header
+  POPUP // modal shown once per player per dismissHours window
+}
+
+enum CampaignAudience {
+  ALL
+  PLAYERS
+  AGENTS
+}
+
+// Operator-authored announcement / promo surface. Content lives here rather than
+// in SystemConfig so scheduling history and audience targeting stay queryable.
+model Campaign {
+  id            String           @id @default(uuid()) @db.Uuid
+  kind          CampaignKind
+  audience      CampaignAudience @default(ALL)
+  // Locale-independent defaults; locale variants can be added per row.
+  locale        String           @default("en")
+  title         String
+  body          String
+  imageUrl      String?
+  linkUrl       String?
+  linkLabel     String?
+  enabled       Boolean          @default(true)
+  priority      Int              @default(0)
+  // POPUP only: how long a dismissal is honoured before it shows again.
+  dismissHours  Int              @default(24)
+  startsAt      DateTime?
+  endsAt        DateTime?
+  createdById   String?          @db.Uuid
+  createdAt     DateTime         @default(now())
+  updatedAt     DateTime         @updatedAt
+
+  @@index([enabled, kind, startsAt, endsAt])
+}
+
+// ═════════════════════════════ BONUS & WAGERING ═══════════════════════════════
+
+enum BonusKind {
+  PROMO_CODE // player redeems a published code
+  ADMIN_GRANT // staff grants directly to one player
+}
+
+enum BonusStatus {
+  ACTIVE // wagering in progress
+  COMPLETED // target met, bonus converted to withdrawable credits
+  EXPIRED // deadline passed with wagering unmet, remainder forfeited
+  CANCELLED
+}
+
+// Admin-defined promo code. `exchangeRateBps`-style percentage bonuses are
+// expressed in basis points so no Float money math is ever involved.
+model BonusPromotion {
+  id                 String    @id @default(uuid()) @db.Uuid
+  code               String    @unique
+  name               String
+  // Exactly one of percentBps / fixedAmount is set. percentBps applies to the
+  // amount the player has deposited since the code was issued.
+  percentBps         Int?
+  fixedAmount        BigInt?
+  maxBonus           BigInt?
+  minDeposit         BigInt?
+  // Required playthrough = granted bonus * wageringMultiplier.
+  wageringMultiplier Int       @default(3)
+  expiresInDays      Int       @default(7)
+  enabled            Boolean   @default(true)
+  startsAt           DateTime?
+  endsAt             DateTime?
+  maxRedemptions     Int?
+  redemptionCount    Int       @default(0)
+  createdById        String?   @db.Uuid
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  bonuses Bonus[]
+
+  @@index([enabled, startsAt, endsAt])
+}
+
+// One row per granted bonus. Only one ACTIVE bonus per user is enforced in the
+// service layer; multiple historical rows stay for audit.
+model Bonus {
+  id          String      @id @default(uuid()) @db.Uuid
+  userId      String      @db.Uuid
+  promotionId String?     @db.Uuid
+  grantedById String?     @db.Uuid
+  kind        BonusKind   @default(PROMO_CODE)
+  amount      BigInt
+  wagered     BigInt      @default(0)
+  target      BigInt // amount * wageringMultiplier at grant time
+  multiplier  Int
+  status      BonusStatus @default(ACTIVE)
+  expiresAt   DateTime
+  completedAt DateTime?
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+
+  user        User            @relation("BonusOwner", fields: [userId], references: [id], onDelete: Cascade)
+  grantedBy   User?           @relation("BonusGrantor", fields: [grantedById], references: [id], onDelete: SetNull)
+  promotion   BonusPromotion? @relation(fields: [promotionId], references: [id], onDelete: SetNull)
+
+  @@index([userId, status])
+  @@index([status, expiresAt])
+  @@index([promotionId])
+}
+
+// ══════════════════════════ AFFILIATE / REFERRALS ═════════════════════════════
+
+// Commission paid to a referrer out of the platform rake from a referred
+// player's staked round. Unique per (referrer, round) so a retried settlement
+// cannot pay twice.
+model ReferralCommission {
+  id          String   @id @default(uuid()) @db.Uuid
+  referrerId  String   @db.Uuid
+  playerId    String   @db.Uuid
+  roundId     String?  @db.Uuid
+  rakeBase    BigInt // rake the bps were applied to
+  bps         Int
+  amount      BigInt
+  createdAt   DateTime @default(now())
+
+  referrer User @relation("ReferralCommissions", fields: [referrerId], references: [id], onDelete: Cascade)
+  player   User @relation("ReferralPlayer", fields: [playerId], references: [id], onDelete: Cascade)
+
+  @@unique([referrerId, playerId, roundId])
+  @@index([referrerId, createdAt])
+}
+
+// ═══════════════════════════ EXTERNAL GAME PROVIDERS ══════════════════════════
+
+enum ProviderKind {
+  NATIVE // first-party games served by this platform's engine
+  AGGREGATOR // third-party aggregator exposing many games
+}
+
+enum ProviderSessionStatus {
+  OPEN
+  CLOSED
+  EXPIRED
+}
+
+// Registered games provider. Wallet movements for AGGREGATOR games arrive on a
+// signed callback; `webhookSecret` is rotated from the admin console and never
+// returned by the API.
+model GameProvider {
+  id            String       @id @default(uuid()) @db.Uuid
+  code          String       @unique
+  name          String
+  kind          ProviderKind @default(AGGREGATOR)
+  apiBaseUrl    String?
+  webhookSecret String?
+  enabled       Boolean      @default(false)
+  sortOrder     Int          @default(0)
+  config        Json?
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  games    ProviderGame[]
+  sessions ProviderSession[]
+
+  @@index([enabled, sortOrder])
+}
+
+model ProviderGame {
+  id                String   @id @default(uuid()) @db.Uuid
+  providerId        String   @db.Uuid
+  externalId        String
+  name              String
+  category          String?
+  thumbnailUrl      String?
+  launchUrlTemplate String? // {token}, {lang}, {currency} placeholders
+  minStake          BigInt?
+  maxStake          BigInt?
+  enabled           Boolean  @default(true)
+  sortOrder         Int      @default(0)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  provider GameProvider     @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  sessions ProviderSession[]
+
+  @@unique([providerId, externalId])
+  @@index([providerId, enabled, sortOrder])
+}
+
+// A launched third-party game. The external session id is the idempotency key
+// carried by every wallet callback.
+model ProviderSession {
+  id                String                @id @default(uuid()) @db.Uuid
+  userId            String                @db.Uuid
+  providerId        String                @db.Uuid
+  gameId            String?               @db.Uuid
+  externalSessionId String                @unique
+  status            ProviderSessionStatus @default(OPEN)
+  launchUrl         String?
+  expiresAt         DateTime
+  createdAt         DateTime              @default(now())
+  updatedAt         DateTime              @updatedAt
+
+  user     User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  provider GameProvider  @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  game     ProviderGame? @relation(fields: [gameId], references: [id], onDelete: SetNull)
+
+  @@index([userId, status])
+  @@index([providerId, status])
 }

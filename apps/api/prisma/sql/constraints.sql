@@ -62,7 +62,7 @@ DO $$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'Wallet_balances_non_negative') THEN
     ALTER TABLE "Wallet" ADD CONSTRAINT "Wallet_balances_non_negative"
-      CHECK ("available" >= 0 AND "escrow" >= 0 AND "locked" >= 0);
+      CHECK ("available" >= 0 AND "escrow" >= 0 AND "locked" >= 0 AND "bonus" >= 0);
   END IF;
 
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'AgentProfile_balances_non_negative') THEN
@@ -73,7 +73,7 @@ BEGIN
   -- The external settlement bridge and expense accounts may carry debit balances.
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'LedgerAccount_negative_balance_guard') THEN
     ALTER TABLE "LedgerAccount" ADD CONSTRAINT "LedgerAccount_negative_balance_guard"
-      CHECK ("balance" >= 0 OR "code" IN ('SUSPENSE', 'COMMISSION_EXPENSE'));
+      CHECK ("balance" >= 0 OR "code" IN ('SUSPENSE', 'COMMISSION_EXPENSE', 'BONUS_EXPENSE'));
   END IF;
 
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'LedgerEntry_amount_non_zero') THEN
@@ -157,12 +157,13 @@ BEGIN
 END $$;
 
 -- ─────────────── 4. One journal per business event, per ledger kind ───────────
--- Card purchases are many-per-round (one journal per buyer batch); every other
--- kind is exactly-once per referenced entity, so the guard excludes purchases.
+-- Card purchases are many-per-round (one journal per buyer batch); referral
+-- payouts are one journal per referrer per round. Every other kind is
+-- exactly-once per referenced entity, so the guard excludes those two.
 DROP INDEX IF EXISTS "TransactionLedger_ref_kind_unique";
 CREATE UNIQUE INDEX IF NOT EXISTS "TransactionLedger_ref_kind_unique"
   ON "TransactionLedger" ("refType", "refId", "kind")
-  WHERE "refId" IS NOT NULL AND "kind" <> 'CARD_PURCHASE';
+  WHERE "refId" IS NOT NULL AND "kind" NOT IN ('CARD_PURCHASE', 'AFFILIATE_COMMISSION');
 
 -- At most one live round per room: prevents two sockets starting competing rounds.
 CREATE UNIQUE INDEX IF NOT EXISTS "BingoRound_one_active_per_room"

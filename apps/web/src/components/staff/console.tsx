@@ -5,13 +5,24 @@ import { useSession } from '@/components/session';
 import { EmptyState, Panel, Tabs } from '@/components/ui';
 import { useI18n } from '@/lib/i18n';
 import { AuditTab, OverviewTab, StaffTab } from './admin';
+import { BonusesTab } from './bonuses';
+import { GameProvidersTab } from './catalog';
+import { MarketingTab } from './marketing';
 import { ProvidersTab } from './providers';
 import { AgentsTab, DepositsTab, TransactionsTab, WithdrawalsTab } from './queues';
 import { ReceiptsTab } from './receipts';
 import { UsersTab } from './users';
 
 type SupportTab = 'users' | 'transactions' | 'deposits' | 'withdrawals' | 'agents' | 'receipts';
-type AdminTab = 'overview' | SupportTab | 'staff' | 'audit' | 'providers';
+type AdminTab =
+  | 'overview'
+  | SupportTab
+  | 'staff'
+  | 'audit'
+  | 'providers'
+  | 'marketing'
+  | 'bonuses'
+  | 'games';
 
 export function StaffConsole({ mode }: { mode: 'support' | 'admin' }) {
   const { user } = useSession();
@@ -36,7 +47,7 @@ export function StaffConsole({ mode }: { mode: 'support' | 'admin' }) {
       <div className="space-y-4">
         <header>
           <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-mint/80">
-            Bingo Hall · Staff
+            Bingo 251 · Staff
           </p>
           <h1 className="mt-0.5 font-display text-2xl font-black tracking-tight">
             {t('staff.supportTitle')}
@@ -72,7 +83,7 @@ export function StaffConsole({ mode }: { mode: 'support' | 'admin' }) {
       <header className="flex items-start justify-between gap-3">
         <div>
           <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-gold/80">
-            Bingo Hall · Back office
+            Bingo 251 · Back office
           </p>
           <h1 className="mt-0.5 font-display text-2xl font-black tracking-tight">
             {t('staff.adminTitle')}
@@ -98,6 +109,9 @@ export function StaffConsole({ mode }: { mode: 'support' | 'admin' }) {
             { value: 'agents', label: t('staff.tab.agents') },
             { value: 'receipts', label: t('staff.tab.receipts') },
             { value: 'providers', label: t('staff.tab.providers') },
+            { value: 'marketing', label: t('staff.tab.marketing') },
+            { value: 'bonuses', label: t('staff.tab.bonuses') },
+            { value: 'games', label: t('staff.tab.games') },
             { value: 'staff', label: t('staff.tab.staff') },
             { value: 'audit', label: t('staff.tab.audit') },
           ]}
@@ -112,6 +126,9 @@ export function StaffConsole({ mode }: { mode: 'support' | 'admin' }) {
       {adminTab === 'agents' ? <AgentsTab canManage /> : null}
       {adminTab === 'receipts' ? <ReceiptsTab /> : null}
       {adminTab === 'providers' ? <ProvidersTab /> : null}
+      {adminTab === 'marketing' ? <MarketingTab /> : null}
+      {adminTab === 'bonuses' ? <BonusesTab /> : null}
+      {adminTab === 'games' ? <GameProvidersTab /> : null}
       {adminTab === 'staff' ? <StaffTab /> : null}
       {adminTab === 'audit' ? <AuditTab /> : null}
     </div>

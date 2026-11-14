@@ -37,6 +37,8 @@ export interface Wallet {
   available: string;
   escrow: string;
   locked: string;
+  /** Restricted promo grant; becomes playable once wagering completes. */
+  bonus: string;
   lifetimeDeposited: string;
   lifetimeWithdrawn: string;
   lifetimeWagered: string;
@@ -460,3 +462,143 @@ export interface AuditEntry {
   after: unknown;
   createdAt: string;
 }
+
+// ─────────────────────────────── marketing / growth ───────────────────────────────
+
+export type CampaignKind = 'BANNER' | 'POPUP';
+export type CampaignAudience = 'ALL' | 'PLAYERS' | 'AGENTS';
+
+export interface Campaign {
+  id: string;
+  kind: CampaignKind;
+  audience: CampaignAudience;
+  locale: string;
+  title: string;
+  body: string;
+  imageUrl: string | null;
+  linkUrl: string | null;
+  linkLabel: string | null;
+  enabled: boolean;
+  priority: number;
+  dismissHours: number;
+  startsAt: string | null;
+  endsAt: string | null;
+  createdById: string | null;
+  createdAt: string;
+}
+
+export type BonusKind = 'PROMO_CODE' | 'ADMIN_GRANT';
+export type BonusStatus = 'ACTIVE' | 'COMPLETED' | 'EXPIRED' | 'CANCELLED';
+
+export interface Bonus {
+  id: string;
+  kind: BonusKind;
+  amount: string;
+  wagered: string;
+  target: string;
+  multiplier: number;
+  status: BonusStatus;
+  expiresAt: string;
+  completedAt: string | null;
+  createdAt: string;
+  promotionId: string | null;
+}
+
+export interface BonusWithPlayer extends Bonus {
+  playerName: string;
+  playerPhone: string | null;
+}
+
+export interface BonusPromotion {
+  id: string;
+  code: string;
+  name: string;
+  percentBps: number | null;
+  fixedAmount: string | null;
+  maxBonus: string | null;
+  minDeposit: string | null;
+  wageringMultiplier: number;
+  expiresInDays: number;
+  enabled: boolean;
+  startsAt: string | null;
+  endsAt: string | null;
+  maxRedemptions: number | null;
+  redemptionCount: number;
+  createdAt: string;
+}
+
+export interface ReferralCommissionView {
+  id: string;
+  playerId: string;
+  playerName: string | null;
+  roundId: string | null;
+  rakeBase: string;
+  bps: number;
+  amount: string;
+  createdAt: string;
+}
+
+export interface ReferralOverview {
+  code: string;
+  inviteLink: string | null;
+  commissionBps: number;
+  referredCount: number;
+  activeReferrals: number;
+  totalEarned: string;
+  recent: ReferralCommissionView[];
+}
+
+export interface AdminReferralRow {
+  referrerId: string;
+  referrerName: string | null;
+  referrerPhone: string | null;
+  payments: number;
+  rakeBase: string;
+  amount: string;
+}
+
+export type ProviderKind = 'NATIVE' | 'AGGREGATOR';
+
+export interface GameProviderGame {
+  id: string;
+  externalId: string;
+  name: string;
+  category: string | null;
+  thumbnailUrl: string | null;
+  launchUrlTemplate: string | null;
+  minStake: string | null;
+  maxStake: string | null;
+  enabled: boolean;
+  sortOrder: number;
+}
+
+export interface GameProvider {
+  id: string;
+  code: string;
+  name: string;
+  kind: ProviderKind;
+  apiBaseUrl: string | null;
+  hasSecret: boolean;
+  enabled: boolean;
+  sortOrder: number;
+  config: unknown;
+  createdAt: string;
+  games: GameProviderGame[];
+}
+
+export interface ProviderSession {
+  id: string;
+  providerId: string;
+  gameId: string | null;
+  externalSessionId: string;
+  status: string;
+  launchUrl: string | null;
+  expiresAt: string;
+  createdAt: string;
+}
+
+export interface AdminSettings {
+  referral: { commissionBps: number; minRakeToPay: string };
+  bonus: { defaultWageringMultiplier: number; defaultExpiryDays: number };
+}
+

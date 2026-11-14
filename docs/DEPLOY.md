@@ -174,6 +174,12 @@ account is forced through a password change on first web sign-in.
 
 Repeat the migrate/constraints commands on every release that changes the schema.
 
+The growth-suite release adds `20261114150000_marketing_bonus_providers` (campaigns,
+bonus promotions and grants, referral commissions, game providers, provider sessions and
+the bonus wallet bucket). It is applied by the same `prisma migrate deploy` above; no
+manual SQL is needed. Sign in as a super admin afterwards to set the referral commission
+and the default wagering multiplier in **Admin → Bonuses**.
+
 ## 8. Access model
 
 - **Players — Telegram only.** There is no web registration. A player opens the bot,

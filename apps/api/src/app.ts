@@ -17,6 +17,10 @@ import { agentRouter } from './routes/agent';
 import { adminRouter } from './routes/admin';
 import { staffReadRouter } from './routes/staffRead';
 import { bingoRouter } from './routes/bingo';
+import { marketingRouter } from './routes/marketing';
+import { bonusesRouter } from './routes/bonuses';
+import { referralsRouter } from './routes/referrals';
+import { gamesRouter } from './routes/games';
 
 export function createApp() {
   const app = express();
@@ -39,7 +43,15 @@ export function createApp() {
   // Client-side receipt verification posts the bank's own response (PDFs from
   // M-Pesa) as base64, so this subtree needs more room than the rest of the API.
   app.use('/wallet/deposits', express.json({ limit: '8mb' }));
-  app.use(express.json({ limit: '1mb' }));
+  // Keep the exact bytes of every JSON body: provider webhooks sign them.
+  app.use(
+    express.json({
+      limit: '1mb',
+      verify: (req, _res, buf) => {
+        (req as { rawBody?: Buffer }).rawBody = buf;
+      },
+    }),
+  );
   app.use(
     pinoHttp({
       logger,
@@ -71,11 +83,15 @@ export function createApp() {
   // Support-level reads are also reachable by a super admin, then admin-only routes.
   app.use('/admin', staffReadRouter, adminRouter);
   app.use('/bingo', bingoRouter);
+  app.use('/marketing', marketingRouter);
+  app.use('/bonuses', bonusesRouter);
+  app.use('/referrals', referralsRouter);
+  app.use('/games', gamesRouter);
 
   app.get('/openapi.json', (_req, res) => {
     res.json(openApiDocument);
   });
-  app.use('/docs', swaggerUi.serve, swaggerUi.setup(openApiDocument, { customSiteTitle: 'Bingo Hall API' }));
+  app.use('/docs', swaggerUi.serve, swaggerUi.setup(openApiDocument, { customSiteTitle: 'Bingo 251 API' }));
 
   app.use(notFoundHandler);
   app.use(errorHandler);

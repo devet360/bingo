@@ -253,6 +253,53 @@ client opts into the full envelope for these.
 | GET | `/admin/deposit-providers` | — | Every rail, including disabled ones |
 | PATCH | `/admin/deposit-providers/:code` | `{ name?, enabled?, supported?, requiresPhone?, accountDigits?, opaqueReference?, clientSide?, sortOrder?, instructions?, refPattern?, refHint?, minAmount?, maxAmount? }` | Availability and payer prompts only — parsers and host allowlists stay in code |
 | GET | `/admin/reconciliation` | — | Reads `v_account_drift`; `healthy: true` when caches match the journal |
+| GET/POST | `/admin/campaigns` | `{ kind, audience, locale, title, body, imageUrl?, linkUrl?, linkLabel?, enabled?, priority?, dismissHours?, startsAt?, endsAt? }` | Banners and popups |
+| PATCH/DELETE | `/admin/campaigns/:id` | partial campaign | Paused campaigns stay visible here |
+| GET/POST | `/admin/bonus-promotions` | `{ code, name, percentBps \| fixedAmount, maxBonus?, minDeposit?, wageringMultiplier, expiresInDays, enabled?, startsAt?, endsAt?, maxRedemptions? }` | Exactly one of percent/fixed is required |
+| PATCH/DELETE | `/admin/bonus-promotions/:id` | partial promotion | |
+| GET | `/admin/bonuses` | `?userId=&page=` | Granted bonuses with player identity |
+| POST | `/admin/bonuses/grant` | `{ userId, amount, multiplier?, expiresInDays?, note? }` | `Idempotency-Key` required; one active bonus per player |
+| GET | `/admin/referrals` | — | Top 50 referrers by commission paid |
+| GET | `/admin/settings` | — | `{ referral: { commissionBps, minRakeToPay }, bonus: { defaultWageringMultiplier, defaultExpiryDays } }` |
+| PUT | `/admin/settings/referrals` | `{ commissionBps: 0..5000, minRakeToPay? }` | Share of round rake paid to referrers |
+| PUT | `/admin/settings/bonuses` | `{ defaultWageringMultiplier: 1..100, defaultExpiryDays: 1..365 }` | Defaults for admin grants |
+| GET | `/admin/game-providers` | — | Providers with their game catalogs |
+| PUT/DELETE | `/admin/game-providers/:code` | `{ name, kind, apiBaseUrl?, webhookSecret?, enabled?, sortOrder?, config? }` | Secret is write-only; omit it to keep the current one |
+| POST | `/admin/game-providers/:code/games` | `{ externalId, name, category?, thumbnailUrl?, launchUrlTemplate?, minStake?, maxStake?, enabled?, sortOrder? }` | |
+| DELETE | `/admin/game-providers/:code/games/:externalId` | — | |
+
+---
+
+## Marketing
+
+| Method | Path | Auth | Purpose |
+| --- | --- | --- | --- |
+| GET | `/marketing/campaigns?locale=en\|am` | Player | Active banners/popups for the caller's role and language |
+
+## Bonuses
+
+| Method | Path | Auth | Purpose |
+| --- | --- | --- | --- |
+| GET | `/bonuses` | Player | `{ active, history, wallet }`; `wallet.bonus` is the unconverted grant |
+| POST | `/bonuses/redeem` | Verified phone | `{ code }` → `{ bonus, wallet }` |
+
+Bonus credits are not stakeable. Real-money card purchases accrue wagering progress;
+the grant converts to `available` at `amount × multiplier` and is forfeited on expiry.
+
+## Referrals
+
+| Method | Path | Auth | Purpose |
+| --- | --- | --- | --- |
+| GET | `/referrals` | Player | `{ code, inviteLink, commissionBps, referredCount, activeReferrals, totalEarned, recent[] }` |
+
+## External games
+
+| Method | Path | Auth | Purpose |
+| --- | --- | --- | --- |
+| GET | `/games` | Player | Enabled providers, each with playable games |
+| POST | `/games/:gameId/launch` | Verified phone | `{ lang? }` → `{ launchUrl, sessionId, expiresAt }` |
+| POST | `/games/sessions/:sessionId/close` | Player | Close the session |
+| POST | `/games/callback/:providerCode` | HMAC signature | Provider callback `{ sessionId, type: bet\|win\|rollback, txnId, amount, currency?, roundId? }`; header `x-provider-signature`, signed over the raw body |
 
 ---
 

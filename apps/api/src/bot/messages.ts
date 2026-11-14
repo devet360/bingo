@@ -29,7 +29,7 @@ interface BotCopy {
 export const botCopy: Record<BotLocale, BotCopy> = {
   en: {
     welcomeVerify:
-      'Welcome to Bingo Hall! To create your player account, share your phone number using the button below. We only use it to verify you.',
+      'Welcome to Bingo 251! To create your player account, share your phone number using the button below. We only use it to verify you.',
     welcomeBack: 'Welcome back! Your number is verified — tap below to enter the hall.',
     shareContactButton: 'Share my number',
     playButton: 'Play Bingo',
@@ -37,7 +37,7 @@ export const botCopy: Record<BotLocale, BotCopy> = {
       `Your number ${phone} is verified. You can now play. Winnings are credited to your in-game wallet.`,
     contactButtonHint: 'Tap “Share my number” below so we can verify you.',
     help:
-      'Bingo Hall is a real-time bingo game.\n\n/start — open the game\n/verify — re-verify your phone number\n/dashboard — staff and agents: open your console\n/help — this message',
+      'Bingo 251 is a real-time bingo game.\n\n/start — open the game\n/verify — re-verify your phone number\n/dashboard — staff and agents: open your console\n/help — this message',
     notOwnContact: 'Please share your own number using the button, not a contact card.',
     invalidPhone: 'Telegram sent a number we could not read. Please try again.',
     phoneTaken: 'That number is already linked to another account. Contact support in the app.',

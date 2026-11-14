@@ -29,6 +29,8 @@ import {
   type WinPatternName,
 } from '../game/types';
 import { bingoEvents } from '../realtime/events';
+import { accrueWagering } from './bonuses';
+import { settleReferralCommissions } from './referrals';
 
 const ACTIVE_ROUND_STATUSES: RoundStatus[] = [
   'WAITING',
@@ -234,6 +236,10 @@ export async function buyCards(input: PurchaseInput): Promise<BuyCardsResult> {
           where: { userId: input.userId },
           data: { lifetimeWagered: { increment: total } },
         });
+
+        // Stake counts toward an active bonus playthrough; completion converts
+        // the grant to withdrawable credits in this same transaction.
+        await accrueWagering(tx, input.userId, total);
 
         const cards = await tx.bingoCard.findMany({
           where: { id: { in: cardsData.map((card) => card.id) } },
@@ -642,6 +648,17 @@ export async function settleRound(roundId: string): Promise<SettleOutcome> {
           .sort(
             (a, b) => PATTERN_PRIORITY.indexOf(a) - PATTERN_PRIORITY.indexOf(b),
           )[0] ?? null;
+
+      const stakesByUser = new Map<string, bigint>();
+      for (const card of activeCards) {
+        stakesByUser.set(card.userId, (stakesByUser.get(card.userId) ?? 0n) + card.stake);
+      }
+      await settleReferralCommissions(tx, {
+        roundId,
+        roomName: round.room.name,
+        rakeBps: round.rakeBps,
+        stakesByUser,
+      });
 
       await tx.roundWinner.createMany({
         data: winners.map((winner, index) => ({

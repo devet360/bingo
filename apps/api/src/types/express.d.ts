@@ -9,6 +9,8 @@ declare global {
         sessionId: string;
       };
       agent?: AgentProfile;
+      /** Raw request bytes, kept for provider webhook signature checks. */
+      rawBody?: Buffer;
     }
   }
 }

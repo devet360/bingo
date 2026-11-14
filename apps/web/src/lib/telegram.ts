@@ -84,8 +84,9 @@ export function initTelegram(): void {
     app.ready?.();
     app.expand?.();
     app.disableVerticalSwipes?.();
-    app.setHeaderColor?.('#050d0b');
-    app.setBackgroundColor?.('#050d0b');
+    const chrome = document.documentElement.dataset.theme === 'light' ? '#f4f8f4' : '#050d0b';
+    app.setHeaderColor?.(chrome);
+    app.setBackgroundColor?.(chrome);
   } catch {
     // Older Telegram clients may not implement every method.
   }

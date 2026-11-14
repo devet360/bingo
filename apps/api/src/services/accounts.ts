@@ -1,6 +1,11 @@
 import { AccountCode, AccountOwnerKind, type Prisma } from '@prisma/client';
 
-const USER_CODES: AccountCode[] = [AccountCode.AVAILABLE, AccountCode.ESCROW, AccountCode.LOCKED];
+const USER_CODES: AccountCode[] = [
+  AccountCode.AVAILABLE,
+  AccountCode.ESCROW,
+  AccountCode.LOCKED,
+  AccountCode.BONUS,
+];
 const AGENT_CODES: AccountCode[] = [AccountCode.FLOAT, AccountCode.FLOAT_ESCROW, AccountCode.COMMISSION];
 
 /** Idempotent: safe to call on every login for accounts created before provisioning existed. */

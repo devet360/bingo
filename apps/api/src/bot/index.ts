@@ -236,7 +236,7 @@ bot.catch((error) => {
 
 async function main(): Promise<void> {
   const commandsEn = [
-    { command: 'start', description: 'Open Bingo Hall' },
+    { command: 'start', description: 'Open Bingo 251' },
     { command: 'verify', description: 'Verify your phone number' },
     { command: 'dashboard', description: 'Open your staff dashboard' },
     { command: 'help', description: 'How to play' },

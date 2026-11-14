@@ -45,6 +45,7 @@ export function serializeWallet(wallet: Wallet) {
     available: minorToWire(wallet.available),
     escrow: minorToWire(wallet.escrow),
     locked: minorToWire(wallet.locked),
+    bonus: minorToWire(wallet.bonus),
     lifetimeDeposited: minorToWire(wallet.lifetimeDeposited),
     lifetimeWithdrawn: minorToWire(wallet.lifetimeWithdrawn),
     lifetimeWagered: minorToWire(wallet.lifetimeWagered),
