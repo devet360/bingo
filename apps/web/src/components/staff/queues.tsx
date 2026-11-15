@@ -17,7 +17,15 @@ import {
   topUpAgentFloat,
   updateAgentByAdmin,
 } from '@/lib/api';
-import { PAYMENT_METHODS, creditsToMinor, formatCredits, formatDateTime } from '@/lib/format';
+import {
+  PAYMENT_METHODS,
+  PAYMENT_PROVIDERS,
+  creditsToMinor,
+  findPaymentProvider,
+  formatCredits,
+  formatDateTime,
+  providerLabel,
+} from '@/lib/format';
 import { useI18n } from '@/lib/i18n';
 import type {
   Agent,
@@ -765,7 +773,10 @@ export function AgentsTab({ canManage }: { canManage: boolean }) {
                 <p className="mt-2 truncate text-[10px] text-muted">
                   Pays to:{' '}
                   {agent.paymentAccounts
-                    .map((entry) => `${entry.method.replaceAll('_', ' ')} ${entry.accountNumber}`)
+                    .map(
+                      (entry) =>
+                        `${entry.provider ? providerLabel(entry.provider) : PAYMENT_METHODS.find((item) => item.value === entry.method)?.label ?? entry.method} ${entry.accountNumber}`,
+                    )
                     .join(' · ')}
                 </p>
               ) : (
@@ -907,6 +918,28 @@ export function AgentsTab({ canManage }: { canManage: boolean }) {
   );
 }
 
+const PROVIDER_GROUPS: { label: string; method: PaymentMethod }[] = [
+  { label: 'Mobile money', method: 'MOBILE_MONEY' },
+  { label: 'Bank transfer', method: 'BANK_TRANSFER' },
+  { label: 'Cash', method: 'CASH' },
+];
+
+function ProviderOptions() {
+  return (
+    <>
+      {PROVIDER_GROUPS.map((group) => (
+        <optgroup key={group.method} label={group.label}>
+          {PAYMENT_PROVIDERS.filter((provider) => provider.method === group.method).map((provider) => (
+            <option key={provider.code} value={provider.code}>
+              {provider.label}
+            </option>
+          ))}
+        </optgroup>
+      ))}
+    </>
+  );
+}
+
 function CreateAgentSheet({
   open,
   onClose,
@@ -923,7 +956,7 @@ function CreateAgentSheet({
   const [region, setRegion] = useState('Addis Ababa');
   const [city, setCity] = useState('');
   const [district, setDistrict] = useState('');
-  const [method, setMethod] = useState<PaymentMethod>('MOBILE_MONEY');
+  const [providerCode, setProviderCode] = useState('telebirr');
   const [accountName, setAccountName] = useState('');
   const [accountNumber, setAccountNumber] = useState('');
   const [instructions, setInstructions] = useState('');
@@ -961,7 +994,8 @@ function CreateAgentSheet({
           city: city.trim() || undefined,
           district: district.trim() || undefined,
           account: {
-            method,
+            method: findPaymentProvider(providerCode)?.method ?? 'MOBILE_MONEY',
+            provider: providerCode,
             accountName: accountName.trim(),
             accountNumber: accountNumber.trim(),
             instructions: instructions.trim() || undefined,
@@ -975,6 +1009,7 @@ function CreateAgentSheet({
       setPassword('');
       setCity('');
       setDistrict('');
+      setProviderCode('telebirr');
       setAccountName('');
       setAccountNumber('');
       setInstructions('');
@@ -1029,15 +1064,11 @@ function CreateAgentSheet({
           </p>
           <div className="mt-2 space-y-3">
             <Select
-              label="Method"
-              value={method}
-              onChange={(event) => setMethod(event.target.value as PaymentMethod)}
+              label="Provider"
+              value={providerCode}
+              onChange={(event) => setProviderCode(event.target.value)}
             >
-              {PAYMENT_METHODS.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
+              <ProviderOptions />
             </Select>
             <Input
               label="Account holder"
@@ -1077,7 +1108,7 @@ function AgentAccountSheet({
   onClose: () => void;
   onSaved: () => void;
 }) {
-  const [method, setMethod] = useState<PaymentMethod>('MOBILE_MONEY');
+  const [providerCode, setProviderCode] = useState('telebirr');
   const [accountName, setAccountName] = useState('');
   const [accountNumber, setAccountNumber] = useState('');
   const [instructions, setInstructions] = useState('');
@@ -1094,7 +1125,8 @@ function AgentAccountSheet({
     setBusy(true);
     try {
       await createAgentPaymentAccount(agent.id, {
-        method,
+        method: findPaymentProvider(providerCode)?.method ?? 'MOBILE_MONEY',
+        provider: providerCode,
         accountName: accountName.trim(),
         accountNumber: accountNumber.trim(),
         instructions: instructions.trim() || undefined,
@@ -1118,15 +1150,11 @@ function AgentAccountSheet({
             {agent.displayName ?? agent.agentCode} · {agent.agentCode}
           </p>
           <Select
-            label="Method"
-            value={method}
-            onChange={(event) => setMethod(event.target.value as PaymentMethod)}
+            label="Provider"
+            value={providerCode}
+            onChange={(event) => setProviderCode(event.target.value)}
           >
-            {PAYMENT_METHODS.map((option) => (
-              <option key={option.value} value={option.value}>
-                {option.label}
-              </option>
-            ))}
+            <ProviderOptions />
           </Select>
           <Input
             label="Account holder"

@@ -1,3 +1,5 @@
+import type { PaymentMethod } from './types';
+
 export function formatCredits(
   value: string | number | bigint | null | undefined,
   options: { cents?: boolean } = {},
@@ -96,6 +98,65 @@ export const PAYMENT_METHODS = [
   { value: 'CARD', label: 'Card' },
   { value: 'CRYPTO', label: 'Crypto' },
 ] as const;
+
+export interface PaymentProvider {
+  /** Stored on `AgentPaymentAccount.provider` and matched against `DepositProvider.code`. */
+  code: string;
+  label: string;
+  method: PaymentMethod;
+}
+
+/** Named rails an agent can accept money on. Mirrors the seeded `DepositProvider` catalogue. */
+export const PAYMENT_PROVIDERS: PaymentProvider[] = [
+  { code: 'telebirr', label: 'Telebirr', method: 'MOBILE_MONEY' },
+  { code: 'mpesa', label: 'M-Pesa', method: 'MOBILE_MONEY' },
+  { code: 'cbebirr', label: 'CBE Birr', method: 'MOBILE_MONEY' },
+  { code: 'siinqee', label: 'Siinqee Bank', method: 'MOBILE_MONEY' },
+  { code: 'nib', label: 'Nib International Bank', method: 'MOBILE_MONEY' },
+  { code: 'wegagen', label: 'Wegagen Bank', method: 'MOBILE_MONEY' },
+  { code: 'ahadu', label: 'Ahadu Bank', method: 'MOBILE_MONEY' },
+  { code: 'kaafimf', label: 'KAAFI Microfinance', method: 'MOBILE_MONEY' },
+  { code: 'cbe', label: 'CBE', method: 'BANK_TRANSFER' },
+  { code: 'boa', label: 'Bank of Abyssinia', method: 'BANK_TRANSFER' },
+  { code: 'dashen', label: 'Dashen Bank', method: 'BANK_TRANSFER' },
+  { code: 'awash', label: 'Awash Bank', method: 'BANK_TRANSFER' },
+  { code: 'bunna', label: 'Bunna International Bank', method: 'BANK_TRANSFER' },
+  { code: 'zamzam', label: 'ZamZam Bank', method: 'BANK_TRANSFER' },
+  { code: 'zemen', label: 'Zemen Bank', method: 'BANK_TRANSFER' },
+  { code: 'abay', label: 'Abay Bank', method: 'BANK_TRANSFER' },
+  { code: 'addis', label: 'Addis International Bank', method: 'BANK_TRANSFER' },
+  { code: 'amhara', label: 'Amhara Bank', method: 'BANK_TRANSFER' },
+  { code: 'berhan', label: 'Berhan International Bank', method: 'BANK_TRANSFER' },
+  { code: 'enat', label: 'Enat Bank', method: 'BANK_TRANSFER' },
+  { code: 'global', label: 'Global Bank Ethiopia', method: 'BANK_TRANSFER' },
+  { code: 'lion', label: 'Lion International Bank', method: 'BANK_TRANSFER' },
+  { code: 'oromia', label: 'Oromia International Bank', method: 'BANK_TRANSFER' },
+  { code: 'hibret', label: 'Hibret Bank', method: 'BANK_TRANSFER' },
+  { code: 'hijra', label: 'Hijra Bank', method: 'BANK_TRANSFER' },
+  { code: 'shabelle', label: 'Shabelle Bank', method: 'BANK_TRANSFER' },
+  { code: 'goh', label: 'Goh Betoch Bank', method: 'BANK_TRANSFER' },
+  { code: 'tsedey', label: 'Tsedey Bank', method: 'BANK_TRANSFER' },
+  { code: 'gadaa', label: 'Gadaa Bank', method: 'BANK_TRANSFER' },
+  { code: 'rammis', label: 'Rammis Bank', method: 'BANK_TRANSFER' },
+  { code: 'cash', label: 'Cash agent', method: 'CASH' },
+];
+
+const PROVIDER_CODES = new Set(PAYMENT_PROVIDERS.map((provider) => provider.code));
+
+export function findPaymentProvider(code: string | null | undefined): PaymentProvider | null {
+  if (!code) return null;
+  return PAYMENT_PROVIDERS.find((provider) => provider.code === code) ?? null;
+}
+
+/** Human label for a stored provider code; free-text values pass through unchanged. */
+export function providerLabel(code: string | null | undefined): string {
+  if (!code) return '';
+  return findPaymentProvider(code)?.label ?? code;
+}
+
+export function isPaymentProviderCode(value: string | null | undefined): boolean {
+  return Boolean(value && PROVIDER_CODES.has(value));
+}
 
 export const PATTERN_LABELS: Record<string, string> = {
   HORIZONTAL: 'Line',

@@ -156,10 +156,12 @@ export async function createDeposit(input: CreateDepositInput) {
     const assignment = await assignAgentForPayment({
       method: input.method,
       amount: input.amount,
+      providerCode: receipt.provider?.code,
     });
     if (!assignment) {
+      const rail = receipt.provider?.name ?? input.method.toLowerCase().replaceAll('_', ' ');
       throw Errors.conflict(
-        `No agent is accepting ${input.method.toLowerCase().replaceAll('_', ' ')} payments right now. Try another method.`,
+        `No agent is accepting ${rail} payments right now. Try another method.`,
         'AGENT_UNAVAILABLE',
       );
     }
@@ -220,11 +222,13 @@ export async function createDeposit(input: CreateDepositInput) {
         const next = await assignAgentForPayment({
           method: input.method,
           amount: input.amount,
+          providerCode: receipt.provider?.code,
           excludeAgentIds: [...excludedAgentIds],
         });
         if (!next) {
+          const rail = receipt.provider?.name ?? input.method.toLowerCase().replaceAll('_', ' ');
           throw Errors.conflict(
-            `No agent is accepting ${input.method.toLowerCase().replaceAll('_', ' ')} payments right now. Try another method.`,
+            `No agent is accepting ${rail} payments right now. Try another method.`,
             'AGENT_UNAVAILABLE',
           );
         }

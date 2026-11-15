@@ -153,13 +153,24 @@ export interface AgentAssignment {
  * Picks the agent a player should pay. Only signed-in, accepting, free agents
  * qualify: the task lock means an agent works one request at a time. Online
  * and automation-capable agents come first, then reputation and float; the
- * payment account must also accept the requested amount.
+ * payment account must also accept the requested amount. When the player
+ * chose a provider rail, accounts on that rail are preferred and accounts
+ * tagged with a different rail are skipped, so a Telebirr payer never gets an
+ * M-Pesa number.
  */
 export async function assignAgentForPayment(params: {
   method: PaymentMethod;
   amount: bigint;
+  providerCode?: string;
   excludeAgentIds?: string[];
 }): Promise<AgentAssignment | null> {
+  const accountFilter = {
+    isActive: true,
+    method: params.method,
+    ...(params.providerCode
+      ? { OR: [{ provider: params.providerCode }, { provider: null }] }
+      : {}),
+  };
   const agents = await prisma.agentProfile.findMany({
     where: {
       status: AgentStatus.ACTIVE,
@@ -168,12 +179,12 @@ export async function assignAgentForPayment(params: {
         ? { id: { notIn: params.excludeAgentIds } }
         : {}),
       tasks: { none: { status: { in: ['OFFERED', 'CLAIMED'] } } },
-      paymentAccounts: { some: { isActive: true, method: params.method } },
+      paymentAccounts: { some: accountFilter },
     },
     include: {
       user: { select: { displayName: true, avatarUrl: true } },
       paymentAccounts: {
-        where: { isActive: true, method: params.method },
+        where: accountFilter,
         orderBy: { createdAt: 'asc' },
       },
     },
@@ -188,11 +199,16 @@ export async function assignAgentForPayment(params: {
   });
 
   for (const agent of agents) {
-    const account = agent.paymentAccounts.find(
+    const eligible = agent.paymentAccounts.filter(
       (item) =>
         (item.minAmount === null || item.minAmount <= params.amount) &&
         (item.maxAmount === null || item.maxAmount >= params.amount),
     );
+    const account =
+      (params.providerCode
+        ? eligible.find((item) => item.provider === params.providerCode) ??
+          eligible.find((item) => !item.provider)
+        : undefined) ?? eligible[0];
     if (account) return { agent, account };
   }
   return null;

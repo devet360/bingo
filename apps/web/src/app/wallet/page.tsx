@@ -25,6 +25,7 @@ import {
   formatDateTime,
   formatStake,
   minorToCreditsInput,
+  providerLabel,
   timeAgo,
 } from '@/lib/format';
 import { useI18n } from '@/lib/i18n';
@@ -757,7 +758,9 @@ function DepositPanel({
                   <div className="mt-2 rounded-lg bg-ink/60 p-3">
                     <p className="text-xs text-text">
                       {account.accountName}
-                      {account.provider ? <span className="text-muted"> · {account.provider}</span> : null}
+                      {account.provider ? (
+                        <span className="text-muted"> · {providerLabel(account.provider)}</span>
+                      ) : null}
                     </p>
                     <div className="mt-1 flex items-center justify-between gap-2">
                       <span className="font-mono text-base tracking-wide text-gold">
