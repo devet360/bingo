@@ -16,7 +16,7 @@ import { closeAgentTask, createAgentTask, isTaskLockViolation } from './agentTas
 import { getProvider } from './providers';
 import { getDepositLimits } from './config';
 import { formatEtb } from '../lib/money';
-import { normalizeInput } from './receipts/reference';
+import { normalizeOptionalReceipt } from './receipts/reference';
 import { ReferenceError as ReceiptReferenceError } from './receipts/types';
 
 const DEPOSIT_TTL_MS = 30 * 60_000;
@@ -97,24 +97,17 @@ async function resolveProvider(input: CreateDepositInput): Promise<{
   }
 
   // Manual-only rails have no receipt to parse; the agent confirms those.
-  if (!provider.supported) {
-    return {
-      provider,
-      receiptReference: input.receiptReference?.trim() || undefined,
-      receiptAccount: input.receiptAccount?.trim() || undefined,
-      receiptPhone: input.receiptPhone?.trim() || undefined,
-    };
-  }
-
+  // A supported rail without a reference is the normal two-step flow: the
+  // player pays first and submits the receipt with "I have paid".
   try {
-    const normalized = normalizeInput(provider, {
+    const normalized = normalizeOptionalReceipt(provider, {
       reference: input.receiptReference,
       accountNumber: input.receiptAccount,
       phoneNumber: input.receiptPhone,
     });
     return {
       provider,
-      receiptReference: normalized.reference,
+      receiptReference: normalized.reference || undefined,
       receiptAccount: normalized.accountNumber,
       receiptPhone: normalized.phoneNumber,
     };

@@ -613,9 +613,12 @@ function DepositPanel({
       ? { proofBase64: proof.base64, proofContentType: proof.contentType }
       : {};
     try {
+      // Client-side rails first ask for the bank page on this phone; there is
+      // nothing to fetch without a reference, so a screenshot goes straight in
+      // and the agent confirms it.
       let result = await verifyDepositReceipt(
         created.code,
-        createdProvider?.clientSide ? body : { ...body, ...proofBody },
+        createdProvider?.clientSide && reference.trim() ? body : { ...body, ...proofBody },
       );
       if (result.needsClientFetch && result.data.clientReceiptUrl) {
         try {

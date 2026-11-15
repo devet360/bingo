@@ -171,6 +171,30 @@ export interface NormalizedInput {
 }
 
 /**
+ * Normalise the receipt fields a deposit is created with. The player usually
+ * pays first and submits the reference afterwards, so a blank reference is not
+ * an error here — it is demanded later, when the receipt is actually verified.
+ */
+export function normalizeOptionalReceipt(
+  provider: ReceiptProvider,
+  input: { reference?: string; accountNumber?: string; phoneNumber?: string },
+): NormalizedInput {
+  const reference = (input.reference ?? '').trim();
+  if (!provider.supported || !reference) {
+    return {
+      reference,
+      accountNumber: input.accountNumber?.trim() || undefined,
+      phoneNumber: input.phoneNumber?.trim() || undefined,
+    };
+  }
+  return normalizeInput(provider, {
+    reference,
+    accountNumber: input.accountNumber,
+    phoneNumber: input.phoneNumber,
+  });
+}
+
+/**
  * Validate a provider's reference (and the extra inputs it needs) before any
  * request is made. Rejects traversal/attribute tricks, not just bad shapes.
  */

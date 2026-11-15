@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { PaymentMethod } from '@prisma/client';
-import { normalizeInput, referenceFromUrl } from '../src/services/receipts/reference';
+import { normalizeInput, normalizeOptionalReceipt, referenceFromUrl } from '../src/services/receipts/reference';
 import { verificationGate, gateFailureMessage } from '../src/services/receipts/gate';
 import { classifyStatus } from '../src/services/receipts/status';
 import { parseMoney, birrAmountIn, htmlToLines } from '../src/services/receipts/text';
@@ -78,6 +78,26 @@ test('account suffix and phone inputs are normalised', () => {
     normalizeInput(cbebirr, { reference: 'ABC1234567', phoneNumber: '0912345678' }).phoneNumber,
     '251912345678',
   );
+});
+
+test('a deposit may be created before the player has paid', () => {
+  // Step 1 only picks the rail and amount; the reference arrives with "I have paid".
+  assert.deepEqual(normalizeOptionalReceipt(provider('cbe'), {}), {
+    reference: '',
+    accountNumber: undefined,
+    phoneNumber: undefined,
+  });
+  assert.equal(
+    normalizeOptionalReceipt(provider('cbe'), { reference: 'ft25 abcdef gh' }).reference,
+    'FT25ABCDEFGH',
+  );
+  assert.throws(() => normalizeOptionalReceipt(provider('cbe'), { reference: '../../etc/passwd' }), ReferenceError);
+  // Manual-only rails never parse a reference.
+  assert.deepEqual(normalizeOptionalReceipt(provider('boa', { supported: false }), { reference: ' x ' }), {
+    reference: 'x',
+    accountNumber: undefined,
+    phoneNumber: undefined,
+  });
 });
 
 test('url reference extraction covers link pastes', () => {
