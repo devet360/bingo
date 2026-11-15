@@ -14,10 +14,19 @@ import { postLedger } from './ledger';
 import { assignAgentForPayment, getActiveAgentByUserId } from './agents';
 import { closeAgentTask, createAgentTask, isTaskLockViolation } from './agentTasks';
 import { getProvider } from './providers';
+import { getDepositLimits } from './config';
+import { formatEtb } from '../lib/money';
 import { normalizeInput } from './receipts/reference';
 import { ReferenceError as ReceiptReferenceError } from './receipts/types';
 
 const DEPOSIT_TTL_MS = 30 * 60_000;
+
+function noAgentForRail(rail: string) {
+  return Errors.conflict(
+    `No active agent is available for ${rail} right now. Choose another payment method.`,
+    'NO_AGENT_FOR_METHOD',
+  );
+}
 
 export interface CreateDepositInput {
   playerId: string;
@@ -42,6 +51,22 @@ async function resolveProvider(input: CreateDepositInput): Promise<{
   receiptAccount?: string;
   receiptPhone?: string;
 }> {
+  // Platform-wide floor and ceiling are operator settings, applied before any
+  // rail-specific limit so an admin can cap deposits without editing each rail.
+  const limits = await getDepositLimits();
+  if (input.amount < limits.minAmount) {
+    throw Errors.badRequest(
+      `The minimum deposit is ${formatEtb(limits.minAmount)} ETB`,
+      'DEPOSIT_BELOW_MINIMUM',
+    );
+  }
+  if (limits.maxAmount !== null && input.amount > limits.maxAmount) {
+    throw Errors.badRequest(
+      `The maximum deposit is ${formatEtb(limits.maxAmount)} ETB`,
+      'DEPOSIT_ABOVE_MAXIMUM',
+    );
+  }
+
   if (!input.providerCode) {
     return {
       provider: null,
@@ -160,10 +185,7 @@ export async function createDeposit(input: CreateDepositInput) {
     });
     if (!assignment) {
       const rail = receipt.provider?.name ?? input.method.toLowerCase().replaceAll('_', ' ');
-      throw Errors.conflict(
-        `No agent is accepting ${rail} payments right now. Try another method.`,
-        'AGENT_UNAVAILABLE',
-      );
+      throw noAgentForRail(rail);
     }
     agentProfileId = assignment.agent.id;
     paymentAccountId = assignment.account.id;
@@ -227,10 +249,7 @@ export async function createDeposit(input: CreateDepositInput) {
         });
         if (!next) {
           const rail = receipt.provider?.name ?? input.method.toLowerCase().replaceAll('_', ' ');
-          throw Errors.conflict(
-            `No agent is accepting ${rail} payments right now. Try another method.`,
-            'AGENT_UNAVAILABLE',
-          );
+          throw noAgentForRail(rail);
         }
         agentProfileId = next.agent.id;
         paymentAccountId = next.account.id;

@@ -5,6 +5,7 @@ import { useSession } from '@/components/session';
 import { EmptyState, Panel, Tabs } from '@/components/ui';
 import { useI18n } from '@/lib/i18n';
 import { AuditTab, OverviewTab, StaffTab } from './admin';
+import { BingoRoomsTab } from './bingo';
 import { BonusesTab } from './bonuses';
 import { GameProvidersTab } from './catalog';
 import { MarketingTab } from './marketing';
@@ -28,6 +29,7 @@ type AdminTab =
   | 'staff'
   | 'audit'
   | 'providers'
+  | 'bingo'
   | 'marketing'
   | 'bonuses'
   | 'games';
@@ -119,6 +121,7 @@ export function StaffConsole({ mode }: { mode: 'support' | 'admin' }) {
             { value: 'agents', label: t('staff.tab.agents') },
             { value: 'receipts', label: t('staff.tab.receipts') },
             { value: 'providers', label: t('staff.tab.providers') },
+            { value: 'bingo', label: t('staff.tab.bingo') },
             { value: 'marketing', label: t('staff.tab.marketing') },
             { value: 'bonuses', label: t('staff.tab.bonuses') },
             { value: 'games', label: t('staff.tab.games') },
@@ -137,6 +140,7 @@ export function StaffConsole({ mode }: { mode: 'support' | 'admin' }) {
       {adminTab === 'agents' ? <AgentsTab canManage /> : null}
       {adminTab === 'receipts' ? <ReceiptsTab /> : null}
       {adminTab === 'providers' ? <ProvidersTab /> : null}
+      {adminTab === 'bingo' ? <BingoRoomsTab /> : null}
       {adminTab === 'marketing' ? <MarketingTab /> : null}
       {adminTab === 'bonuses' ? <BonusesTab /> : null}
       {adminTab === 'games' ? <GameProvidersTab /> : null}

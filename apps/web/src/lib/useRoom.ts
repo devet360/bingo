@@ -20,6 +20,7 @@ interface LiveState {
   connected: boolean;
   error: string | null;
   settlement: SettlementEvent | null;
+  runnerUpSettlement: SettlementEvent | null;
   cancelledReason: string | null;
 }
 
@@ -44,6 +45,7 @@ export function useRoomLive(
     connected: false,
     error: null,
     settlement: null,
+    runnerUpSettlement: null,
     cancelledReason: null,
   });
   const socketRef = useRef<Socket | null>(null);
@@ -85,6 +87,7 @@ export function useRoomLive(
         round: view.round,
         cards,
         settlement: null,
+        runnerUpSettlement: null,
         cancelledReason: null,
         error: null,
       }));
@@ -131,6 +134,7 @@ export function useRoomLive(
             round,
             cards: [],
             settlement: null,
+            runnerUpSettlement: null,
             cancelledReason: null,
           };
         }
@@ -188,7 +192,9 @@ export function useRoomLive(
     socket.on('round:settled', (payload: SettlementEvent) => {
       setState((current) =>
         current.round?.id === payload.roundId
-          ? { ...current, settlement: payload, round: { ...current.round, status: 'COMPLETED' } }
+          ? payload.phase === 'RUNNER_UP'
+            ? { ...current, runnerUpSettlement: payload }
+            : { ...current, settlement: payload }
           : current,
       );
       void loadCards(payload.roundId).then((cards) => {
@@ -240,7 +246,11 @@ export function useRoomLive(
   // Lobby-level polling: socket state covers play, polling covers idle gaps
   // between rounds and a dropped socket.
   useEffect(() => {
-    const active = state.round && ['WAITING', 'LOCKED', 'PLAYING', 'CLAIM_VERIFICATION'].includes(state.round.status);
+    const active =
+      state.round &&
+      ['WAITING', 'LOCKED', 'PLAYING', 'CLAIM_VERIFICATION', 'RUNNER_UP'].includes(
+        state.round.status,
+      );
     if (active && state.connected) return;
     const timer = setInterval(() => {
       void refreshRoom().catch(() => undefined);

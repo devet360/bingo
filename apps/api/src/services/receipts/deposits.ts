@@ -237,8 +237,12 @@ export async function verifyDepositReceipt(params: {
     };
   };
 
-  // Manual rails and screenshots only: the agent confirms the money arrived.
-  if (!provider.supported || (provider.clientSide && !params.payload && params.proof)) {
+  // Manual rails, screenshots without a reference, and client-side rails whose
+  // bank page was not fetched: the agent confirms the money arrived.
+  if (
+    !provider.supported ||
+    (params.proof && (!receiptReference || (provider.clientSide && !params.payload)))
+  ) {
     return markManual('Payment submitted. The assigned agent will confirm it.');
   }
 

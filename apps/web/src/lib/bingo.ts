@@ -13,12 +13,15 @@ export const ROUND_STATUS_LABEL: Record<RoundStatus, string> = {
   LOCKED: 'Starting',
   PLAYING: 'Live',
   CLAIM_VERIFICATION: 'Claim window',
+  RUNNER_UP: 'Runner-up',
   COMPLETED: 'Finished',
   CANCELLED: 'Cancelled',
 };
 
 export const CARD_STATUS_LABEL: Record<Card['status'], string> = {
+  PENDING: 'Not registered',
   ACTIVE: 'In play',
+  BLOCKED: 'Blocked',
   WON: 'Winner',
   LOST: 'No win',
   REFUNDED: 'Refunded',
@@ -110,6 +113,10 @@ export function phaseDeadline(
         : null;
     case 'CLAIM_VERIFICATION':
       return round.claimsCloseAt ? { label: 'Claims close', at: round.claimsCloseAt } : null;
+    case 'RUNNER_UP':
+      return round.runnerUpClosesAt
+        ? { label: 'Runner-up closes', at: round.runnerUpClosesAt }
+        : null;
     case 'PLAYING':
       return null;
     default:

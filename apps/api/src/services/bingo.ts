@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import {
   NotificationType,
   type BingoCard,
@@ -10,12 +10,13 @@ import {
 } from '@prisma/client';
 import { prisma } from '../lib/prisma';
 import { Errors } from '../lib/errors';
+import { formatEtb } from '../lib/money';
 import { isUniqueViolation, runTransaction, withTxRetry } from '../lib/tx';
 import { advisoryXactLock } from '../lib/dbLock';
 import { postLedger } from './ledger';
 import { generateCard } from '../game/cards';
 import { completedPatterns, PATTERN_PRIORITY, validateClaim } from '../game/patterns';
-import { computeEconomics, splitPrize } from '../game/payout';
+import { computeEconomics, computeFixedEconomics, splitPrize } from '../game/payout';
 import {
   aggregateClientSeed,
   computeSeedHash,
@@ -37,7 +38,36 @@ const ACTIVE_ROUND_STATUSES: RoundStatus[] = [
   'LOCKED',
   'PLAYING',
   'CLAIM_VERIFICATION',
+  'RUNNER_UP',
 ];
+
+interface BonusTier {
+  minCards: number;
+  bonusCards: number;
+}
+
+/** Room-config free-card tiers; malformed entries are ignored. */
+export function parseBonusTiers(value: Prisma.JsonValue): BonusTier[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((tier) => {
+      const record = tier as { minCards?: unknown; bonusCards?: unknown };
+      const minCards = Number(record?.minCards);
+      const bonusCards = Number(record?.bonusCards);
+      return Number.isFinite(minCards) && Number.isFinite(bonusCards) && minCards > 0 && bonusCards > 0
+        ? { minCards, bonusCards }
+        : null;
+    })
+    .filter((tier): tier is BonusTier => tier !== null)
+    .sort((a, b) => a.minCards - b.minCards);
+}
+
+function bonusAllowance(tiers: BonusTier[], registeredCards: number): number {
+  return tiers.reduce(
+    (best, tier) => (registeredCards >= tier.minCards ? Math.max(best, tier.bonusCards) : best),
+    0,
+  );
+}
 
 const UNDERFILLED_EXTENSION_MS = 10_000;
 const MAX_UNDERFILLED_WAIT_MS = 5 * 60_000;
@@ -108,9 +138,15 @@ export async function ensureRound(roomId: string): Promise<BingoRound> {
             roomId,
             roundNumber: (last?.roundNumber ?? 0) + 1,
             variant: room.variant,
+            mode: room.mode,
             stakePerCard: room.stakePerCard,
             rakeBps: room.rakeBps,
             allowedPatterns: room.allowedPatterns,
+            fixedPrize: room.fixedPrize,
+            runnerUpEnabled: room.runnerUpEnabled,
+            runnerUpPrize: room.runnerUpPrize,
+            // MAIN rooms advertise the guaranteed prize from the first second.
+            prizePool: room.mode === 'MAIN' ? (room.fixedPrize ?? 0n) : 0n,
             serverSeed,
             serverSeedHash: computeSeedHash(serverSeed),
             purchaseClosesAt: new Date(Date.now() + room.purchaseWindowSecs * 1_000),
@@ -134,11 +170,23 @@ export interface BuyCardsResult {
 }
 
 export async function buyCards(input: PurchaseInput): Promise<BuyCardsResult> {
-  if (!Number.isInteger(input.quantity) || input.quantity < 1 || input.quantity > 4) {
-    throw Errors.badRequest('Buy between 1 and 4 cards', 'INVALID_CARD_COUNT');
-  }
-
   const room = await resolveRoom(input);
+  if (room.mode === 'MAIN') {
+    throw Errors.conflict(
+      'Add cards to your board and register them before the game starts',
+      'MAIN_ROOM_REQUIRES_REGISTRATION',
+    );
+  }
+  if (
+    !Number.isInteger(input.quantity) ||
+    input.quantity < 1 ||
+    input.quantity > room.maxCardsPerPlayer
+  ) {
+    throw Errors.badRequest(
+      `Buy between 1 and ${room.maxCardsPerPlayer} cards`,
+      'INVALID_CARD_COUNT',
+    );
+  }
   if (room.status !== 'OPEN') {
     throw Errors.conflict('This room is not accepting players', 'ROOM_CLOSED');
   }
@@ -283,6 +331,233 @@ function assertCardAllowance(owned: number, requested: number, max: number): voi
   }
 }
 
+// ─────────────────────── main-mode card board ───────────────────────
+
+export interface PreviewCardInput {
+  userId: string;
+  roomId?: string;
+  roomCode?: string;
+  quantity: number;
+}
+
+/**
+ * Adds unregistered cards to the player's board. They are visible immediately
+ * but never charged or drawn until `registerCards` is called before the start.
+ */
+export async function addPreviewCards(input: PreviewCardInput): Promise<BingoCard[]> {
+  const room = await resolveRoom(input);
+  if (room.mode !== 'MAIN') {
+    throw Errors.conflict('This room sells cards directly', 'NOT_MAIN_ROOM');
+  }
+  if (room.status !== 'OPEN') {
+    throw Errors.conflict('This room is not accepting players', 'ROOM_CLOSED');
+  }
+  if (!Number.isInteger(input.quantity) || input.quantity < 1) {
+    throw Errors.badRequest('Add at least one card', 'INVALID_CARD_COUNT');
+  }
+
+  const round = await ensureRound(room.id);
+  return withTxRetry(() =>
+    runTransaction(async (tx) => {
+      await advisoryXactLock(tx, `round:${round.id}`);
+      const fresh = await tx.bingoRound.findUnique({ where: { id: round.id } });
+      if (!fresh) throw Errors.notFound('Round');
+      if (fresh.status !== 'WAITING') {
+        throw Errors.conflict('Registration is closed for this round', 'ROUND_SALES_CLOSED');
+      }
+      if (fresh.purchaseClosesAt && fresh.purchaseClosesAt.getTime() <= Date.now()) {
+        throw Errors.conflict('Registration is closed for this round', 'ROUND_SALES_CLOSED');
+      }
+
+      const owned = await tx.bingoCard.count({ where: { roundId: fresh.id, userId: input.userId } });
+      assertCardAllowance(owned, input.quantity, room.maxCardsPerPlayer);
+
+      const last = await tx.bingoCard.findFirst({
+        where: { roundId: fresh.id, userId: input.userId },
+        orderBy: { cardIndex: 'desc' },
+        select: { cardIndex: true },
+      });
+      const startIndex = (last?.cardIndex ?? -1) + 1;
+      const cardsData = Array.from({ length: input.quantity }, (_, offset) => ({
+        id: randomUUID(),
+        roundId: fresh.id,
+        userId: input.userId,
+        cardIndex: startIndex + offset,
+        stake: fresh.stakePerCard,
+        variant: fresh.variant,
+        cells: generateCard(room.variant) as unknown as Prisma.InputJsonValue,
+        autoDaub: false,
+        status: 'PENDING' as const,
+      }));
+      await tx.bingoCard.createMany({ data: cardsData });
+      return tx.bingoCard.findMany({
+        where: { id: { in: cardsData.map((card) => card.id) } },
+        orderBy: { cardIndex: 'asc' },
+      });
+    }),
+  );
+}
+
+export interface RegisterCardsInput {
+  userId: string;
+  roundId: string;
+  cardIds: string[];
+  clientSeed?: string;
+  autoPress?: boolean;
+}
+
+/**
+ * Pays for the selected pending cards. Bonus tiers free some of them. All
+ * cards must be registered before sales close; unregistered ones are dropped.
+ */
+export async function registerCards(input: RegisterCardsInput): Promise<{
+  round: BingoRound;
+  cards: BingoCard[];
+  replayed: boolean;
+}> {
+  if (!Array.isArray(input.cardIds) || input.cardIds.length === 0) {
+    throw Errors.badRequest('Select at least one card', 'INVALID_CARD_COUNT');
+  }
+  const cardIds = [...new Set(input.cardIds)];
+  const clientSeed = input.clientSeed?.trim() ? input.clientSeed.trim().slice(0, 128) : null;
+
+  const result = await withTxRetry(() =>
+    runTransaction(async (tx) => {
+      await advisoryXactLock(tx, `round:${input.roundId}`);
+      const round = await tx.bingoRound.findUnique({
+        where: { id: input.roundId },
+        include: { room: true },
+      });
+      if (!round) throw Errors.notFound('Round');
+      if (round.mode !== 'MAIN') {
+        throw Errors.conflict('This room sells cards directly', 'NOT_MAIN_ROOM');
+      }
+      if (round.status !== 'WAITING') {
+        throw Errors.conflict('Registration is closed for this round', 'ROUND_SALES_CLOSED');
+      }
+      if (round.purchaseClosesAt && round.purchaseClosesAt.getTime() <= Date.now()) {
+        throw Errors.conflict('Registration is closed for this round', 'ROUND_SALES_CLOSED');
+      }
+
+      const cards = await tx.bingoCard.findMany({
+        where: { roundId: round.id, userId: input.userId, id: { in: cardIds } },
+        orderBy: { cardIndex: 'asc' },
+      });
+      if (cards.length !== cardIds.length) throw Errors.notFound('Card');
+
+      const alreadyActive = cards.filter((card) => card.status !== 'PENDING');
+      if (alreadyActive.length === cards.length) {
+        return { round, cards, replayed: true };
+      }
+      if (alreadyActive.length > 0) {
+        throw Errors.conflict('Some cards are no longer available', 'CARD_STATE_CHANGED');
+      }
+
+      const registeredBefore = await tx.bingoCard.count({
+        where: {
+          roundId: round.id,
+          userId: input.userId,
+          status: { in: ['ACTIVE', 'WON', 'LOST'] },
+        },
+      });
+      const totalAfter = registeredBefore + cards.length;
+      assertCardAllowance(registeredBefore, cards.length, round.room.maxCardsPerPlayer);
+
+      const tiers = parseBonusTiers(round.room.bonusTiers);
+      const usedBonus = await tx.bingoCard.count({
+        where: {
+          roundId: round.id,
+          userId: input.userId,
+          isBonus: true,
+          status: { in: ['ACTIVE', 'WON', 'LOST'] },
+        },
+      });
+      const allowance = bonusAllowance(tiers, totalAfter);
+      const freeCount = Math.max(0, Math.min(cards.length, allowance - usedBonus));
+
+      const autoPress = round.room.allowAutoBingoPress && input.autoPress === true;
+      let paidTotal = 0n;
+      for (const [index, card] of cards.entries()) {
+        const isBonus = index < freeCount;
+        if (!isBonus) paidTotal += round.stakePerCard;
+        await tx.bingoCard.update({
+          where: { id: card.id },
+          data: {
+            status: 'ACTIVE',
+            isBonus,
+            stake: isBonus ? 0n : round.stakePerCard,
+            autoPress,
+            clientSeed,
+          },
+        });
+      }
+
+      if (paidTotal > 0n) {
+        await postLedger(tx, {
+          idempotencyKey: `card-register:${round.id}:${input.userId}:${createHash('sha256')
+            .update(cards.map((card) => card.id).sort().join(','))
+            .digest('hex')}`,
+          kind: 'CARD_PURCHASE',
+          refType: 'BingoRound',
+          refId: round.id,
+          memo: `${cards.length} card(s) registered in ${round.room.code} round ${round.roundNumber}`,
+          instructions: [
+            { ownerKind: 'USER', ownerId: input.userId, code: 'AVAILABLE', delta: -paidTotal },
+            { ownerKind: 'USER', ownerId: input.userId, code: 'LOCKED', delta: paidTotal },
+          ],
+        });
+        await tx.wallet.update({
+          where: { userId: input.userId },
+          data: { lifetimeWagered: { increment: paidTotal } },
+        });
+        await accrueWagering(tx, input.userId, paidTotal);
+      }
+
+      const grossPot = round.grossPot + paidTotal;
+      const prizePool = round.fixedPrize ?? computeEconomics(grossPot, round.rakeBps).prizePool;
+      const updated = await tx.bingoRound.update({
+        where: { id: round.id },
+        data: {
+          cardsSold: { increment: cards.length },
+          bonusCards: { increment: freeCount },
+          uniquePlayers: registeredBefore === 0 ? { increment: 1 } : undefined,
+          grossPot,
+          prizePool,
+          rakeAmount: grossPot - prizePool,
+        },
+      });
+      const registered = await tx.bingoCard.findMany({
+        where: { id: { in: cards.map((card) => card.id) } },
+        orderBy: { cardIndex: 'asc' },
+      });
+      return { round: updated, cards: registered, replayed: false };
+    }),
+  );
+
+  if (!result.replayed) {
+    bingoEvents.publish({ type: 'state', roomId: result.round.roomId, roundId: result.round.id, status: result.round.status });
+    void emitWallet(input.userId);
+  }
+  return result;
+}
+
+/** Drops unregistered cards from the board; registered cards are untouched. */
+export async function removePreviewCards(input: {
+  userId: string;
+  roundId: string;
+  cardIds: string[];
+}): Promise<number> {
+  const removed = await prisma.bingoCard.deleteMany({
+    where: {
+      roundId: input.roundId,
+      userId: input.userId,
+      status: 'PENDING',
+      id: { in: input.cardIds },
+    },
+  });
+  return removed.count;
+}
+
 export type LockRoundOutcome =
   | { action: 'locked'; round: BingoRound }
   | { action: 'extended'; round: BingoRound }
@@ -319,6 +594,10 @@ export async function lockRound(roundId: string): Promise<LockRoundOutcome> {
         });
         return { action: 'extended' as const, round: extended };
       }
+
+      // Cards added for viewing but never registered are dropped at the start;
+      // they were never charged.
+      await tx.bingoCard.deleteMany({ where: { roundId: round.id, status: 'PENDING' } });
 
       const seedRows = await tx.bingoCard.findMany({
         where: { roundId: round.id, clientSeed: { not: null } },
@@ -412,9 +691,15 @@ export async function drawBall(roundId: string): Promise<DrawOutcome> {
         },
       });
 
-      const cards = await tx.bingoCard.findMany({
+      const allCards = await tx.bingoCard.findMany({
         where: { roundId, status: 'ACTIVE' },
       });
+      // MAIN mode is player-pressed: only cards opted into auto press may end
+      // the draw. FAST mode keeps the server-detected auto-daub behaviour.
+      const cards =
+        round.mode === 'MAIN'
+          ? allCards.filter((card) => card.autoPress && round.room.allowAutoBingoPress)
+          : allCards;
       const allowed = drawn.allowedPatterns as WinPatternName[];
       const winners = cards.flatMap((card) => {
         const patterns = completedPatterns(parseCardCells(card.cells), drawn.drawnBalls, allowed);
@@ -427,13 +712,15 @@ export async function drawBall(roundId: string): Promise<DrawOutcome> {
         return { action: 'drawn' as const, round: drawn, ball, index, winners };
       }
 
-      const closeAt = new Date(now.getTime() + round.room.claimWindowSecs * 1_000);
+      const windowSecs =
+        round.mode === 'MAIN' ? round.room.pressWindowSecs : round.room.claimWindowSecs;
+      const closeAt = new Date(now.getTime() + windowSecs * 1_000);
       const claiming = await tx.bingoRound.update({
         where: { id: round.id },
         data: { status: 'CLAIM_VERIFICATION', claimsOpenAt: now, claimsCloseAt: closeAt },
       });
 
-      if (round.room.autoDaubEnabled) {
+      if (round.room.autoDaubEnabled || round.mode === 'MAIN') {
         const existing = await tx.bingoClaim.findMany({
           where: { roundId, cardId: { in: winners.map((winner) => winner.cardId) } },
           select: { cardId: true },
@@ -489,64 +776,171 @@ export async function drawBall(roundId: string): Promise<DrawOutcome> {
   return outcome;
 }
 
+/**
+ * Player BINGO press. In MAIN rooms the first valid press pauses the draw and
+ * opens the main claim window; a false press blocks the card. In RUNNER_UP it
+ * records a runner-up claim. FAST rooms keep the claim-window behaviour.
+ */
 export async function submitClaim(input: {
   userId: string;
   roundId: string;
   cardId: string;
-  pattern: WinPattern;
+  pattern?: WinPattern;
 }) {
-  return withTxRetry(() =>
+  const result = await withTxRetry(() =>
     runTransaction(async (tx) => {
       await advisoryXactLock(tx, `round:${input.roundId}`);
-      const round = await tx.bingoRound.findUnique({ where: { id: input.roundId } });
+      const round = await tx.bingoRound.findUnique({
+        where: { id: input.roundId },
+        include: { room: true },
+      });
       if (!round) throw Errors.notFound('Round');
-      if (round.status !== 'CLAIM_VERIFICATION') {
-        throw Errors.conflict('This round is not accepting claims', 'CLAIMS_CLOSED');
-      }
-      if (!round.claimsCloseAt || round.claimsCloseAt.getTime() <= Date.now()) {
-        throw Errors.conflict('The claim window has closed', 'CLAIMS_CLOSED');
+
+      const phase: 'MAIN' | 'RUNNER_UP' =
+        round.status === 'RUNNER_UP' ? 'RUNNER_UP' : 'MAIN';
+      const isMain = round.mode === 'MAIN';
+
+      if (isMain) {
+        if (round.status === 'RUNNER_UP') {
+          if (!round.runnerUpClosesAt || round.runnerUpClosesAt.getTime() <= Date.now()) {
+            throw Errors.conflict('The runner-up window has closed', 'CLAIMS_CLOSED');
+          }
+        } else if (round.status === 'PLAYING') {
+          // First presses are accepted while the draw runs; they close the draw.
+        } else if (round.status === 'CLAIM_VERIFICATION') {
+          if (!round.claimsCloseAt || round.claimsCloseAt.getTime() <= Date.now()) {
+            throw Errors.conflict('The claim window has closed', 'CLAIMS_CLOSED');
+          }
+        } else {
+          throw Errors.conflict('This round is not accepting BINGO presses', 'CLAIMS_CLOSED');
+        }
+      } else {
+        if (round.status !== 'CLAIM_VERIFICATION') {
+          throw Errors.conflict('This round is not accepting claims', 'CLAIMS_CLOSED');
+        }
+        if (!round.claimsCloseAt || round.claimsCloseAt.getTime() <= Date.now()) {
+          throw Errors.conflict('The claim window has closed', 'CLAIMS_CLOSED');
+        }
       }
 
       const card = await tx.bingoCard.findFirst({
         where: { id: input.cardId, roundId: round.id, userId: input.userId },
       });
       if (!card) throw Errors.notFound('Card');
+      if (isMain) {
+        if (card.status === 'PENDING') {
+          throw Errors.conflict('This card is not registered', 'CARD_NOT_REGISTERED');
+        }
+        if (card.status === 'BLOCKED') {
+          throw Errors.conflict('This card is blocked after a false BINGO', 'CARD_BLOCKED');
+        }
+        if (card.status === 'WON') {
+          throw Errors.conflict('This card has already won this game', 'CARD_WON');
+        }
+      }
       if (card.status !== 'ACTIVE') {
         throw Errors.conflict('This card has already been settled', 'CARD_SETTLED');
       }
 
+      if (phase === 'RUNNER_UP') {
+        const pressedInMain = await tx.bingoClaim.findFirst({
+          where: { cardId: card.id, phase: 'MAIN', status: { in: ['PENDING', 'VALID'] } },
+          select: { id: true },
+        });
+        if (pressedInMain) {
+          throw Errors.conflict(
+            'This card pressed BINGO in the main game and cannot join the runner-up',
+            'MAIN_PRESSED',
+          );
+        }
+      }
+
       const existing = await tx.bingoClaim.findFirst({
-        where: { cardId: card.id, status: { in: ['PENDING', 'VALID'] } },
+        where: { cardId: card.id, phase, status: { in: ['PENDING', 'VALID'] } },
         orderBy: { claimedAt: 'desc' },
       });
-      if (existing) return { claim: existing, replayed: true };
+      if (existing) return { claim: existing, replayed: true, round, phase };
 
-      const verdict = validateClaim(
-        parseCardCells(card.cells),
-        round.drawnBalls,
-        input.pattern as WinPatternName,
-        round.allowedPatterns as WinPatternName[],
-      );
+      const allowed = round.allowedPatterns as WinPatternName[];
+      const grid = parseCardCells(card.cells);
+      let pattern: WinPatternName | undefined;
+      let verdict: { valid: boolean; reason?: string };
+
+      if (phase === 'RUNNER_UP') {
+        const hasNumber =
+          round.runnerUpNumber !== null &&
+          cardNumbers(grid).includes(round.runnerUpNumber);
+        pattern = allowed.includes(input.pattern as WinPatternName)
+          ? (input.pattern as WinPatternName)
+          : allowed[0];
+        verdict = hasNumber
+          ? { valid: true }
+          : { valid: false, reason: 'RUNNER_NUMBER_MISSING' };
+      } else {
+        const patterns = completedPatterns(grid, round.drawnBalls, allowed);
+        pattern =
+          input.pattern && patterns.includes(input.pattern as WinPatternName)
+            ? input.pattern
+            : patterns[0];
+        verdict = pattern
+          ? validateClaim(grid, round.drawnBalls, pattern, allowed)
+          : { valid: false, reason: 'PATTERN_INCOMPLETE' };
+      }
+
       const claim = await tx.bingoClaim.create({
         data: {
           roundId: round.id,
           cardId: card.id,
           userId: input.userId,
-          pattern: input.pattern,
+          // Runner-up claims are number races, so the pattern is only a label.
+          pattern: (pattern ?? 'HORIZONTAL') as WinPattern,
+          phase,
           status: verdict.valid ? 'VALID' : 'INVALID',
           drawnSnapshot: round.drawnBalls,
           rejectionReason: verdict.reason ?? null,
           validatedAt: new Date(),
         },
       });
-      return { claim, replayed: false };
+
+      if (!verdict.valid && isMain) {
+        await tx.bingoCard.update({ where: { id: card.id }, data: { status: 'BLOCKED' } });
+      }
+
+      if (verdict.valid && isMain && round.status === 'PLAYING') {
+        const closeAt = new Date(Date.now() + round.room.pressWindowSecs * 1_000);
+        const claiming = await tx.bingoRound.update({
+          where: { id: round.id },
+          data: { status: 'CLAIM_VERIFICATION', claimsOpenAt: new Date(), claimsCloseAt: closeAt },
+        });
+        return { claim, replayed: false, round: claiming, phase };
+      }
+
+      return { claim, replayed: false, round, phase };
     }),
   );
+
+  if (!result.replayed && result.claim.status === 'VALID' && result.round.status === 'CLAIM_VERIFICATION') {
+    bingoEvents.publish({
+      type: 'claiming',
+      roomId: result.round.roomId,
+      roundId: result.round.id,
+      claimsCloseAt: result.round.claimsCloseAt!,
+      detectedWinners: 1,
+    });
+    bingoEvents.publish({
+      type: 'state',
+      roomId: result.round.roomId,
+      roundId: result.round.id,
+      status: result.round.status,
+    });
+  }
+  return { claim: result.claim, replayed: result.replayed };
 }
 
 export interface SettlementSummary {
   roundId: string;
   status: RoundStatus;
+  phase: 'MAIN' | 'RUNNER_UP';
   winnerCount: number;
   winners: Array<{ userId: string; cardId: string; pattern: WinPatternName; payout: bigint }>;
   rakeAmount: bigint;
@@ -587,7 +981,7 @@ export async function settleRound(roundId: string): Promise<SettleOutcome> {
       const winnersByCard = new Map<string, { card: BingoCard; pattern: WinPatternName }>();
 
       const validClaims = await tx.bingoClaim.findMany({
-        where: { roundId, status: 'VALID' },
+        where: { roundId, phase: 'MAIN', status: 'VALID' },
         orderBy: { claimedAt: 'asc' },
       });
       for (const claim of validClaims) {
@@ -597,8 +991,9 @@ export async function settleRound(roundId: string): Promise<SettleOutcome> {
         }
       }
 
-      // Claims are optional UX: the server remains the source of truth.
-      if (winnersByCard.size === 0) {
+      // FAST rooms fall back to server detection; MAIN rooms only ever pay a
+      // player who actually pressed BINGO.
+      if (winnersByCard.size === 0 && round.mode !== 'MAIN') {
         for (const card of activeCards) {
           const patterns = completedPatterns(parseCardCells(card.cells), round.drawnBalls, allowed);
           if (patterns.length > 0) winnersByCard.set(card.id, { card, pattern: patterns[0]! });
@@ -611,8 +1006,13 @@ export async function settleRound(roundId: string): Promise<SettleOutcome> {
 
       const winners = [...winnersByCard.values()];
       const grossPot = activeCards.reduce((sum, card) => sum + card.stake, 0n);
-      const economics = computeEconomics(grossPot, round.rakeBps);
-      const payouts = splitPrize(economics.prizePool, winners.length);
+      const economics =
+        round.mode === 'MAIN'
+          ? computeFixedEconomics(grossPot, round.fixedPrize ?? 0n)
+          : computeEconomics(grossPot, round.rakeBps);
+      const prizePool = economics.prizePool;
+      const payouts = splitPrize(prizePool, winners.length);
+      const platformNet = economics.rakeAmount;
 
       await postLedger(tx, {
         idempotencyKey: `round-payout:${roundId}`,
@@ -621,12 +1021,14 @@ export async function settleRound(roundId: string): Promise<SettleOutcome> {
         refId: roundId,
         memo: `Payout for ${round.room.code} round ${round.roundNumber}`,
         instructions: [
-          ...activeCards.map((card) => ({
-            ownerKind: 'USER' as const,
-            ownerId: card.userId,
-            code: 'LOCKED' as const,
-            delta: -card.stake,
-          })),
+          ...activeCards
+            .filter((card) => card.stake > 0n)
+            .map((card) => ({
+              ownerKind: 'USER' as const,
+              ownerId: card.userId,
+              code: 'LOCKED' as const,
+              delta: -card.stake,
+            })),
           ...winners.map((winner, index) => ({
             ownerKind: 'USER' as const,
             ownerId: winner.card.userId,
@@ -636,8 +1038,8 @@ export async function settleRound(roundId: string): Promise<SettleOutcome> {
           {
             ownerKind: 'PLATFORM' as const,
             ownerId: 'platform',
-            code: 'RAKE' as const,
-            delta: economics.rakeAmount,
+            code: platformNet >= 0n ? ('RAKE' as const) : ('TREASURY' as const),
+            delta: platformNet,
           },
         ],
       });
@@ -666,6 +1068,7 @@ export async function settleRound(roundId: string): Promise<SettleOutcome> {
           cardId: winner.card.id,
           userId: winner.card.userId,
           pattern: winner.pattern as WinPattern,
+          phase: 'MAIN' as const,
           payout: payouts[index]!,
           isSplitPot: winners.length > 1,
         })),
@@ -690,9 +1093,17 @@ export async function settleRound(roundId: string): Promise<SettleOutcome> {
         });
       }
 
+      const opensRunnerUp =
+        round.mode === 'MAIN' &&
+        round.runnerUpEnabled &&
+        (round.runnerUpPrize ?? 0n) > 0n &&
+        round.drawnBalls.length > 0;
+      const runnerUpNumber = opensRunnerUp ? round.drawnBalls.at(-1)! : null;
+
       const winnerIds = new Set(winners.map((winner) => winner.card.id));
       const losers = activeCards.filter((card) => !winnerIds.has(card.id));
-      if (losers.length > 0) {
+      // Runner-up keeps non-winning cards alive for the second chance window.
+      if (!opensRunnerUp && losers.length > 0) {
         await tx.bingoCard.updateMany({
           where: { id: { in: losers.map((card) => card.id) } },
           data: { status: 'LOST' },
@@ -701,15 +1112,26 @@ export async function settleRound(roundId: string): Promise<SettleOutcome> {
 
       const completed = await tx.bingoRound.update({
         where: { id: roundId },
-        data: {
-          status: 'COMPLETED',
-          winningPattern,
-          grossPot: economics.grossPot,
-          rakeAmount: economics.rakeAmount,
-          prizePool: economics.prizePool,
-          completedAt: new Date(),
-          seedRevealedAt: new Date(),
-        },
+        data: opensRunnerUp
+          ? {
+              status: 'RUNNER_UP',
+              winningPattern,
+              grossPot,
+              rakeAmount: grossPot - prizePool,
+              prizePool,
+              runnerUpNumber,
+              runnerUpOpensAt: new Date(),
+              runnerUpClosesAt: new Date(Date.now() + round.room.runnerUpWindowSecs * 1_000),
+            }
+          : {
+              status: 'COMPLETED',
+              winningPattern,
+              grossPot,
+              rakeAmount: grossPot - prizePool,
+              prizePool,
+              completedAt: new Date(),
+              seedRevealedAt: new Date(),
+            },
       });
 
       const winnerIdsByUser = new Map<string, bigint>();
@@ -728,8 +1150,10 @@ export async function settleRound(roundId: string): Promise<SettleOutcome> {
             type: NotificationType.ROUND_RESULT,
             title: payout ? 'Bingo! You won' : 'Round finished',
             body: payout
-              ? `You won ${payout} credits in ${round.room.name}.`
-              : `Round ${round.roundNumber} in ${round.room.name} has finished.`,
+              ? `You won ${formatEtb(payout)} ETB in ${round.room.name}.`
+              : opensRunnerUp
+                ? `Runner-up is open in ${round.room.name}: number ${runnerUpNumber}.`
+                : `Round ${round.roundNumber} in ${round.room.name} has finished.`,
             data: {
               roundId,
               roomId: round.roomId,
@@ -744,6 +1168,7 @@ export async function settleRound(roundId: string): Promise<SettleOutcome> {
         summary: {
           roundId,
           status: completed.status,
+          phase: 'MAIN' as const,
           winnerCount: winners.length,
           winners: winners.map((winner, index) => ({
             userId: winner.card.userId,
@@ -751,8 +1176,196 @@ export async function settleRound(roundId: string): Promise<SettleOutcome> {
             pattern: winner.pattern,
             payout: payouts[index]!,
           })),
-          rakeAmount: economics.rakeAmount,
-          prizePool: economics.prizePool,
+          rakeAmount: grossPot - prizePool,
+          prizePool,
+        },
+      };
+    }),
+  );
+
+  if (outcome.action === 'settled') {
+    const { summary } = outcome;
+    const finished = await prisma.bingoRound.findUnique({
+      where: { id: roundId },
+      select: { roomId: true, serverSeed: true, status: true },
+    });
+    bingoEvents.publish({
+      type: 'settled',
+      roomId: finished!.roomId,
+      roundId,
+      phase: summary.phase,
+      winners: summary.winners.map((winner) => ({
+        userId: winner.userId,
+        cardId: winner.cardId,
+        pattern: winner.pattern,
+        payout: winner.payout.toString(),
+      })),
+      rake: summary.rakeAmount.toString(),
+      prizePool: summary.prizePool.toString(),
+      serverSeed: finished!.status === 'COMPLETED' ? finished!.serverSeed : '',
+    });
+    if (finished!.status === 'RUNNER_UP') {
+      bingoEvents.publish({
+        type: 'state',
+        roomId: finished!.roomId,
+        roundId,
+        status: 'RUNNER_UP',
+      });
+    }
+    for (const userId of new Set(summary.winners.map((winner) => winner.userId))) {
+      void emitWallet(userId);
+    }
+  }
+  if (outcome.action === 'cancelled') {
+    await emitCancelled(roundId, outcome.reason);
+  }
+  return outcome;
+}
+
+/**
+ * Closes the runner-up window after the main game. Every card that pressed for
+ * the runner-up number in time shares the runner-up prize; the platform funds
+ * it from treasury, independently of the main pot.
+ */
+export async function settleRunnerUp(roundId: string): Promise<SettleOutcome> {
+  const outcome = await withTxRetry(() =>
+    runTransaction(async (tx) => {
+      await advisoryXactLock(tx, `round:${roundId}`);
+      const round = await tx.bingoRound.findUnique({
+        where: { id: roundId },
+        include: { cards: true, room: true },
+      });
+      if (!round) throw Errors.notFound('Round');
+      if (round.status !== 'RUNNER_UP') {
+        return { action: 'skipped' as const, roundId };
+      }
+      if (!round.runnerUpClosesAt || round.runnerUpClosesAt.getTime() > Date.now()) {
+        return { action: 'skipped' as const, roundId };
+      }
+
+      const claims = await tx.bingoClaim.findMany({
+        where: { roundId, phase: 'RUNNER_UP', status: 'VALID' },
+        orderBy: { claimedAt: 'asc' },
+      });
+      const cardsById = new Map(round.cards.map((card) => [card.id, card]));
+      const winnersByCard = new Map<
+        string,
+        { card: BingoCard; pattern: WinPatternName }
+      >();
+      for (const claim of claims) {
+        const card = cardsById.get(claim.cardId);
+        if (card?.status === 'ACTIVE' && !winnersByCard.has(card.id)) {
+          winnersByCard.set(card.id, { card, pattern: claim.pattern as WinPatternName });
+        }
+      }
+
+      const winners = [...winnersByCard.values()];
+      const prize = round.runnerUpPrize ?? 0n;
+      const payouts = winners.length > 0 ? splitPrize(prize, winners.length) : [];
+
+      if (winners.length > 0 && prize > 0n) {
+        await postLedger(tx, {
+          idempotencyKey: `runner-up-payout:${roundId}`,
+          kind: 'ROUND_PAYOUT',
+          refType: 'BingoRound',
+          refId: roundId,
+          memo: `Runner-up payout for ${round.room.code} round ${round.roundNumber}`,
+          instructions: [
+            ...winners.map((winner, index) => ({
+              ownerKind: 'USER' as const,
+              ownerId: winner.card.userId,
+              code: 'AVAILABLE' as const,
+              delta: payouts[index]!,
+            })),
+            {
+              ownerKind: 'PLATFORM' as const,
+              ownerId: 'platform',
+              code: 'TREASURY' as const,
+              delta: -prize,
+            },
+          ],
+        });
+
+        await tx.roundWinner.createMany({
+          data: winners.map((winner, index) => ({
+            roundId,
+            cardId: winner.card.id,
+            userId: winner.card.userId,
+            pattern: winner.pattern as WinPattern,
+            phase: 'RUNNER_UP' as const,
+            payout: payouts[index]!,
+            isSplitPot: winners.length > 1,
+          })),
+        });
+
+        for (const [index, winner] of winners.entries()) {
+          const card = winner.card;
+          await tx.bingoCard.update({
+            where: { id: card.id },
+            data: {
+              status: 'WON',
+              wonPattern: winner.pattern as WinPattern,
+              markedNumbers: cardNumbers(parseCardCells(card.cells)).filter((number) =>
+                round.drawnBalls.includes(number),
+              ),
+            },
+          });
+          await tx.wallet.update({
+            where: { userId: card.userId },
+            data: { lifetimeWon: { increment: payouts[index]! } },
+          });
+          await tx.notification.create({
+            data: {
+              userId: card.userId,
+              type: NotificationType.ROUND_RESULT,
+              title: 'Runner-up win',
+              body: `You won ${formatEtb(payouts[index]!)} ETB in the ${round.room.name} runner-up.`,
+              data: {
+                roundId,
+                roomId: round.roomId,
+                phase: 'RUNNER_UP',
+                payout: payouts[index]!.toString(),
+              },
+            },
+          });
+        }
+      }
+
+      const winnerIds = new Set(winners.map((winner) => winner.card.id));
+      const rest = round.cards.filter(
+        (card) => card.status === 'ACTIVE' && !winnerIds.has(card.id),
+      );
+      if (rest.length > 0) {
+        await tx.bingoCard.updateMany({
+          where: { id: { in: rest.map((card) => card.id) } },
+          data: { status: 'LOST' },
+        });
+      }
+
+      const completed = await tx.bingoRound.update({
+        where: { id: roundId },
+        data: {
+          status: 'COMPLETED',
+          completedAt: new Date(),
+          seedRevealedAt: new Date(),
+        },
+      });
+
+      return {
+        action: 'settled' as const,
+        summary: {
+          roundId,
+          status: completed.status,
+          phase: 'RUNNER_UP' as const,
+          winnerCount: winners.length,
+          winners: winners.map((winner, index) => ({
+            userId: winner.card.userId,
+            cardId: winner.card.id,
+            pattern: winner.pattern,
+            payout: payouts[index]!,
+          })),
+          rakeAmount: 0n,
+          prizePool: prize,
         },
       };
     }),
@@ -768,22 +1381,26 @@ export async function settleRound(roundId: string): Promise<SettleOutcome> {
       type: 'settled',
       roomId: finished!.roomId,
       roundId,
+      phase: summary.phase,
       winners: summary.winners.map((winner) => ({
         userId: winner.userId,
         cardId: winner.cardId,
         pattern: winner.pattern,
         payout: winner.payout.toString(),
       })),
-      rake: summary.rakeAmount.toString(),
+      rake: '0',
       prizePool: summary.prizePool.toString(),
       serverSeed: finished!.serverSeed,
+    });
+    bingoEvents.publish({
+      type: 'state',
+      roomId: finished!.roomId,
+      roundId,
+      status: summary.status,
     });
     for (const userId of new Set(summary.winners.map((winner) => winner.userId))) {
       void emitWallet(userId);
     }
-  }
-  if (outcome.action === 'cancelled') {
-    await emitCancelled(roundId, outcome.reason);
   }
   return outcome;
 }
@@ -817,6 +1434,7 @@ export async function completeEmptyRound(roundId: string): Promise<boolean> {
     type: 'settled',
     roomId: round.roomId,
     roundId: round.id,
+    phase: 'MAIN',
     winners: [],
     rake: round.rakeAmount.toString(),
     prizePool: round.prizePool.toString(),
@@ -865,6 +1483,9 @@ export async function cancelRound(roundId: string, reason: string): Promise<void
           })),
         });
       }
+
+      // Preview cards were never charged, so a cancelled round just drops them.
+      await tx.bingoCard.deleteMany({ where: { roundId, status: 'PENDING' } });
 
       await tx.bingoRound.update({
         where: { id: roundId },

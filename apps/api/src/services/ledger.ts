@@ -45,11 +45,13 @@ const ALLOWED_CODES: Record<AccountOwnerKind, AccountCode[]> = {
   ],
 };
 
-// Bridge and expense accounts carry legitimate debit (negative) balances.
+// Bridge, expense and guaranteed-prize accounts carry legitimate debit
+// (negative) balances; treasury covers fixed prizes the pot does not fund.
 const MAY_GO_NEGATIVE: ReadonlySet<AccountCode> = new Set([
   AccountCode.SUSPENSE,
   AccountCode.COMMISSION_EXPENSE,
   AccountCode.BONUS_EXPENSE,
+  AccountCode.TREASURY,
 ]);
 
 type Bucket =

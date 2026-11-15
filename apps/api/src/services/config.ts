@@ -43,6 +43,36 @@ export async function getReferralSettings(): Promise<ReferralSettings> {
   };
 }
 
+export const DEPOSIT_LIMITS_CONFIG_KEY = 'wallet.deposit.limits';
+
+export interface DepositLimits {
+  /** Platform-wide floor for every deposit, in minor units. */
+  minAmount: bigint;
+  /** Platform-wide ceiling, or null when there is none. */
+  maxAmount: bigint | null;
+}
+
+export const DEFAULT_DEPOSIT_MIN = 1_000n;
+
+function parseMinor(value: unknown): bigint | null {
+  if (typeof value !== 'string' || !/^\d+$/.test(value)) return null;
+  const parsed = BigInt(value);
+  return parsed > 0n ? parsed : null;
+}
+
+export async function getDepositLimits(): Promise<DepositLimits> {
+  const stored = await getConfig<Partial<{ minAmount: string; maxAmount: string | null }>>(
+    DEPOSIT_LIMITS_CONFIG_KEY,
+    {},
+  );
+  const min = parseMinor(stored.minAmount) ?? DEFAULT_DEPOSIT_MIN;
+  const max = parseMinor(stored.maxAmount);
+  return {
+    minAmount: min,
+    maxAmount: max !== null && max >= min ? max : null,
+  };
+}
+
 export const BONUS_CONFIG_KEY = 'bonus.program';
 
 export interface BonusSettings {

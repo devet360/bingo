@@ -1,0 +1,29 @@
+ALTER TABLE "BingoRoom"
+  ADD COLUMN "mode" "RoomMode" NOT NULL DEFAULT 'FAST',
+  ADD COLUMN "fixedPrize" BIGINT,
+  ADD COLUMN "runnerUpEnabled" BOOLEAN NOT NULL DEFAULT false,
+  ADD COLUMN "runnerUpPrize" BIGINT,
+  ADD COLUMN "runnerUpWindowSecs" INTEGER NOT NULL DEFAULT 60,
+  ADD COLUMN "pressWindowSecs" INTEGER NOT NULL DEFAULT 60,
+  ADD COLUMN "allowAutoBingoPress" BOOLEAN NOT NULL DEFAULT false,
+  ADD COLUMN "bonusTiers" JSONB NOT NULL DEFAULT '[]';
+
+ALTER TABLE "BingoRound"
+  ADD COLUMN "mode" "RoomMode" NOT NULL DEFAULT 'FAST',
+  ADD COLUMN "fixedPrize" BIGINT,
+  ADD COLUMN "runnerUpEnabled" BOOLEAN NOT NULL DEFAULT false,
+  ADD COLUMN "runnerUpPrize" BIGINT,
+  ADD COLUMN "runnerUpNumber" INTEGER,
+  ADD COLUMN "runnerUpOpensAt" TIMESTAMP(3),
+  ADD COLUMN "runnerUpClosesAt" TIMESTAMP(3),
+  ADD COLUMN "bonusCards" INTEGER NOT NULL DEFAULT 0;
+
+ALTER TABLE "BingoCard"
+  ADD COLUMN "isBonus" BOOLEAN NOT NULL DEFAULT false,
+  ADD COLUMN "autoPress" BOOLEAN NOT NULL DEFAULT false;
+
+ALTER TABLE "BingoClaim"
+  ADD COLUMN "phase" "ClaimPhase" NOT NULL DEFAULT 'MAIN';
+
+ALTER TABLE "RoundWinner"
+  ADD COLUMN "phase" "ClaimPhase" NOT NULL DEFAULT 'MAIN';

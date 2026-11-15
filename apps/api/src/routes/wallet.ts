@@ -41,6 +41,7 @@ import {
   updatePayoutAccount,
 } from '../services/payoutAccounts';
 import { getPlayerWallet, scopedIdempotencyKey } from '../services/wallet';
+import { getDepositLimits } from '../services/config';
 
 const minorAmount = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
 
@@ -178,6 +179,19 @@ walletRouter.get(
     const query = parse(ProviderQuery, req.query);
     const providers = await listEnabledProviders(query.method);
     res.json({ data: providers.map(serializeProvider) });
+  }),
+);
+
+walletRouter.get(
+  '/deposit-config',
+  asyncHandler(async (_req, res) => {
+    const limits = await getDepositLimits();
+    res.json({
+      data: {
+        minAmount: limits.minAmount.toString(),
+        maxAmount: limits.maxAmount === null ? null : limits.maxAmount.toString(),
+      },
+    });
   }),
 );
 

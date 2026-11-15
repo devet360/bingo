@@ -1,6 +1,6 @@
 import type { Prisma } from '@prisma/client';
 import { prisma } from '../lib/prisma';
-import { minorToWire } from '../lib/money';
+import { formatEtb, minorToWire } from '../lib/money';
 import { getReferralSettings, REFERRAL_CONFIG_KEY } from './config';
 import { postLedger } from './ledger';
 
@@ -120,7 +120,7 @@ export async function settleReferralCommissions(
         userId: referrerId,
         type: 'SYSTEM',
         title: 'Referral commission',
-        body: `You earned ${minorToWire(bucket.total)} credits from your referrals.`,
+        body: `You earned ${formatEtb(bucket.total)} ETB from your referrals.`,
         data: { roundId: stakes.roundId },
       },
     });

@@ -9,11 +9,18 @@ import {
   ensureRound,
   lockRound,
   settleRound,
+  settleRunnerUp,
 } from '../services/bingo';
 
 type RoundWithRoom = Prisma.BingoRoundGetPayload<{ include: { room: true } }>;
 
-const ACTIVE_STATUSES = ['WAITING', 'LOCKED', 'PLAYING', 'CLAIM_VERIFICATION'] as const;
+const ACTIVE_STATUSES = [
+  'WAITING',
+  'LOCKED',
+  'PLAYING',
+  'CLAIM_VERIFICATION',
+  'RUNNER_UP',
+] as const;
 const MIN_DELAY_MS = 20;
 const MAX_DELAY_MS = 5_000;
 const DISCOVERY_INTERVAL_MS = 30_000;
@@ -168,6 +175,13 @@ export class RoundEngine {
           await cancelRound(round.id, 'no_valid_winner');
           return 200;
         }
+        return 250;
+      }
+
+      case 'RUNNER_UP': {
+        const deadline = round.runnerUpClosesAt?.getTime() ?? now;
+        if (now < deadline) return deadline - now;
+        await settleRunnerUp(round.id);
         return 250;
       }
 

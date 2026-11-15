@@ -27,3 +27,12 @@ export function minorToWire(amount: bigint | null | undefined): string | null {
   if (amount === null || amount === undefined) return null;
   return amount.toString();
 }
+
+/** Human copy for notifications: minor units → "25,000.00". */
+export function formatEtb(amount: bigint): string {
+  const negative = amount < 0n;
+  const abs = negative ? -amount : amount;
+  const whole = (abs / 100n).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  const cents = (abs % 100n).toString().padStart(2, '0');
+  return `${negative ? '−' : ''}${whole}.${cents}`;
+}

@@ -217,6 +217,19 @@ enum BingoVariant {
   UK_90
 }
 
+// MAIN mirrors the Ethiopian long game (bingo1020): pre-registration, many
+// cards, manual BINGO presses, advertised fixed prizes and a runner-up round.
+// FAST is the mini quick game: one card per player, auto-daub, pool prize.
+enum RoomMode {
+  MAIN
+  FAST
+}
+
+enum ClaimPhase {
+  MAIN
+  RUNNER_UP
+}
+
 enum WinPattern {
   HORIZONTAL
   VERTICAL
@@ -235,16 +248,19 @@ enum RoundStatus {
   WAITING // countdown, cards on sale
   LOCKED // final seconds, sales closed
   PLAYING // balls being drawn
-  CLAIM_VERIFICATION // claims being validated, draw paused
+  CLAIM_VERIFICATION // main claims being validated, draw paused
+  RUNNER_UP // runner-up window after the main winner
   COMPLETED // paid out and archived
   CANCELLED // round aborted, all stakes refunded
 }
 
 enum CardStatus {
+  PENDING // added for viewing, not paid for yet
   ACTIVE
   WON
   LOST
   REFUNDED
+  BLOCKED // false BINGO press in the main game
 }
 
 enum ClaimStatus {
@@ -911,6 +927,7 @@ model BingoRoom {
   code               String       @unique // "us75-10", "uk90-500"
   name               String
   variant            BingoVariant
+  mode               RoomMode     @default(FAST)
   stakePerCard       BigInt
   maxCardsPerPlayer  Int          @default(4)
   minPlayersToStart  Int          @default(1)
@@ -922,6 +939,17 @@ model BingoRoom {
   drawIntervalMs     Int          @default(3500)
   claimWindowSecs    Int          @default(20)
   autoDaubEnabled    Boolean      @default(true)
+  // MAIN mode: advertised guarantees. fixedPrize is split by the main winners,
+  // runnerUpPrize by the runner-up winners. Snapshot onto each round.
+  fixedPrize         BigInt?
+  runnerUpEnabled    Boolean      @default(false)
+  runnerUpPrize      BigInt?
+  runnerUpWindowSecs Int          @default(60)
+  pressWindowSecs    Int          @default(60)
+  // When false the player UI hides the auto BINGO press option; presses stay manual.
+  allowAutoBingoPress Boolean     @default(false)
+  // [{ minCards: 5, bonusCards: 1 }, ...] free registrations by cards registered.
+  bonusTiers         Json         @default("[]")
   createdAt          DateTime     @default(now())
   updatedAt          DateTime     @updatedAt
 
@@ -940,9 +968,17 @@ model BingoRound {
   // Room economics are snapshotted per round: editing a room never rewrites an
   // in-flight or historical round.
   variant          BingoVariant
+  mode             RoomMode     @default(FAST)
   stakePerCard     BigInt
   rakeBps          Int
   allowedPatterns  WinPattern[]
+  fixedPrize       BigInt?
+  runnerUpEnabled  Boolean      @default(false)
+  runnerUpPrize    BigInt?
+  runnerUpNumber   Int?
+  runnerUpOpensAt  DateTime?
+  runnerUpClosesAt DateTime?
+  bonusCards       Int          @default(0)
   serverSeed       String // secret until reveal
   serverSeedHash   String // published in advance (sha256(serverSeed))
   clientSeed       String? // aggregated player contributions, hashed
@@ -990,6 +1026,9 @@ model BingoCard {
   cells          Json
   markedNumbers  Int[]        @default([])
   autoDaub       Boolean      @default(false)
+  isBonus        Boolean      @default(false)
+  // Player opted into automatic BINGO presses; only honoured when the room allows it.
+  autoPress      Boolean      @default(false)
   // Player entropy folded into the round's aggregate clientSeed at lock time.
   clientSeed     String?
   // Per-request idempotency: a retried purchase returns these cards, never new ones.
@@ -1014,6 +1053,7 @@ model BingoClaim {
   cardId          String      @db.Uuid
   userId          String      @db.Uuid
   pattern         WinPattern
+  phase           ClaimPhase  @default(MAIN)
   status          ClaimStatus @default(PENDING)
   drawnSnapshot   Int[] // balls drawn when the claim landed: audit evidence
   rejectionReason String?
@@ -1034,6 +1074,7 @@ model RoundWinner {
   cardId     String     @unique @db.Uuid
   userId     String     @db.Uuid
   pattern    WinPattern
+  phase      ClaimPhase @default(MAIN)
   payout     BigInt
   isSplitPot Boolean    @default(false)
   createdAt  DateTime   @default(now())

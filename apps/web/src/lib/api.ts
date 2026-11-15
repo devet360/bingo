@@ -1,5 +1,6 @@
 import { getRuntimeConfig } from './runtime-config';
 import type {
+  AdminBingoRoom,
   AdminOverview,
   AdminReferralRow,
   AdminSettings,
@@ -17,6 +18,7 @@ import type {
   Commission,
   CreatedStaff,
   Deposit,
+  DepositLimits,
   DepositProvider,
   DepositStatus,
   FloatRequest,
@@ -317,10 +319,46 @@ export function buyCards(input: {
   });
 }
 
+export function addPreviewCards(input: {
+  roomCode: string;
+  quantity: number;
+}): Promise<Card[]> {
+  return apiRequest(`/bingo/rooms/${encodeURIComponent(input.roomCode)}/cards/preview`, {
+    method: 'POST',
+    body: { quantity: input.quantity },
+  });
+}
+
+export function registerCards(input: {
+  roundId: string;
+  cardIds: string[];
+  clientSeed?: string;
+  autoPress?: boolean;
+}): Promise<{ round: Round; cards: Card[] }> {
+  return apiRequest(`/bingo/rounds/${input.roundId}/cards/register`, {
+    method: 'POST',
+    body: {
+      cardIds: input.cardIds,
+      clientSeed: input.clientSeed || undefined,
+      autoPress: input.autoPress,
+    },
+  });
+}
+
+export function removePreviewCards(input: {
+  roundId: string;
+  cardIds: string[];
+}): Promise<{ removed: number }> {
+  return apiRequest(`/bingo/rounds/${input.roundId}/cards/preview`, {
+    method: 'DELETE',
+    body: { cardIds: input.cardIds },
+  });
+}
+
 export function submitClaim(input: {
   roundId: string;
   cardId: string;
-  pattern: WinPattern;
+  pattern?: WinPattern;
 }): Promise<Claim> {
   return apiRequest(`/bingo/rounds/${input.roundId}/claims`, {
     method: 'POST',
@@ -348,6 +386,10 @@ export function fetchDeposits(status?: DepositStatus): Promise<Deposit[]> {
 
 export function fetchDepositProviders(method?: PaymentMethod): Promise<DepositProvider[]> {
   return apiRequest(`/wallet/deposit-providers${method ? `?method=${method}` : ''}`);
+}
+
+export function fetchDepositLimits(): Promise<DepositLimits> {
+  return apiRequest('/wallet/deposit-config');
 }
 
 export function createDeposit(input: {
@@ -716,6 +758,38 @@ export function updateDepositProvider(code: string, patch: DepositProviderPatch)
   return apiRequest(`/admin/deposit-providers/${encodeURIComponent(code)}`, { method: 'PATCH', body: patch });
 }
 
+export function fetchAdminBingoRooms(): Promise<AdminBingoRoom[]> {
+  return apiRequest('/admin/bingo/rooms');
+}
+
+export interface BingoRoomPatch {
+  name?: string;
+  status?: 'OPEN' | 'MAINTENANCE' | 'CLOSED';
+  stakePerCard?: number;
+  fixedPrize?: number | null;
+  maxCardsPerPlayer?: number;
+  minPlayersToStart?: number;
+  rakeBps?: number;
+  drawIntervalMs?: number;
+  purchaseWindowSecs?: number;
+  lockWindowSecs?: number;
+  claimWindowSecs?: number;
+  pressWindowSecs?: number;
+  autoDaubEnabled?: boolean;
+  allowAutoBingoPress?: boolean;
+  runnerUpEnabled?: boolean;
+  runnerUpPrize?: number | null;
+  runnerUpWindowSecs?: number;
+  bonusTiers?: Array<{ minCards: number; bonusCards: number }>;
+}
+
+export function updateAdminBingoRoom(code: string, patch: BingoRoomPatch): Promise<Room> {
+  return apiRequest(`/admin/bingo/rooms/${encodeURIComponent(code)}`, {
+    method: 'PATCH',
+    body: patch,
+  });
+}
+
 export function setStaffTelegram(userId: string, telegramId: string | null): Promise<{ user: User }> {
   return apiRequest(`/admin/staff/${userId}/telegram`, { method: 'PATCH', body: { telegramId } });
 }
@@ -927,6 +1001,13 @@ export function updateBonusSettings(input: {
   defaultExpiryDays: number;
 }): Promise<{ defaultWageringMultiplier: number; defaultExpiryDays: number }> {
   return apiRequest('/admin/settings/bonuses', { method: 'PUT', body: input });
+}
+
+export function updateDepositLimits(input: {
+  minAmount: number;
+  maxAmount: number | null;
+}): Promise<DepositLimits> {
+  return apiRequest('/admin/settings/deposit-limits', { method: 'PUT', body: input });
 }
 
 // ─────────────────────────────── external game providers ───────────────────────────────

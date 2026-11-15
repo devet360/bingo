@@ -1410,6 +1410,24 @@ export const openApiDocument = {
         responses: { '200': ok(dataArrayRef('DepositProvider')) },
       },
     },
+    '/wallet/deposit-config': {
+      get: {
+        tags: ['Player wallet'],
+        summary: 'Platform-wide deposit limits',
+        description:
+          'Operator-configured minimum and maximum in minor units. A rail may narrow this window with its own ' +
+          '`minAmount`/`maxAmount` from `/wallet/deposit-providers`.',
+        responses: {
+          '200': ok({
+            type: 'object',
+            properties: {
+              minAmount: money,
+              maxAmount: { ...money, nullable: true },
+            },
+          }),
+        },
+      },
+    },
     '/wallet/deposits': {
       get: {
         tags: ['Player wallet'],
@@ -1420,13 +1438,18 @@ export const openApiDocument = {
         tags: ['Player wallet'],
         summary: 'Open a deposit request; the server assigns the receiving agent',
         description:
-          'The player sends only the method/rail and amount. The response carries the assigned agent and the exact ' +
-          'payment account to pay, so the UI can show "pay X to account Y".',
+          'The player sends only the method/rail and amount. The server picks an active agent with a matching ' +
+          'payment account and free capacity, and the response carries that agent and the exact account to pay, ' +
+          'so the UI can show "pay X to account Y". When no agent can serve the rail, the reply is ' +
+          '`NO_AGENT_FOR_METHOD`.',
         security: [{ bearerAuth: [] }, { idempotency: [] }],
         requestBody: { required: true, content: { 'application/json': { schema: { $ref: '#/components/schemas/DepositCreate' } } } },
         responses: {
           '201': ok(dataRef('Deposit')),
-          '409': errorResponse('Duplicate request / AGENT_UNAVAILABLE'),
+          '400': errorResponse(
+            'DEPOSIT_BELOW_MINIMUM / DEPOSIT_ABOVE_MAXIMUM / AMOUNT_BELOW_PROVIDER_MINIMUM / AMOUNT_ABOVE_PROVIDER_MAXIMUM',
+          ),
+          '409': errorResponse('Duplicate request / NO_AGENT_FOR_METHOD'),
         },
       },
     },
@@ -2502,7 +2525,7 @@ export const openApiDocument = {
     '/admin/settings': {
       get: {
         tags: ['Admin'],
-        summary: 'Platform referral and bonus defaults',
+        summary: 'Platform referral, bonus and deposit defaults',
         responses: {
           '200': ok({
             type: 'object',
@@ -2518,11 +2541,43 @@ export const openApiDocument = {
                     },
                   },
                   bonus: { $ref: '#/components/schemas/BonusSettings' },
+                  depositLimits: {
+                    type: 'object',
+                    properties: {
+                      minAmount: money,
+                      maxAmount: { ...money, nullable: true },
+                    },
+                  },
                 },
               },
             },
           }),
         },
+      },
+    },
+    '/admin/settings/deposit-limits': {
+      put: {
+        tags: ['Admin'],
+        summary: 'Set the platform-wide minimum and maximum deposit',
+        description:
+          'Minor-unit amounts. `maxAmount: null` removes the platform ceiling. Per-rail limits configured on ' +
+          '`/admin/deposit-providers/{code}` narrow this window further.',
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                required: ['minAmount'],
+                properties: {
+                  minAmount: { type: 'integer', minimum: 1, description: 'Minor units' },
+                  maxAmount: { type: 'integer', minimum: 1, nullable: true, description: 'Minor units' },
+                },
+              },
+            },
+          },
+        },
+        responses: { '200': ok({ type: 'object' }) },
       },
     },
     '/admin/settings/referrals': {

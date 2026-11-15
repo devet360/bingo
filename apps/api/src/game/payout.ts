@@ -12,6 +12,14 @@ export function computeEconomics(grossPot: bigint, rakeBps: number): RoundEconom
 }
 
 /**
+ * MAIN rooms pay a guaranteed prize. The rake is whatever the pot leaves over;
+ * a shortfall is negative and funded by treasury.
+ */
+export function computeFixedEconomics(grossPot: bigint, fixedPrize: bigint): RoundEconomics {
+  return { grossPot, rakeAmount: grossPot - fixedPrize, prizePool: fixedPrize };
+}
+
+/**
  * Equal shares; the first `remainder` winners receive one extra minor unit so
  * the payouts always sum exactly to the prize pool.
  */

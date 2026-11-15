@@ -97,6 +97,7 @@ async function broadcast(event: BingoEvent, io: Server): Promise<void> {
     case 'settled':
       io.to(roomChannel(event.roomId)).emit('round:settled', {
         roundId: event.roundId,
+        phase: event.phase,
         winners: event.winners,
         rake: event.rake,
         prizePool: event.prizePool,

@@ -28,7 +28,8 @@ function RoomCard({ entry, now }: { entry: LobbyRoom; now: number }) {
         ? { label: t('lobby.v90'), blurb: t('lobby.v90Blurb') }
         : { label: room.variant, blurb: '' };
   const status = round?.status ?? 'WAITING';
-  const live = status === 'PLAYING' || status === 'CLAIM_VERIFICATION';
+  const live =
+    status === 'PLAYING' || status === 'CLAIM_VERIFICATION' || status === 'RUNNER_UP';
   const deadline =
     round?.status === 'WAITING' && round.purchaseClosesAt
       ? { label: t('phase.salesClose'), at: round.purchaseClosesAt }
@@ -46,6 +47,9 @@ function RoomCard({ entry, now }: { entry: LobbyRoom; now: number }) {
         <div className="flex items-start justify-between gap-3">
           <div>
             <div className="flex flex-wrap items-center gap-1.5">
+              <Pill tone={room.mode === 'MAIN' ? 'gold' : 'blue'}>
+                {room.mode === 'MAIN' ? t('lobby.modeMain') : t('lobby.modeFast')}
+              </Pill>
               <Pill tone={room.variant === 'US_75' ? 'blue' : 'gold'}>{variant.label}</Pill>
               <Pill tone={statusTone(status)}>
                 {live ? <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-current" /> : null}
@@ -65,9 +69,17 @@ function RoomCard({ entry, now }: { entry: LobbyRoom; now: number }) {
 
         <div className="mt-4 grid grid-cols-3 gap-2 text-center">
           <div className="rounded-lg bg-ink/50 px-2 py-1.5">
-            <p className="text-[9px] uppercase tracking-widest text-muted">{t('lobby.prizePool')}</p>
+            <p className="text-[9px] uppercase tracking-widest text-muted">
+              {room.mode === 'MAIN' ? t('room.fixedPrize') : t('lobby.prizePool')}
+            </p>
             <p className="font-display text-sm font-semibold text-mint">
-              {round ? formatCredits(round.prizePool) : '—'}
+              {room.mode === 'MAIN'
+                ? room.fixedPrize
+                  ? formatCredits(room.fixedPrize)
+                  : '—'
+                : round
+                  ? formatCredits(round.prizePool)
+                  : '—'}
             </p>
           </div>
           <div className="rounded-lg bg-ink/50 px-2 py-1.5">
@@ -202,10 +214,28 @@ export default function LobbyPage() {
           }
         />
       ) : (
-        <div className="grid gap-3 sm:grid-cols-2">
-          {sorted.map((entry) => (
-            <RoomCard key={entry.room.id} entry={entry} now={now} />
-          ))}
+        <div className="space-y-5">
+          {(
+            [
+              { mode: 'MAIN', title: t('lobby.mainGames') },
+              { mode: 'FAST', title: t('lobby.fastGames') },
+            ] as const
+          ).map((section) => {
+            const entries = sorted.filter((entry) => entry.room.mode === section.mode);
+            if (entries.length === 0) return null;
+            return (
+              <section key={section.mode} className="space-y-2">
+                <h2 className="px-1 font-display text-xs font-bold uppercase tracking-[0.2em] text-muted">
+                  {section.title}
+                </h2>
+                <div className="grid gap-3 sm:grid-cols-2">
+                  {entries.map((entry) => (
+                    <RoomCard key={entry.room.id} entry={entry} now={now} />
+                  ))}
+                </div>
+              </section>
+            );
+          })}
         </div>
       )}
 

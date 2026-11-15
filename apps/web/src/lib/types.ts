@@ -3,10 +3,24 @@
 export type Role = 'PLAYER' | 'AGENT' | 'SUPPORT' | 'SUPER_ADMIN';
 export type StaffRole = 'AGENT' | 'SUPPORT' | 'SUPER_ADMIN';
 export type UserStatus = 'ACTIVE' | 'SUSPENDED' | 'BANNED' | 'DELETED';
-export type RoundStatus = 'WAITING' | 'LOCKED' | 'PLAYING' | 'CLAIM_VERIFICATION' | 'COMPLETED' | 'CANCELLED';
-export type CardStatus = 'ACTIVE' | 'WON' | 'LOST' | 'REFUNDED';
+export type RoundStatus =
+  | 'WAITING'
+  | 'LOCKED'
+  | 'PLAYING'
+  | 'CLAIM_VERIFICATION'
+  | 'RUNNER_UP'
+  | 'COMPLETED'
+  | 'CANCELLED';
+export type CardStatus = 'PENDING' | 'ACTIVE' | 'BLOCKED' | 'WON' | 'LOST' | 'REFUNDED';
 export type Variant = 'US_75' | 'UK_90';
 export type WinPattern = 'HORIZONTAL' | 'VERTICAL' | 'DIAGONAL' | 'FOUR_CORNERS' | 'FULL_HOUSE';
+export type RoomMode = 'MAIN' | 'FAST';
+export type ClaimPhase = 'MAIN' | 'RUNNER_UP';
+
+export interface BonusTier {
+  minCards: number;
+  bonusCards: number;
+}
 export type PaymentMethod = 'MOBILE_MONEY' | 'BANK_TRANSFER' | 'CASH' | 'CARD' | 'CRYPTO';
 export type DepositStatus = 'PENDING' | 'PROCESSING' | 'CREDITED' | 'REJECTED' | 'EXPIRED' | 'CANCELLED' | 'DISPUTED';
 export type WithdrawalStatus =
@@ -61,6 +75,13 @@ export interface PaymentAccount {
   minAmount: string | null;
   maxAmount: string | null;
   isActive?: boolean;
+}
+
+export interface DepositLimits {
+  /** Platform-wide floor in minor units. */
+  minAmount: string;
+  /** Platform-wide ceiling in minor units, or null when uncapped. */
+  maxAmount: string | null;
 }
 
 export interface DepositProvider {
@@ -202,14 +223,17 @@ export interface RoomTimings {
   lockWindowSecs: number;
   drawIntervalMs: number;
   claimWindowSecs: number;
+  pressWindowSecs: number;
 }
 
 export interface Room {
   id: string;
   code: string;
   name: string;
+  mode: RoomMode;
   variant: Variant;
   stakePerCard: string;
+  fixedPrize: string | null;
   maxCardsPerPlayer: number;
   minPlayersToStart: number;
   rakeBps: number;
@@ -217,6 +241,11 @@ export interface Room {
   status: string;
   timings: RoomTimings;
   autoDaubEnabled: boolean;
+  allowAutoBingoPress: boolean;
+  runnerUpEnabled: boolean;
+  runnerUpPrize: string | null;
+  runnerUpWindowSecs: number;
+  bonusTiers: BonusTier[];
 }
 
 export interface Round {
@@ -224,6 +253,7 @@ export interface Round {
   roomId: string;
   roundNumber: number;
   status: RoundStatus;
+  mode: RoomMode;
   variant: Variant;
   stakePerCard: string;
   rakeBps: number;
@@ -242,7 +272,14 @@ export interface Round {
   grossPot: string;
   rakeAmount: string;
   prizePool: string;
+  fixedPrize: string | null;
+  bonusCards: number;
   winningPattern: WinPattern | null;
+  runnerUpEnabled: boolean;
+  runnerUpPrize: string | null;
+  runnerUpNumber: number | null;
+  runnerUpOpensAt: string | null;
+  runnerUpClosesAt: string | null;
   purchaseClosesAt: string | null;
   startedAt: string | null;
   lastDrawAt: string | null;
@@ -285,6 +322,8 @@ export interface Card {
   cells: CardGrid;
   markedNumbers: number[];
   autoDaub: boolean;
+  autoPress: boolean;
+  isBonus: boolean;
   status: CardStatus;
   wonPattern: WinPattern | null;
   purchasedAt: string;
@@ -295,6 +334,7 @@ export interface Claim {
   roundId: string;
   cardId: string;
   pattern: WinPattern;
+  phase: ClaimPhase;
   status: 'PENDING' | 'VALID' | 'INVALID';
   rejectionReason: string | null;
   drawnSnapshot: number[];
@@ -306,6 +346,11 @@ export interface RoomView {
   room: Room;
   round: Round | null;
   recentRounds: Round[];
+}
+
+export interface AdminBingoRoom {
+  room: Room;
+  round: Round | null;
 }
 
 export interface Deposit {
@@ -414,6 +459,7 @@ export interface SettlementWinner {
 
 export interface SettlementEvent {
   roundId: string;
+  phase: ClaimPhase;
   winners: SettlementWinner[];
   rake: string;
   prizePool: string;
@@ -695,6 +741,7 @@ export interface ProviderSession {
 export interface AdminSettings {
   referral: { commissionBps: number; minRakeToPay: string };
   bonus: { defaultWageringMultiplier: number; defaultExpiryDays: number };
+  depositLimits: DepositLimits;
 }
 
 // ─────────────────────────────── support tickets ───────────────────────────────

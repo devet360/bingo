@@ -3,7 +3,9 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
   ApiError,
+  fetchAdminSettings,
   fetchDepositProvidersAdmin,
+  updateDepositLimits,
   updateDepositProvider,
   type DepositProviderPatch,
 } from '@/lib/api';
@@ -74,6 +76,92 @@ function YesNo({
   );
 }
 
+function DepositLimitsCard() {
+  const [min, setMin] = useState('');
+  const [max, setMax] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const [saved, setSaved] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [loaded, setLoaded] = useState(false);
+
+  useEffect(() => {
+    fetchAdminSettings()
+      .then((settings) => {
+        setMin(minorToCreditsInput(settings.depositLimits.minAmount));
+        setMax(minorToCreditsInput(settings.depositLimits.maxAmount));
+        setLoaded(true);
+      })
+      .catch((caught) => {
+        setError(caught instanceof ApiError ? caught.message : 'Could not load the deposit limits.');
+        setLoaded(true);
+      });
+  }, []);
+
+  const save = async () => {
+    setError(null);
+    setSaved(false);
+    const minMinor = creditsToMinor(min);
+    if (minMinor === null) {
+      setError('The minimum must look like 10 or 7.50.');
+      return;
+    }
+    const maxMinor = max.trim() ? creditsToMinor(max) : null;
+    if (max.trim() && maxMinor === null) {
+      setError('The maximum must look like 100 or 99.50, or be left empty for no cap.');
+      return;
+    }
+    if (maxMinor !== null && maxMinor < minMinor) {
+      setError('The maximum cannot be less than the minimum.');
+      return;
+    }
+    setBusy(true);
+    try {
+      await updateDepositLimits({ minAmount: minMinor, maxAmount: maxMinor });
+      setSaved(true);
+    } catch (caught) {
+      setError(caught instanceof ApiError ? caught.message : 'Could not save the deposit limits.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Panel className="mb-3 p-4">
+      <SectionTitle>Deposit limits</SectionTitle>
+      <p className="mt-1 text-[11px] text-muted">
+        Platform-wide floor and ceiling in ETB. A rail&apos;s own limits in Configure narrow this window further.
+      </p>
+      {!loaded ? (
+        <LoadingBlock />
+      ) : (
+        <div className="mt-3 space-y-3">
+          <div className="grid gap-3 sm:grid-cols-2">
+            <Input
+              label="Minimum ETB"
+              inputMode="decimal"
+              value={min}
+              onChange={(event) => setMin(event.target.value)}
+              hint="Every deposit must be at least this much."
+            />
+            <Input
+              label="Maximum ETB"
+              inputMode="decimal"
+              value={max}
+              onChange={(event) => setMax(event.target.value)}
+              hint="Leave empty for no platform cap."
+            />
+          </div>
+          {error ? <ErrorNote>{error}</ErrorNote> : null}
+          {saved ? <p className="text-[11px] text-mint">Deposit limits saved.</p> : null}
+          <Button size="sm" loading={busy} onClick={() => void save()}>
+            Save limits
+          </Button>
+        </div>
+      )}
+    </Panel>
+  );
+}
+
 export function ProvidersTab() {
   const [providers, setProviders] = useState<DepositProvider[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -93,7 +181,9 @@ export function ProvidersTab() {
   }, [load]);
 
   return (
-    <Panel className="overflow-hidden">
+    <div>
+      <DepositLimitsCard />
+      <Panel className="overflow-hidden">
       <div className="border-b border-line/60 px-4 py-3">
         <SectionTitle>Deposit rails</SectionTitle>
         <p className="mt-1 text-[11px] text-muted">
@@ -155,7 +245,8 @@ export function ProvidersTab() {
           void load();
         }}
       />
-    </Panel>
+      </Panel>
+    </div>
   );
 }
 

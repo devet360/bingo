@@ -13,7 +13,7 @@ import {
   isPatternComplete,
   validateClaim,
 } from '../src/game/patterns';
-import { computeEconomics, splitPrize } from '../src/game/payout';
+import { computeEconomics, computeFixedEconomics, splitPrize } from '../src/game/payout';
 import { cardNumbers, type CardGrid } from '../src/game/types';
 
 test('ball order is deterministic, complete and seed-dependent', () => {
@@ -163,4 +163,18 @@ test('round economics keep gross = rake + prize and split exactly', () => {
   assert.deepEqual(shares, [34n, 33n, 33n]);
   assert.equal(shares.reduce((sum, share) => sum + share, 0n), 100n);
   assert.throws(() => splitPrize(100n, 0));
+});
+
+test('fixed prizes leave a rake surplus or a treasury-funded shortfall', () => {
+  const surplus = computeFixedEconomics(2_600_000n, 2_500_000n);
+  assert.equal(surplus.prizePool, 2_500_000n);
+  assert.equal(surplus.rakeAmount, 100_000n);
+
+  const shortfall = computeFixedEconomics(1_800_000n, 2_500_000n);
+  assert.equal(shortfall.prizePool, 2_500_000n);
+  assert.equal(shortfall.rakeAmount, -700_000n);
+  assert.equal(shortfall.rakeAmount + shortfall.prizePool, shortfall.grossPot);
+
+  const shares = splitPrize(shortfall.prizePool, 2);
+  assert.equal(shares.reduce((sum, share) => sum + share, 0n), shortfall.prizePool);
 });

@@ -14,11 +14,14 @@ import {
 import { authenticate, requireVerifiedPhone } from '../middleware/auth';
 import { moneyLimiter } from '../middleware/rateLimit';
 import {
+  addPreviewCards,
   buyCards,
   getRoomByCode,
   getRoundForViewer,
   listMyCards,
   listRooms,
+  registerCards,
+  removePreviewCards,
   roomHistory,
   submitClaim,
   verifyRound,
@@ -26,13 +29,27 @@ import {
 import { scopedIdempotencyKey } from '../services/wallet';
 
 const BuyCardsSchema = z.object({
-  quantity: z.number().int().min(1).max(4),
+  quantity: z.number().int().min(1).max(100),
   clientSeed: z.string().max(128).optional(),
+});
+
+const PreviewCardsSchema = z.object({
+  quantity: z.number().int().min(1).max(100),
+});
+
+const RegisterCardsSchema = z.object({
+  cardIds: z.array(z.string().uuid()).min(1).max(100),
+  clientSeed: z.string().max(128).optional(),
+  autoPress: z.boolean().optional(),
+});
+
+const RemovePreviewSchema = z.object({
+  cardIds: z.array(z.string().uuid()).min(1).max(100),
 });
 
 const ClaimSchema = z.object({
   cardId: z.string().uuid(),
-  pattern: z.nativeEnum(WinPattern),
+  pattern: z.nativeEnum(WinPattern).optional(),
 });
 
 const HistoryQuery = z.object({
@@ -144,6 +161,59 @@ bingoRouter.post(
       },
       replayed: result.replayed,
     });
+  }),
+);
+
+bingoRouter.post(
+  '/rooms/:code/cards/preview',
+  authenticate,
+  requireVerifiedPhone,
+  asyncHandler(async (req, res) => {
+    const body = parse(PreviewCardsSchema, req.body);
+    const cards = await addPreviewCards({
+      userId: req.auth!.userId,
+      roomCode: req.params.code,
+      quantity: body.quantity,
+    });
+    res.status(201).json({ data: cards.map(serializeCard) });
+  }),
+);
+
+bingoRouter.post(
+  '/rounds/:id/cards/register',
+  authenticate,
+  requireVerifiedPhone,
+  moneyLimiter,
+  asyncHandler(async (req, res) => {
+    const body = parse(RegisterCardsSchema, req.body);
+    const result = await registerCards({
+      userId: req.auth!.userId,
+      roundId: req.params.id,
+      cardIds: body.cardIds,
+      clientSeed: body.clientSeed,
+      autoPress: body.autoPress,
+    });
+    res.status(result.replayed ? 200 : 201).json({
+      data: {
+        round: serializeRound(result.round),
+        cards: result.cards.map(serializeCard),
+      },
+      replayed: result.replayed,
+    });
+  }),
+);
+
+bingoRouter.delete(
+  '/rounds/:id/cards/preview',
+  authenticate,
+  asyncHandler(async (req, res) => {
+    const body = parse(RemovePreviewSchema, req.body);
+    const removed = await removePreviewCards({
+      userId: req.auth!.userId,
+      roundId: req.params.id,
+      cardIds: body.cardIds,
+    });
+    res.json({ data: { removed } });
   }),
 );
 

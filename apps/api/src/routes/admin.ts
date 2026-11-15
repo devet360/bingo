@@ -1,5 +1,13 @@
 import { Router } from 'express';
-import { AgentStatus, AgentTier, PaymentMethod, UserRole, UserStatus } from '@prisma/client';
+import type { Prisma } from '@prisma/client';
+import {
+  AgentStatus,
+  AgentTier,
+  PaymentMethod,
+  RoomStatus,
+  UserRole,
+  UserStatus,
+} from '@prisma/client';
 import { z } from 'zod';
 import { env } from '../config/env';
 import { parse } from '../lib/validate';
@@ -7,7 +15,7 @@ import { asyncHandler } from '../lib/async';
 import { Errors } from '../lib/errors';
 import { prisma } from '../lib/prisma';
 import { PHONE_RE } from '../lib/phone';
-import { serializeAgent, serializeUser } from '../lib/serializers';
+import { serializeAgent, serializeRoom, serializeRound, serializeUser } from '../lib/serializers';
 import { authenticate, requireRole } from '../middleware/auth';
 import { moneyLimiter } from '../middleware/rateLimit';
 import {
@@ -41,9 +49,11 @@ import {
 import {
   getBonusSettings,
   getConfig,
+  getDepositLimits,
   getReferralSettings,
   setConfig,
   BONUS_CONFIG_KEY,
+  DEPOSIT_LIMITS_CONFIG_KEY,
   REFERRAL_CONFIG_KEY,
 } from '../services/config';
 import {
@@ -94,6 +104,35 @@ const TopUpSchema = z.object({
 });
 
 const AgentListQuery = z.object({ status: z.nativeEnum(AgentStatus).optional() });
+
+const BingoRoomPatchSchema = z.object({
+  name: z.string().trim().min(1).max(64).optional(),
+  status: z.nativeEnum(RoomStatus).optional(),
+  stakePerCard: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER).optional(),
+  fixedPrize: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).nullable().optional(),
+  maxCardsPerPlayer: z.number().int().min(1).max(30).optional(),
+  minPlayersToStart: z.number().int().min(1).max(1000).optional(),
+  rakeBps: z.number().int().min(0).max(10_000).optional(),
+  drawIntervalMs: z.number().int().min(1_000).max(60_000).optional(),
+  purchaseWindowSecs: z.number().int().min(10).max(1_800).optional(),
+  lockWindowSecs: z.number().int().min(1).max(120).optional(),
+  claimWindowSecs: z.number().int().min(5).max(600).optional(),
+  pressWindowSecs: z.number().int().min(5).max(600).optional(),
+  autoDaubEnabled: z.boolean().optional(),
+  allowAutoBingoPress: z.boolean().optional(),
+  runnerUpEnabled: z.boolean().optional(),
+  runnerUpPrize: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).nullable().optional(),
+  runnerUpWindowSecs: z.number().int().min(5).max(600).optional(),
+  bonusTiers: z
+    .array(
+      z.object({
+        minCards: z.number().int().min(1).max(100),
+        bonusCards: z.number().int().min(0).max(100),
+      }),
+    )
+    .max(10)
+    .optional(),
+});
 
 const CreateStaffSchema = z
   .object({
@@ -234,6 +273,16 @@ const BonusSettingsSchema = z.object({
   defaultWageringMultiplier: z.number().int().min(1).max(100),
   defaultExpiryDays: z.number().int().min(1).max(365),
 });
+
+const DepositLimitsSchema = z
+  .object({
+    minAmount: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+    maxAmount: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).nullable().optional(),
+  })
+  .refine((value) => value.maxAmount == null || value.maxAmount >= value.minAmount, {
+    message: 'maxAmount must be greater than or equal to minAmount',
+    path: ['maxAmount'],
+  });
 
 const ProviderBodySchema = z.object({
   name: z.string().trim().min(1).max(96),
@@ -772,6 +821,111 @@ adminRouter.get(
   }),
 );
 
+adminRouter.get(
+  '/bingo/rooms',
+  asyncHandler(async (_req, res) => {
+    const rooms = await prisma.bingoRoom.findMany({ orderBy: { code: 'asc' } });
+    const rounds = await prisma.bingoRound.findMany({
+      where: {
+        roomId: { in: rooms.map((room) => room.id) },
+        status: { notIn: ['COMPLETED', 'CANCELLED'] },
+      },
+      orderBy: { roundNumber: 'desc' },
+    });
+    const roundByRoom = new Map<string, (typeof rounds)[number]>();
+    for (const round of rounds) {
+      if (!roundByRoom.has(round.roomId)) roundByRoom.set(round.roomId, round);
+    }
+    res.json({
+      data: rooms.map((room) => ({
+        room: serializeRoom(room),
+        round: roundByRoom.has(room.id) ? serializeRound(roundByRoom.get(room.id)!) : null,
+      })),
+    });
+  }),
+);
+
+adminRouter.patch(
+  '/bingo/rooms/:code',
+  asyncHandler(async (req, res) => {
+    const body = parse(BingoRoomPatchSchema, req.body);
+    const existing = await prisma.bingoRoom.findUnique({ where: { code: req.params.code } });
+    if (!existing) throw Errors.notFound('Room');
+    if (body.runnerUpEnabled && !existing.runnerUpPrize && !body.runnerUpPrize) {
+      throw Errors.badRequest(
+        'Set a runner-up prize before enabling the runner-up window',
+        'RUNNER_UP_PRIZE_REQUIRED',
+      );
+    }
+    const room = await prisma.bingoRoom.update({
+      where: { code: existing.code },
+      data: {
+        ...(body.name !== undefined ? { name: body.name } : {}),
+        ...(body.status !== undefined ? { status: body.status } : {}),
+        ...(body.stakePerCard !== undefined ? { stakePerCard: BigInt(body.stakePerCard) } : {}),
+        ...(body.fixedPrize !== undefined
+          ? { fixedPrize: body.fixedPrize === null ? null : BigInt(body.fixedPrize) }
+          : {}),
+        ...(body.maxCardsPerPlayer !== undefined
+          ? { maxCardsPerPlayer: body.maxCardsPerPlayer }
+          : {}),
+        ...(body.minPlayersToStart !== undefined
+          ? { minPlayersToStart: body.minPlayersToStart }
+          : {}),
+        ...(body.rakeBps !== undefined ? { rakeBps: body.rakeBps } : {}),
+        ...(body.drawIntervalMs !== undefined ? { drawIntervalMs: body.drawIntervalMs } : {}),
+        ...(body.purchaseWindowSecs !== undefined
+          ? { purchaseWindowSecs: body.purchaseWindowSecs }
+          : {}),
+        ...(body.lockWindowSecs !== undefined ? { lockWindowSecs: body.lockWindowSecs } : {}),
+        ...(body.claimWindowSecs !== undefined
+          ? { claimWindowSecs: body.claimWindowSecs }
+          : {}),
+        ...(body.pressWindowSecs !== undefined
+          ? { pressWindowSecs: body.pressWindowSecs }
+          : {}),
+        ...(body.autoDaubEnabled !== undefined
+          ? { autoDaubEnabled: body.autoDaubEnabled }
+          : {}),
+        ...(body.allowAutoBingoPress !== undefined
+          ? { allowAutoBingoPress: body.allowAutoBingoPress }
+          : {}),
+        ...(body.runnerUpEnabled !== undefined
+          ? { runnerUpEnabled: body.runnerUpEnabled }
+          : {}),
+        ...(body.runnerUpPrize !== undefined
+          ? {
+              runnerUpPrize:
+                body.runnerUpPrize === null ? null : BigInt(body.runnerUpPrize),
+            }
+          : {}),
+        ...(body.runnerUpWindowSecs !== undefined
+          ? { runnerUpWindowSecs: body.runnerUpWindowSecs }
+          : {}),
+        ...(body.bonusTiers !== undefined
+          ? { bonusTiers: body.bonusTiers as unknown as Prisma.InputJsonValue }
+          : {}),
+      },
+    });
+    await writeAudit({
+      actorId: req.auth!.userId,
+      actorRole: req.auth!.role,
+      action: 'bingo_room.update',
+      entityType: 'BingoRoom',
+      entityId: room.id,
+      after: {
+        ...body,
+        stakePerCard: room.stakePerCard.toString(),
+        fixedPrize: room.fixedPrize?.toString() ?? null,
+        runnerUpPrize: room.runnerUpPrize?.toString() ?? null,
+      },
+      ip: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
+    res.json({ data: serializeRoom(room) });
+  }),
+);
+
 // ═══════════════════════════════ MARKETING ═══════════════════════════════════
 
 adminRouter.get(
@@ -1038,7 +1192,11 @@ adminRouter.post(
 adminRouter.get(
   '/settings',
   asyncHandler(async (_req, res) => {
-    const [referral, bonus] = await Promise.all([getReferralSettings(), getBonusSettings()]);
+    const [referral, bonus, depositLimits] = await Promise.all([
+      getReferralSettings(),
+      getBonusSettings(),
+      getDepositLimits(),
+    ]);
     res.json({
       data: {
         referral: {
@@ -1046,8 +1204,40 @@ adminRouter.get(
           minRakeToPay: referral.minRakeToPay.toString(),
         },
         bonus,
+        depositLimits: {
+          minAmount: depositLimits.minAmount.toString(),
+          maxAmount: depositLimits.maxAmount === null ? null : depositLimits.maxAmount.toString(),
+        },
       },
     });
+  }),
+);
+
+adminRouter.put(
+  '/settings/deposit-limits',
+  asyncHandler(async (req, res) => {
+    const body = parse(DepositLimitsSchema, req.body);
+    const value = {
+      minAmount: String(body.minAmount),
+      maxAmount: body.maxAmount == null ? null : String(body.maxAmount),
+    };
+    await setConfig(
+      DEPOSIT_LIMITS_CONFIG_KEY,
+      value,
+      req.auth!.userId,
+      'Platform-wide minimum and maximum deposit amounts',
+    );
+    await writeAudit({
+      actorId: req.auth!.userId,
+      actorRole: req.auth!.role,
+      action: 'settings.depositLimits',
+      entityType: 'SystemConfig',
+      entityId: DEPOSIT_LIMITS_CONFIG_KEY,
+      after: value,
+      ip: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
+    res.json({ data: value });
   }),
 );
 

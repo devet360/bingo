@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events';
-import type { RoundStatus } from '@prisma/client';
+import type { ClaimPhase, RoundStatus } from '@prisma/client';
 
 export interface SettlementWinner {
   userId: string;
@@ -36,6 +36,7 @@ export type BingoEvent =
       type: 'settled';
       roomId: string;
       roundId: string;
+      phase: ClaimPhase;
       winners: SettlementWinner[];
       rake: string;
       prizePool: string;

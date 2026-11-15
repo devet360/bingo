@@ -9,6 +9,7 @@ import {
   createPayoutAccount,
   createWithdrawal,
   fetchDeposit,
+  fetchDepositLimits,
   fetchDepositProviders,
   fetchDeposits,
   fetchPayoutAccounts,
@@ -44,6 +45,7 @@ import {
 } from '@/components/ui';
 import type {
   Deposit,
+  DepositLimits,
   DepositProvider,
   DepositStatus,
   PaymentMethod,
@@ -61,7 +63,7 @@ type BetFilter = 'all' | 'won' | 'lost';
 type FinanceFilter = 'all' | 'deposits' | 'withdrawals' | 'bonuses';
 
 const QUICK_AMOUNTS = ['50', '100', '250', '500', '1000', '5000'];
-const MIN_DEPOSIT_MINOR = 1000n;
+const DEFAULT_MIN_DEPOSIT_MINOR = 1000n;
 const LOW_BALANCE_MINOR = 5000n;
 const LOW_BALANCE_KEY = 'bingo.lowBalanceDismissed.v1';
 
@@ -493,7 +495,7 @@ function DepositPanel({
   const [reference, setReference] = useState('');
   const [receiptAccount, setReceiptAccount] = useState('');
   const [receiptPhone, setReceiptPhone] = useState('');
-  const [note, setNote] = useState('');
+  const [selectedCode, setSelectedCode] = useState<string | null>(null);
   const [proof, setProof] = useState<{ contentType: string; base64: string; name: string } | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -502,15 +504,48 @@ function DepositPanel({
   const [notice, setNotice] = useState<string | null>(null);
   const [pending, setPending] = useState<Deposit[]>([]);
   const [providers, setProviders] = useState<DepositProvider[]>([]);
+  const [limits, setLimits] = useState<DepositLimits>({
+    minAmount: DEFAULT_MIN_DEPOSIT_MINOR.toString(),
+    maxAmount: null,
+  });
   const [verifying, setVerifying] = useState(false);
+  const [now, setNow] = useState(() => Date.now());
   const idempotency = useRef(newIdempotencyKey('dep'));
 
   const createdProvider = providers.find((item) => item.code === created?.providerCode) ?? null;
+  const selectedProvider = providers.find((item) => item.code === selectedCode) ?? null;
   const account = created?.paymentAccount ?? null;
   const open = Boolean(created && (created.status === 'PENDING' || created.status === 'PROCESSING'));
   const showConfirmation = Boolean(created && submitted && created.verificationStatus !== 'FAILED');
-  const minLabel = formatStake(MIN_DEPOSIT_MINOR.toString());
+  const platformMin = BigInt(limits.minAmount);
+  const platformMax = limits.maxAmount === null ? null : BigInt(limits.maxAmount);
+  const minLabel = formatStake(platformMin.toString());
+  const amountHint =
+    platformMax === null
+      ? t('wallet.minHint', { amount: minLabel })
+      : t('wallet.depositRangeHint', {
+          min: minLabel,
+          max: formatStake(platformMax.toString()),
+        });
+  /** Effective range for one rail: the platform window narrowed by the rail's own limits. */
+  const railRange = (item: DepositProvider) => {
+    const floor = item.minAmount && BigInt(item.minAmount) > platformMin ? BigInt(item.minAmount) : platformMin;
+    const railMax = item.maxAmount ? BigInt(item.maxAmount) : null;
+    const cap = railMax === null ? platformMax : platformMax === null ? railMax : railMax < platformMax ? railMax : platformMax;
+    return { floor, cap };
+  };
   const methodLabel = (method: PaymentMethod) => t(`method.${method}`);
+  const remaining = created
+    ? Math.max(0, Math.floor((new Date(created.expiresAt).getTime() - now) / 1000))
+    : 0;
+  const countdown = `${Math.floor(remaining / 60)}:${String(remaining % 60).padStart(2, '0')}`;
+
+  useEffect(() => {
+    if (!open) return;
+    setNow(Date.now());
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [open, created?.id]);
 
   const loadPending = useCallback(async () => {
     try {
@@ -525,6 +560,9 @@ function DepositPanel({
     void loadPending();
     fetchDepositProviders()
       .then(setProviders)
+      .catch(() => undefined);
+    fetchDepositLimits()
+      .then(setLimits)
       .catch(() => undefined);
   }, [loadPending]);
 
@@ -544,18 +582,22 @@ function DepositPanel({
     setProof({ contentType: file.type, base64: bytesToBase64(bytes), name: file.name });
   };
 
-  /** "I have paid": submit the reference, try the bank page, fall back to proof. */
+  /** "I have paid": submit whatever evidence the player attached. */
   const markPaid = async () => {
     if (!created) return;
-    if (!reference.trim()) {
-      setError(t('wallet.receiptReferenceRequired'));
+    if (!reference.trim() && !proof) {
+      setError(t('wallet.proofOrReferenceRequired'));
       return;
     }
-    if (createdProvider?.accountDigits && receiptAccount.replace(/\D/g, '').length < createdProvider.accountDigits) {
+    if (
+      reference.trim() &&
+      createdProvider?.accountDigits &&
+      receiptAccount.replace(/\D/g, '').length < createdProvider.accountDigits
+    ) {
       setError(t('wallet.receiptAccount', { count: createdProvider.accountDigits }));
       return;
     }
-    if (createdProvider?.requiresPhone && !receiptPhone.trim()) {
+    if (reference.trim() && createdProvider?.requiresPhone && !receiptPhone.trim()) {
       setError(t('wallet.receiptPhone'));
       return;
     }
@@ -638,31 +680,36 @@ function DepositPanel({
   }, [created?.id, created?.status, created?.verificationStatus, createdProvider?.clientSide]);
 
   /**
-   * Phase 1 → 2: tapping a method validates the amount and opens the deposit,
-   * which is what makes the server assign an agent and reveal the account to
-   * pay. The agent details and the receipt form then share one screen.
+   * Create the deposit for the selected rail. The server assigns the agent,
+   * so the account to pay is revealed on the next screen.
    */
-  const begin = async (item: DepositProvider) => {
+  const begin = async () => {
     setError(null);
     setNotice(null);
+    const item = selectedProvider;
+    if (!item) {
+      setError(t('wallet.selectMethodRequired'));
+      return;
+    }
     const minor = creditsToMinor(amount);
     if (minor === null) {
       setError(t('wallet.enterAmountFirst'));
       return;
     }
-    const itemFloor =
-      item.minAmount && BigInt(item.minAmount) > MIN_DEPOSIT_MINOR
-        ? BigInt(item.minAmount)
-        : MIN_DEPOSIT_MINOR;
-    if (BigInt(minor) < itemFloor) {
-      setError(t('wallet.minHint', { amount: formatStake(itemFloor.toString()) }));
+    const { floor, cap } = railRange(item);
+    if (BigInt(minor) < platformMin) {
+      setError(t('wallet.minHint', { amount: minLabel }));
       return;
     }
-    if (item.maxAmount && BigInt(minor) > BigInt(item.maxAmount)) {
+    if (platformMax !== null && BigInt(minor) > platformMax) {
+      setError(t('wallet.depositMaxHint', { amount: formatStake(platformMax.toString()) }));
+      return;
+    }
+    if (BigInt(minor) < floor || (cap !== null && BigInt(minor) > cap)) {
       setError(
         t('wallet.providerLimits', {
-          min: formatStake(itemFloor.toString()),
-          max: formatStake(item.maxAmount),
+          min: formatStake(floor.toString()),
+          max: cap === null ? '∞' : formatStake(cap.toString()),
         }),
       );
       return;
@@ -673,7 +720,6 @@ function DepositPanel({
         amount: minor,
         method: item.method,
         providerCode: item.code,
-        playerNote: note.trim() || undefined,
         idempotencyKey: idempotency.current,
       });
       idempotency.current = newIdempotencyKey('dep');
@@ -683,12 +729,15 @@ function DepositPanel({
       setReference('');
       setReceiptAccount('');
       setReceiptPhone('');
-      setNote('');
       setProof(null);
       await Promise.all([loadPending(), onChanged()]);
       void refreshWallet();
     } catch (cause) {
-      setError(cause instanceof ApiError ? cause.message : t('wallet.couldNotDeposit'));
+      if (cause instanceof ApiError && cause.code === 'NO_AGENT_FOR_METHOD') {
+        setError(t('wallet.noAgentForMethod', { method: item.name }));
+      } else {
+        setError(cause instanceof ApiError ? cause.message : t('wallet.couldNotDeposit'));
+      }
     } finally {
       setBusy(false);
     }
@@ -702,7 +751,6 @@ function DepositPanel({
     setReceiptPhone('');
     setProof(null);
     setAmount('');
-    setNote('');
     setError(null);
     setNotice(null);
     idempotency.current = newIdempotencyKey('dep');
@@ -721,109 +769,163 @@ function DepositPanel({
 
       {created && !showConfirmation ? (
         <Panel className="overflow-hidden">
-          <div className="flex items-start justify-between gap-2 border-b border-line/70 px-4 py-3">
-            <div>
-              <p className="text-[10px] font-semibold uppercase tracking-widest text-mint">
-                {t('wallet.stepPayVerify')}
+          <div className="flex items-center justify-between gap-2 border-b border-line/70 px-4 py-3">
+            <button
+              type="button"
+              onClick={startNewDeposit}
+              className="flex items-center gap-1 text-[11px] font-semibold text-muted transition hover:text-text"
+            >
+              <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+                <path d="M15 18l-6-6 6-6" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+              {t('wallet.back')}
+            </button>
+            <div className="text-right">
+              <p className="text-[9px] font-semibold uppercase tracking-widest text-muted">
+                {t('wallet.requestExpiresIn')}
               </p>
-              <h2 className="mt-0.5 font-display text-xl font-black tracking-[0.2em]">{created.code}</h2>
-              <p className="text-[11px] text-muted">
-                {formatCredits(created.amount)} ETB · {methodLabel(created.method)}
-                {created.providerCode ? ` · ${createdProvider?.name ?? created.providerCode}` : ''}
-              </p>
-            </div>
-            <div className="flex flex-col items-end gap-1">
-              <StatusPill status={created.status} />
-              <VerificationPill status={created.verificationStatus} />
+              <p className="font-display text-sm font-bold tabular-nums text-text">{countdown}</p>
             </div>
           </div>
 
           <div className="space-y-3 p-4">
-            {created.agent ? (
-              <div className="rounded-xl border border-mint/30 bg-mint/5 p-3">
+            <div className="rounded-xl border border-mint/30 bg-mint/5 p-4">
+              <div className="flex items-center justify-between gap-2">
                 <p className="text-[10px] font-semibold uppercase tracking-widest text-mint">
-                  {t('wallet.agentAccountTitle')}
+                  {t('wallet.sendMoneyToAccount')}
                 </p>
-                <p className="mt-1 text-sm font-semibold text-text">
-                  {created.agent.displayName ?? created.agent.agentCode}
-                  {created.agent.isOnline ? (
-                    <span className="ml-1 text-[10px] font-normal uppercase tracking-wide text-mint">
-                      · {t('wallet.online')}
+                <div className="flex items-center gap-1">
+                  <StatusPill status={created.status} />
+                  <VerificationPill status={created.verificationStatus} />
+                </div>
+              </div>
+
+              <dl className="mt-3 space-y-2">
+                <div className="flex items-center justify-between gap-3">
+                  <dt className="text-[10px] uppercase tracking-wide text-muted">{t('wallet.paymentMethod')}</dt>
+                  <dd className="truncate text-sm font-semibold text-text">
+                    {createdProvider?.name ??
+                      (account?.provider ? providerLabel(account.provider) : methodLabel(created.method))}
+                  </dd>
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <dt className="text-[10px] uppercase tracking-wide text-muted">{t('wallet.accountNumber')}</dt>
+                  <dd className="flex items-center gap-2">
+                    <span className="font-mono text-base font-bold tracking-wide text-gold">
+                      {account?.accountNumber ?? '—'}
                     </span>
-                  ) : null}
-                </p>
-                <p className="text-[10px] text-muted">{created.agent.agentCode}</p>
-
-                {account ? (
-                  <div className="mt-2 rounded-lg bg-ink/60 p-3">
-                    <p className="text-xs text-text">
-                      {account.accountName}
-                      {account.provider ? (
-                        <span className="text-muted"> · {providerLabel(account.provider)}</span>
+                    {account ? <CopyButton value={account.accountNumber} /> : null}
+                  </dd>
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <dt className="text-[10px] uppercase tracking-wide text-muted">{t('wallet.accountName')}</dt>
+                  <dd className="truncate text-sm font-semibold text-text">{account?.accountName ?? '—'}</dd>
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <dt className="text-[10px] uppercase tracking-wide text-muted">{t('wallet.amountDue')}</dt>
+                  <dd className="font-display text-lg font-black tabular-nums text-gold">
+                    {formatCredits(created.amount)} ETB
+                  </dd>
+                </div>
+                {created.agent ? (
+                  <div className="flex items-center justify-between gap-3">
+                    <dt className="text-[10px] uppercase tracking-wide text-muted">{t('wallet.receivingAgent')}</dt>
+                    <dd className="truncate text-sm font-semibold text-text">
+                      {created.agent.displayName ?? created.agent.agentCode}
+                      {created.agent.isOnline ? (
+                        <span className="ml-1 text-[10px] font-normal uppercase tracking-wide text-mint">
+                          · {t('wallet.online')}
+                        </span>
                       ) : null}
-                    </p>
-                    <div className="mt-1 flex items-center justify-between gap-2">
-                      <span className="font-mono text-base tracking-wide text-gold">
-                        {account.accountNumber}
-                      </span>
-                      <CopyButton value={account.accountNumber} />
-                    </div>
-                    {account.instructions ? (
-                      <p className="mt-1 text-[11px] text-muted">{account.instructions}</p>
-                    ) : null}
-                  </div>
-                ) : (
-                  <p className="mt-2 rounded-lg border border-warn/30 bg-warn/10 px-3 py-2 text-[11px] text-warn">
-                    {t('wallet.noAccountYet')}
-                  </p>
-                )}
-
-                <p className="mt-2 text-[11px] text-muted">
-                  {t('wallet.amountDue')}:{' '}
-                  <span className="font-semibold text-text">{formatCredits(created.amount)} ETB</span>
-                  {' · '}
-                  {t('wallet.depositCode')}:{' '}
-                  <span className="font-display font-bold tracking-[0.2em] text-text">{created.code}</span>
-                </p>
-
-                {created.agent.telegramUsername || created.agent.phone ? (
-                  <div className="mt-2 grid grid-cols-2 gap-2">
-                    {created.agent.telegramUsername ? (
-                      <a
-                        href={`https://t.me/${created.agent.telegramUsername.replace(/^@/, '')}`}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="flex h-9 items-center justify-center gap-1.5 rounded-xl border border-mint/40 bg-mint/10 text-[11px] font-semibold text-mint"
-                      >
-                        <TelegramIcon />
-                        {t('wallet.contactTelegram')}
-                      </a>
-                    ) : null}
-                    {created.agent.phone ? (
-                      <a
-                        href={`tel:${created.agent.phone.replace(/[^+\d]/g, '')}`}
-                        className="flex h-9 items-center justify-center gap-1.5 rounded-xl border border-line/70 bg-raised/50 text-[11px] font-semibold text-text"
-                      >
-                        <PhoneIcon />
-                        {t('wallet.callAgent')}
-                      </a>
-                    ) : null}
+                    </dd>
                   </div>
                 ) : null}
-              </div>
-            ) : null}
+                <div className="flex items-center justify-between gap-3">
+                  <dt className="text-[10px] uppercase tracking-wide text-muted">{t('wallet.depositCode')}</dt>
+                  <dd className="font-display text-sm font-bold tracking-[0.2em] text-text">{created.code}</dd>
+                </div>
+              </dl>
+
+              {account?.instructions ? (
+                <p className="mt-2 text-[11px] text-muted">{account.instructions}</p>
+              ) : null}
+              {!account ? (
+                <p className="mt-2 rounded-lg border border-warn/30 bg-warn/10 px-3 py-2 text-[11px] text-warn">
+                  {t('wallet.noAccountYet')}
+                </p>
+              ) : null}
+
+              {created.agent?.telegramUsername || created.agent?.phone ? (
+                <div className="mt-3 grid grid-cols-2 gap-2">
+                  {created.agent.telegramUsername ? (
+                    <a
+                      href={`https://t.me/${created.agent.telegramUsername.replace(/^@/, '')}`}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="flex h-9 items-center justify-center gap-1.5 rounded-xl border border-mint/40 bg-mint/10 text-[11px] font-semibold text-mint"
+                    >
+                      <TelegramIcon />
+                      {t('wallet.contactTelegram')}
+                    </a>
+                  ) : null}
+                  {created.agent.phone ? (
+                    <a
+                      href={`tel:${created.agent.phone.replace(/[^+\d]/g, '')}`}
+                      className="flex h-9 items-center justify-center gap-1.5 rounded-xl border border-line/70 bg-raised/50 text-[11px] font-semibold text-text"
+                    >
+                      <PhoneIcon />
+                      {t('wallet.callAgent')}
+                    </a>
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
+
+            <p className="text-[11px] text-muted">{t('wallet.sendExactAmount')}</p>
 
             {open && createdProvider ? (
               <div className="space-y-3">
                 <p className="text-[10px] font-semibold uppercase tracking-widest text-muted">
-                  {t('wallet.stepSubmit')}
+                  {t('wallet.uploadVerification')}
                 </p>
+                <label className="flex cursor-pointer flex-col items-center justify-center gap-1 rounded-xl border border-dashed border-line/80 bg-ink/40 px-4 py-6 text-center transition hover:border-mint/50">
+                  <input
+                    type="file"
+                    accept="image/png,image/jpeg,image/webp"
+                    className="sr-only"
+                    onChange={(event) => void attachProof(event.target.files?.[0] ?? null)}
+                  />
+                  <svg
+                    viewBox="0 0 24 24"
+                    className="h-6 w-6 text-mint"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.6"
+                    aria-hidden
+                  >
+                    <path d="M4 16l4-4 4 4 4-6 4 6" strokeLinecap="round" strokeLinejoin="round" />
+                    <rect x="3" y="5" width="18" height="14" rx="3" />
+                  </svg>
+                  <span className="text-xs font-semibold text-text">
+                    {proof ? t('wallet.proofSelected', { name: proof.name }) : t('wallet.uploadScreenshot')}
+                  </span>
+                  <span className="text-[10px] text-muted">
+                    {proof ? t('wallet.tapToReplace') : t('wallet.uploadScreenshotHint')}
+                  </span>
+                </label>
+
+                <div className="flex items-center gap-2">
+                  <span className="h-px flex-1 bg-line/70" />
+                  <span className="text-[9px] font-semibold uppercase tracking-widest text-muted">{t('wallet.or')}</span>
+                  <span className="h-px flex-1 bg-line/70" />
+                </div>
+
                 <Input
                   label={t('wallet.receiptReference')}
                   placeholder={createdProvider.refHint ?? 'FT…'}
                   value={reference}
                   onChange={(event) => setReference(event.target.value)}
-                  hint={createdProvider.refHint ?? undefined}
+                  hint={createdProvider.refHint ?? t('wallet.referenceOrLinkHint')}
                 />
                 {createdProvider.accountDigits || createdProvider.requiresPhone ? (
                   <div className="grid gap-3 sm:grid-cols-2">
@@ -846,22 +948,8 @@ function DepositPanel({
                     ) : null}
                   </div>
                 ) : null}
-                <label className="block">
-                  <span className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-muted">
-                    {t('wallet.proofLabel')}
-                  </span>
-                  <input
-                    type="file"
-                    accept="image/png,image/jpeg,image/webp"
-                    onChange={(event) => void attachProof(event.target.files?.[0] ?? null)}
-                    className="block w-full text-xs text-muted file:mr-3 file:rounded-lg file:border-0 file:bg-raised file:px-3 file:py-2 file:text-xs file:font-semibold file:text-text"
-                  />
-                  <span className="mt-1 block text-[10px] text-muted">
-                    {proof ? t('wallet.proofSelected', { name: proof.name }) : t('wallet.proofHint')}
-                  </span>
-                </label>
                 <Button className="w-full" size="lg" loading={verifying} onClick={() => void markPaid()}>
-                  {verifying ? t('wallet.verifying') : t('wallet.submitForVerification')}
+                  {verifying ? t('wallet.verifying') : t('wallet.verifyPayment')}
                 </Button>
               </div>
             ) : null}
@@ -884,19 +972,6 @@ function DepositPanel({
             ) : null}
             {notice ? <p className="text-[11px] text-mint">{notice}</p> : null}
             <p className="text-[11px] text-muted">{t('wallet.depositBalanceNote')}</p>
-
-            <div className="flex flex-wrap items-center justify-between gap-2 border-t border-line/60 pt-2">
-              <button
-                type="button"
-                onClick={startNewDeposit}
-                className="text-[11px] font-semibold text-muted underline-offset-2 hover:text-text hover:underline"
-              >
-                {t('wallet.chooseAnother')}
-              </button>
-              <span className="text-[10px] text-muted">
-                {t('wallet.depositExpires', { when: formatDateTime(created.expiresAt) })}
-              </span>
-            </div>
           </div>
         </Panel>
       ) : null}
@@ -915,7 +990,7 @@ function DepositPanel({
               value={amount}
               onChange={setAmount}
               placeholder={t('wallet.amountPlaceholder', { min: minLabel })}
-              hint={t('wallet.minHint', { amount: minLabel })}
+              hint={amountHint}
             />
             <QuickAmounts value={amount} onPick={setAmount} />
           </div>
@@ -928,46 +1003,52 @@ function DepositPanel({
               <p className="mt-1 text-[11px] text-warn">{t('wallet.noDepositMethods')}</p>
             ) : (
               <div className="mt-1.5 grid grid-cols-1 gap-2 sm:grid-cols-2">
-                {providers.map((item) => (
-                  <button
-                    key={item.code}
-                    type="button"
-                    disabled={busy}
-                    onClick={() => void begin(item)}
-                    className="flex items-center justify-between gap-2 rounded-xl border border-line/70 bg-raised/50 p-3 text-left transition hover:border-mint/50 hover:bg-mint/5 disabled:opacity-50"
-                  >
-                    <span className="min-w-0">
-                      <span className="block truncate text-sm font-semibold text-text">{item.name}</span>
-                      <span className="block text-[10px] text-muted">{methodLabel(item.method)}</span>
-                      {item.minAmount || item.maxAmount ? (
+                {providers.map((item) => {
+                  const selected = item.code === selectedCode;
+                  const { floor, cap } = railRange(item);
+                  return (
+                    <button
+                      key={item.code}
+                      type="button"
+                      aria-pressed={selected}
+                      disabled={busy}
+                      onClick={() => setSelectedCode(item.code)}
+                      className={cn(
+                        'flex items-center justify-between gap-2 rounded-xl border p-3 text-left transition disabled:opacity-50',
+                        selected
+                          ? 'border-mint/60 bg-mint/10'
+                          : 'border-line/70 bg-raised/50 hover:border-mint/50 hover:bg-mint/5',
+                      )}
+                    >
+                      <span className="min-w-0">
+                        <span className="block truncate text-sm font-semibold text-text">{item.name}</span>
+                        <span className="block text-[10px] text-muted">{methodLabel(item.method)}</span>
                         <span className="mt-0.5 block text-[10px] text-muted">
-                          {item.minAmount ? formatStake(item.minAmount) : '0'} –{' '}
-                          {item.maxAmount ? formatStake(item.maxAmount) : '∞'}
+                          {formatStake(floor.toString())} – {cap === null ? '∞' : formatStake(cap.toString())} ETB
                         </span>
-                      ) : null}
-                    </span>
-                    {busy ? (
-                      <Spinner className="h-4 w-4 text-mint" />
-                    ) : (
-                      <svg viewBox="0 0 24 24" className="h-4 w-4 shrink-0 text-mint" fill="currentColor" aria-hidden>
-                        <path d="M9 5l7 7-7 7z" />
-                      </svg>
-                    )}
-                  </button>
-                ))}
+                      </span>
+                      <span
+                        className={cn(
+                          'flex h-5 w-5 shrink-0 items-center justify-center rounded-full border',
+                          selected ? 'border-mint bg-mint text-ink' : 'border-line/80 text-transparent',
+                        )}
+                        aria-hidden
+                      >
+                        <svg viewBox="0 0 24 24" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="3">
+                          <path d="M20 6L9 17l-5-5" strokeLinecap="round" strokeLinejoin="round" />
+                        </svg>
+                      </span>
+                    </button>
+                  );
+                })}
               </div>
             )}
             <p className="mt-1.5 text-[10px] text-muted">{t('wallet.tapMethodHint')}</p>
           </div>
 
-          <div className="mt-3">
-            <Input
-              label={t('wallet.noteOptional')}
-              placeholder="Cash at Main Street kiosk"
-              value={note}
-              onChange={(event) => setNote(event.target.value)}
-            />
-          </div>
+          <Button className="mt-3 w-full" size="lg" loading={busy} onClick={() => void begin()}>
+            {t('wallet.depositButton')}
+          </Button>
           {error ? (
             <div className="mt-3">
               <ErrorNote>{error}</ErrorNote>
