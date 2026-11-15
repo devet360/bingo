@@ -132,7 +132,7 @@ export function ProvidersTab() {
                   {provider.minAmount || provider.maxAmount
                     ? ` · ${formatStake(provider.minAmount ?? undefined)}–${
                         provider.maxAmount ? formatStake(provider.maxAmount) : '∞'
-                      } cr`
+                      } ETB`
                     : ''}
                 </p>
                 {provider.refHint ? (
@@ -277,13 +277,13 @@ function SyncSheet({
         </div>
         <div className="grid grid-cols-2 gap-3">
           <Input
-            label="Min credits"
+            label="Min ETB"
             inputMode="decimal"
             value={draft.minAmount}
             onChange={(event) => patch({ minAmount: event.target.value })}
           />
           <Input
-            label="Max credits"
+            label="Max ETB"
             inputMode="decimal"
             value={draft.maxAmount}
             onChange={(event) => patch({ maxAmount: event.target.value })}

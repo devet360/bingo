@@ -85,10 +85,15 @@ export function claimablePatterns(card: Card, round: Round): WinPattern[] {
   return completed.filter((pattern) => round.allowedPatterns.includes(pattern));
 }
 
-/** The countdown that matters for the current phase, if any. */
+/**
+ * The countdown that matters for the current phase, if any. While balls are
+ * drawing there is deliberately no countdown: the server draws on
+ * `lastDrawAt + interval`, and a client-side clock drifts away from the live
+ * draw, so the room shows the ball itself instead.
+ */
 export function phaseDeadline(
   round: Round | null,
-  options: { drawIntervalMs?: number; lockWindowSecs?: number } = {},
+  options: { lockWindowSecs?: number } = {},
 ): { label: string; at: string } | null {
   if (!round) return null;
   switch (round.status) {
@@ -106,14 +111,7 @@ export function phaseDeadline(
     case 'CLAIM_VERIFICATION':
       return round.claimsCloseAt ? { label: 'Claims close', at: round.claimsCloseAt } : null;
     case 'PLAYING':
-      return round.lastDrawAt
-        ? {
-            label: 'Next ball',
-            at: new Date(
-              new Date(round.lastDrawAt).getTime() + (options.drawIntervalMs ?? 3_500),
-            ).toISOString(),
-          }
-        : null;
+      return null;
     default:
       return null;
   }

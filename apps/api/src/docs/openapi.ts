@@ -2252,6 +2252,37 @@ export const openApiDocument = {
         responses: { '201': ok({ type: 'object' }) },
       },
     },
+    '/admin/agents/{agentId}/payment-accounts': {
+      post: {
+        tags: ['Admin'],
+        summary: 'Add a receiving account players pay into',
+        parameters: [idParam('agentId')],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                required: ['method', 'accountName', 'accountNumber'],
+                properties: {
+                  method: {
+                    type: 'string',
+                    enum: ['BANK_TRANSFER', 'MOBILE_MONEY', 'CARD', 'CRYPTO', 'CASH'],
+                  },
+                  provider: { type: 'string' },
+                  accountName: { type: 'string' },
+                  accountNumber: { type: 'string' },
+                  instructions: { type: 'string' },
+                  minAmount: { type: 'integer', minimum: 1, description: 'Minor units' },
+                  maxAmount: { type: 'integer', minimum: 1, description: 'Minor units' },
+                },
+              },
+            },
+          },
+        },
+        responses: { '201': ok({ type: 'object' }) },
+      },
+    },
     '/admin/deposit-providers': {
       get: {
         tags: ['Admin'],

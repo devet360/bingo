@@ -484,7 +484,7 @@ export default function AgentPage() {
           </div>
         </div>
         <p className="mt-2 text-[11px] text-muted">
-          Credit moves credits from your float to the player. Redeem pays an escrowed withdrawal and
+          Credit moves ETB from your float to the player. Redeem pays an escrowed withdrawal and
           books your commission.
         </p>
       </Panel>
@@ -519,7 +519,7 @@ export default function AgentPage() {
                       <div>
                         <p className="font-display text-xl font-black tracking-[0.2em]">{deposit.code}</p>
                         <p className="mt-0.5 text-[11px] text-muted">
-                          {formatCredits(deposit.amount)} cr ·{' '}
+                          {formatCredits(deposit.amount)} ETB ·{' '}
                           {PAYMENT_METHODS.find((item) => item.value === deposit.method)?.label} ·{' '}
                           {deposit.createdAt ? formatDateTime(deposit.createdAt) : ''}
                         </p>
@@ -629,8 +629,8 @@ export default function AgentPage() {
                           {withdrawal.payoutCode}
                         </p>
                         <p className="mt-0.5 text-[11px] text-muted">
-                          {formatCredits(withdrawal.amount)} cr · net{' '}
-                          {formatCredits(withdrawal.netAmount)} ·{' '}
+                          {formatCredits(withdrawal.amount)} ETB · net{' '}
+                          {formatCredits(withdrawal.netAmount)} ETB ·{' '}
                           {PAYMENT_METHODS.find((item) => item.value === withdrawal.method)?.label}
                         </p>
                         {withdrawal.playerNote ? (
@@ -734,7 +734,7 @@ export default function AgentPage() {
                   <li key={request.id} className="flex items-center justify-between gap-2 py-2">
                     <div>
                       <p className="text-xs font-semibold capitalize">
-                        {request.direction.toLowerCase()} · {formatCredits(request.amount)} cr
+                        {request.direction.toLowerCase()} · {formatCredits(request.amount)} ETB
                       </p>
                       <p className="text-[10px] text-muted">{formatDateTime(request.createdAt)}</p>
                     </div>
@@ -756,7 +756,7 @@ export default function AgentPage() {
           <div className="space-y-3">
             <p className="text-xs text-muted">
               Code <span className="font-bold tracking-widest text-text">{creditTarget.code}</span> ·
-              requested {formatCredits(creditTarget.amount)} credits
+              requested {formatCredits(creditTarget.amount)} ETB
             </p>
             {creditTarget.verificationStatus !== 'NOT_REQUIRED' ? (
               <p className="text-[11px] text-muted">
@@ -765,7 +765,7 @@ export default function AgentPage() {
               </p>
             ) : null}
             <Input
-              label="Credited amount (credits)"
+              label="Credited amount (ETB)"
               inputMode="decimal"
               value={creditAmount}
               onChange={(event) => setCreditAmount(event.target.value)}
@@ -795,7 +795,7 @@ export default function AgentPage() {
                 </span>
               </p>
               <p className="mt-1 text-muted">
-                Give the player {formatCredits(redeemTarget.netAmount)} credits in cash before
+                Give the player {formatCredits(redeemTarget.netAmount)} ETB in cash before
                 confirming. The payout is held until you attach the payment proof.
               </p>
             </div>
@@ -823,8 +823,8 @@ export default function AgentPage() {
                 </span>
               </p>
               <p className="mt-1 text-muted">
-                Paid {formatCredits(proofTarget.amount)} cr · player receives{' '}
-                {formatCredits(proofTarget.netAmount)} cr. Add the transfer reference, account
+                Paid {formatCredits(proofTarget.amount)} ETB · player receives{' '}
+                {formatCredits(proofTarget.netAmount)} ETB. Add the transfer reference, account
                 details and a screenshot so staff can verify.
               </p>
             </div>
@@ -836,7 +836,7 @@ export default function AgentPage() {
             />
             <div className="grid grid-cols-2 gap-3">
               <Input
-                label="Amount paid (credits)"
+                label="Amount paid (ETB)"
                 inputMode="decimal"
                 value={proofAmount}
                 onChange={(event) => setProofAmount(event.target.value)}

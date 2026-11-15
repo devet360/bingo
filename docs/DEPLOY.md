@@ -303,7 +303,7 @@ Common failures:
 | Rounds never start | `BINGO_ENGINE_ENABLED` false, or API replicas scaled beyond one. |
 | CORS error in browser | Add the page origin to `CORS_ORIGINS` and restart the API. |
 | Bot exits with `409` / `TelegramError: Conflict` | More than one `bot` process is polling; scale `bot=1`. |
-| Support bot exits immediately | `SUPPORT_BOT_TOKEN` is missing or rejected; set it with `dokku config:set bingo-api SUPPORT_BOT_TOKEN=...`, then restart the process. |
+| Support bot exits immediately | `SUPPORT_BOT_TOKEN` is missing or rejected, or it equals `BOT_TOKEN` (both bots would long-poll the same token); set a separate BotFather token with `dokku config:set bingo-api SUPPORT_BOT_TOKEN=...`, then restart the process. |
 | Player sign-in shows no bot link | `TELEGRAM_BOT_USERNAME` missing on `bingo-web`; set it and restart. |
 | Buy/withdraw says phone required | Player has not shared contact with the bot yet; send them `https://t.me/<bot>?start=verify`. |
 | Staff sees the player view in Telegram | The staff account has no Telegram id; link it from **Admin → Staff** (or send the one-time bot link). |

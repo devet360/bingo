@@ -202,7 +202,7 @@ export function CampaignPopup() {
 
   return (
     <div className="fixed inset-0 z-[60] flex items-end justify-center bg-black/70 p-0 sm:items-center sm:p-6">
-      <div className="w-full max-w-md overflow-hidden rounded-t-3xl border border-line bg-panel shadow-2xl sm:rounded-3xl">
+      <div className="max-h-[calc(100dvh-1rem)] w-full max-w-md overflow-y-auto overscroll-contain rounded-t-3xl border border-line bg-panel shadow-2xl sm:max-h-[calc(100dvh-3rem)] sm:rounded-3xl">
         {popup.imageUrl ? (
           // eslint-disable-next-line @next/next/no-img-element
           <img src={popup.imageUrl} alt="" className="h-40 w-full object-cover" />

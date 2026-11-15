@@ -21,10 +21,16 @@ export interface TelegramWebApp {
   viewportStableHeight?: number;
   ready?: () => void;
   expand?: () => void;
+  close?: () => void;
   disableVerticalSwipes?: () => void;
   setHeaderColor?: (color: string) => void;
   setBackgroundColor?: (color: string) => void;
   isExpanded?: boolean;
+  isFullscreen?: boolean;
+  requestFullscreen?: () => void;
+  exitFullscreen?: () => void;
+  onEvent?: (event: string, handler: () => void) => void;
+  offEvent?: (event: string, handler: () => void) => void;
   platform?: string;
   version?: string;
   openTelegramLink?: (url: string) => void;
@@ -90,6 +96,66 @@ export function initTelegram(): void {
   } catch {
     // Older Telegram clients may not implement every method.
   }
+}
+
+/**
+ * Bot API 8.0 fullscreen hides the Telegram chrome, which gives the board the
+ * whole screen. Older clients and plain browsers still get an expanded view.
+ */
+export function getFullscreenState(): boolean {
+  const app = getTelegramWebApp();
+  if (app?.isFullscreen) return true;
+  if (typeof document === 'undefined') return false;
+  return Boolean(document.fullscreenElement);
+}
+
+export function toggleFullscreen(): boolean {
+  const app = getTelegramWebApp();
+  try {
+    if (typeof app?.requestFullscreen === 'function') {
+      if (app.isFullscreen) app.exitFullscreen?.();
+      else app.requestFullscreen();
+      return true;
+    }
+    if (typeof document === 'undefined') return false;
+    if (document.fullscreenElement) {
+      void document.exitFullscreen?.();
+    } else {
+      void document.documentElement.requestFullscreen?.();
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function subscribeFullscreen(handler: () => void): () => void {
+  const app = getTelegramWebApp();
+  try {
+    app?.onEvent?.('fullscreenChanged', handler);
+  } catch {
+    // Older clients do not emit the event.
+  }
+  if (typeof document !== 'undefined') {
+    document.addEventListener('fullscreenchange', handler);
+  }
+  return () => {
+    try {
+      app?.offEvent?.('fullscreenChanged', handler);
+    } catch {
+      // Nothing to unsubscribe from.
+    }
+    if (typeof document !== 'undefined') {
+      document.removeEventListener('fullscreenchange', handler);
+    }
+  };
+}
+
+export function supportsFullscreen(): boolean {
+  const app = getTelegramWebApp();
+  if (typeof app?.requestFullscreen === 'function') return true;
+  if (typeof document === 'undefined') return false;
+  return typeof document.documentElement.requestFullscreen === 'function';
 }
 
 export function haptic(kind: 'tap' | 'success' | 'error' | 'warning'): void {

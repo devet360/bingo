@@ -143,7 +143,7 @@ function ProgrammeSettings() {
           hint="Share of rake paid to the referrer. 2.5 = 2.5%."
         />
         <Input
-          label="Minimum rake to pay (credits)"
+          label="Minimum rake to pay (ETB)"
           inputMode="decimal"
           value={minRake}
           onChange={(event) => setMinRake(event.target.value)}
@@ -319,7 +319,7 @@ function PromoCodes() {
                     ? `${(promo.percentBps / 100).toFixed(0)}% of deposits${
                         promo.maxBonus ? ` · cap ${formatCredits(promo.maxBonus)}` : ''
                       }`
-                    : `${formatCredits(promo.fixedAmount ?? '0')} credits`}
+                    : `${formatCredits(promo.fixedAmount ?? '0')} ETB`}
                   {promo.minDeposit ? ` · min deposit ${formatStake(promo.minDeposit)}` : ''} ·{' '}
                   {promo.redemptionCount}/{promo.maxRedemptions ?? '∞'} redeemed · expires in{' '}
                   {promo.expiresInDays}d
@@ -486,11 +486,11 @@ function PromoSheet({
             value={draft.mode}
             onChange={(event) => patch({ mode: event.target.value as 'FIXED' | 'PERCENT' })}
           >
-            <option value="FIXED">Fixed credits</option>
+            <option value="FIXED">Fixed amount</option>
             <option value="PERCENT">% of deposits</option>
           </Select>
           <Input
-            label={draft.mode === 'PERCENT' ? 'Percentage' : 'Amount (credits)'}
+            label={draft.mode === 'PERCENT' ? 'Percentage' : 'Amount (ETB)'}
             inputMode="decimal"
             value={draft.value}
             onChange={(event) => patch({ value: event.target.value })}
@@ -498,13 +498,13 @@ function PromoSheet({
           {draft.mode === 'PERCENT' ? (
             <>
               <Input
-                label="Minimum deposit (credits)"
+                label="Minimum deposit (ETB)"
                 inputMode="decimal"
                 value={draft.minDeposit}
                 onChange={(event) => patch({ minDeposit: event.target.value })}
               />
               <Input
-                label="Maximum bonus (credits)"
+                label="Maximum bonus (ETB)"
                 inputMode="decimal"
                 value={draft.maxBonus}
                 onChange={(event) => patch({ maxBonus: event.target.value })}
@@ -625,7 +625,7 @@ function GrantedBonuses() {
                     <Pill tone="neutral">{bonus.kind === 'PROMO_CODE' ? 'code' : 'grant'}</Pill>
                   </div>
                   <p className="text-[11px] text-muted">
-                    {bonus.playerPhone ?? '—'} · {formatCredits(bonus.amount)} cr · wagered{' '}
+                    {bonus.playerPhone ?? '—'} · {formatCredits(bonus.amount)} ETB · wagered{' '}
                     {formatStake(bonus.wagered)}/{formatStake(bonus.target)} ·{' '}
                     {formatDateTime(bonus.createdAt)}
                   </p>
@@ -730,7 +730,7 @@ function GrantSheet({
           placeholder="00000000-0000-0000-0000-000000000000"
         />
         <Input
-          label="Amount (credits)"
+          label="Amount (ETB)"
           inputMode="decimal"
           value={amount}
           onChange={(event) => setAmount(event.target.value)}

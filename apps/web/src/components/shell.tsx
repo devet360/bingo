@@ -69,15 +69,17 @@ const NAV = [
   },
 ] as const;
 
-function Logo({ href }: { href: string }) {
+function Logo({ href, compact = false }: { href: string; compact?: boolean }) {
   return (
     <Link href={href} className="flex items-center gap-2">
-      <span className="flex h-9 w-9 items-center justify-center rounded-full bg-gradient-to-br from-gold via-[#f7d98a] to-gold text-[10px] font-black tracking-tight text-[#1a1204] shadow-glow ring-2 ring-mint/35">
+      <span className="flex h-8 w-8 items-center justify-center rounded-full bg-gradient-to-br from-gold via-[#f7d98a] to-gold text-[10px] font-black tracking-tight text-[#1a1204] shadow-glow ring-2 ring-mint/35">
         251
       </span>
-      <span className="font-display text-lg font-bold tracking-tight">
-        Bingo<span className="text-gold"> 251</span>
-      </span>
+      {compact ? null : (
+        <span className="font-display text-lg font-bold tracking-tight">
+          Bingo<span className="text-gold"> 251</span>
+        </span>
+      )}
     </Link>
   );
 }
@@ -254,19 +256,25 @@ export function Shell({ children }: { children: ReactNode }) {
     return false;
   });
 
-  const wide = pathname.startsWith('/admin') || pathname.startsWith('/support');
+  // Game rooms trade the app chrome for board space; Telegram already draws
+  // its own title bar, so the in-app header shrinks there too.
+  const inRoom = pathname.startsWith('/room/');
+  const wide = pathname.startsWith('/admin') || pathname.startsWith('/support') || inRoom;
+  const chromeHeight = isTelegram ? 'h-11' : 'h-14';
   const homeHref = isAdmin ? '/admin' : isSupport ? '/support' : agent ? '/agent' : '/';
 
   return (
-    <div className="min-h-dvh pb-24">
+    <div className={cn('min-h-dvh', inRoom ? 'pb-2' : 'pb-20')}>
+      {inRoom ? null : (
       <header className="sticky top-0 z-30 border-b border-line/60 bg-ink/85 backdrop-blur">
         <div
           className={cn(
-            'mx-auto flex h-14 w-full items-center justify-between gap-3 px-4',
+            'mx-auto flex w-full items-center justify-between gap-3 px-4',
+            chromeHeight,
             wide ? 'max-w-6xl' : 'max-w-3xl',
           )}
         >
-          <Logo href={homeHref} />
+          <Logo href={homeHref} compact={isTelegram} />
           <div className="flex items-center gap-2">
             <ThemeToggle />
             <button
@@ -282,10 +290,10 @@ export function Shell({ children }: { children: ReactNode }) {
                 href="/wallet"
                 className="flex items-center gap-1.5 rounded-full border border-gold/25 bg-gold/10 px-3 py-1.5 text-xs font-semibold text-gold"
               >
+                {formatStake(wallet.available)}
                 <span className="text-[10px] uppercase tracking-wide opacity-70">
                   {t('common.credits')}
                 </span>
-                {formatStake(wallet.available)}
                 {wallet.bonus !== '0' ? (
                   <span className="rounded-full bg-mint/15 px-1.5 text-[10px] text-mint">
                     +{formatStake(wallet.bonus)}
@@ -373,10 +381,12 @@ export function Shell({ children }: { children: ReactNode }) {
           </div>
         </div>
       </header>
+      )}
 
       <main
         className={cn(
-          'mx-auto w-full px-4 pt-4',
+          'mx-auto w-full',
+          inRoom ? 'px-2 pt-2 pb-[env(safe-area-inset-bottom)]' : 'px-3 pt-3 sm:px-4',
           wide ? 'max-w-6xl' : 'max-w-3xl',
         )}
       >
@@ -387,7 +397,7 @@ export function Shell({ children }: { children: ReactNode }) {
 
       <CampaignPopup />
 
-      {nav.length > 0 ? (
+      {nav.length > 0 && !inRoom ? (
         <nav className="fixed inset-x-0 bottom-0 z-30 border-t border-line/70 bg-ink/95 pb-[env(safe-area-inset-bottom)] backdrop-blur">
           <div className="mx-auto flex w-full max-w-3xl items-stretch">
             {nav.map((item) => {
@@ -402,11 +412,11 @@ export function Shell({ children }: { children: ReactNode }) {
                   key={item.href}
                   href={item.href}
                   className={cn(
-                    'flex flex-1 flex-col items-center gap-1 py-2.5 text-[10px] font-semibold uppercase tracking-wide transition',
+                    'flex flex-1 flex-col items-center gap-0.5 py-1.5 text-[9px] font-semibold uppercase tracking-wide transition',
                     active ? 'text-mint' : 'text-muted hover:text-text',
                   )}
                 >
-                  <svg viewBox="0 0 24 24" className="h-5 w-5" fill="currentColor" aria-hidden>
+                  <svg viewBox="0 0 24 24" className="h-[18px] w-[18px]" fill="currentColor" aria-hidden>
                     {item.icon}
                   </svg>
                   {t(item.labelKey)}

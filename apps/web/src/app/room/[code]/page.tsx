@@ -2,13 +2,19 @@
 
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { ApiError, buyCards, newIdempotencyKey, submitClaim } from '@/lib/api';
 import { ballTone, claimablePatterns, phaseDeadline } from '@/lib/bingo';
 import { formatCredits, formatCountdown, formatStake } from '@/lib/format';
 import { useI18n } from '@/lib/i18n';
 import { useNow } from '@/lib/useNow';
 import { useRoomLive } from '@/lib/useRoom';
+import {
+  getFullscreenState,
+  subscribeFullscreen,
+  supportsFullscreen,
+  toggleFullscreen,
+} from '@/lib/telegram';
 import { useSession } from '@/components/session';
 import { CardBoard } from '@/components/game/board';
 import { Button, EmptyState, ErrorNote, Panel, Pill, Spinner, cn } from '@/components/ui';
@@ -313,14 +319,16 @@ export default function RoomPage() {
   const [claimNotice, setClaimNotice] = useState<{ tone: 'mint' | 'danger'; text: string } | null>(
     null,
   );
+  const [fullscreen, setFullscreen] = useState(false);
+
+  useEffect(() => {
+    setFullscreen(getFullscreenState());
+    return subscribeFullscreen(() => setFullscreen(getFullscreenState()));
+  }, []);
 
   const deadline = useMemo(
-    () =>
-      phaseDeadline(round, {
-        drawIntervalMs: room?.timings.drawIntervalMs,
-        lockWindowSecs: room?.timings.lockWindowSecs,
-      }),
-    [round, room?.timings.drawIntervalMs, room?.timings.lockWindowSecs],
+    () => phaseDeadline(round, { lockWindowSecs: room?.timings.lockWindowSecs }),
+    [round, room?.timings.lockWindowSecs],
   );
 
   const claim = async (card: Card, pattern: WinPattern) => {
@@ -381,6 +389,23 @@ export default function RoomPage() {
           {t('room.lobby')}
         </Link>
         <div className="flex items-center gap-2">
+          {supportsFullscreen() ? (
+            <button
+              type="button"
+              onClick={() => setFullscreen(toggleFullscreen())}
+              className="flex h-7 items-center gap-1 rounded-full border border-line px-2.5 text-[10px] font-semibold uppercase tracking-wide text-muted transition hover:text-text"
+              aria-label={fullscreen ? t('room.exitFullscreen') : t('room.fullscreen')}
+            >
+              <svg viewBox="0 0 24 24" className="h-3.5 w-3.5" fill="currentColor" aria-hidden>
+                {fullscreen ? (
+                  <path d="M9 3v6H3V7h4V3zm6 0h2v4h4v2h-6zM3 15h2v4h4v2H3zm16 0h2v6h-6v-2h4z" />
+                ) : (
+                  <path d="M4 4h6v2H6v4H4zm10 0h6v6h-2V6h-4zM4 14h2v4h4v2H4zm14 0h2v6h-6v-2h4z" />
+                )}
+              </svg>
+              {fullscreen ? t('room.exitFullscreen') : t('room.fullscreen')}
+            </button>
+          ) : null}
           <span
             className={cn(
               'h-1.5 w-1.5 rounded-full',
@@ -433,9 +458,7 @@ export default function RoomPage() {
                         ? 'phase.firstBall'
                         : round.status === 'CLAIM_VERIFICATION'
                           ? 'phase.claimsClose'
-                          : round.status === 'PLAYING'
-                            ? 'phase.nextBall'
-                            : 'phase.salesClose',
+                          : 'phase.salesClose',
                     )}
                   </span>
                 ) : null}
@@ -546,7 +569,8 @@ export default function RoomPage() {
               {t('room.yourCards')}
             </h2>
             <span className="text-[11px] text-muted">
-              {t('room.balance')} {wallet ? formatCredits(wallet.available) : '—'}
+              {t('room.balance')} {wallet ? formatCredits(wallet.available) : '—'}{' '}
+              {t('common.credits')}
             </span>
           </div>
           <div className="grid gap-3 sm:grid-cols-2">

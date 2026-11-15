@@ -238,7 +238,7 @@ export function AgentSettings() {
             <option value="ON">Automatic up to a threshold</option>
           </Select>
           <Input
-            label="Threshold (credits)"
+            label="Threshold (ETB)"
             inputMode="decimal"
             placeholder="50"
             disabled={!autoEnabled}
@@ -246,7 +246,7 @@ export function AgentSettings() {
             onChange={(event) => setThreshold(event.target.value)}
             hint={
               currentThreshold
-                ? `Currently ${minorToCreditsInput(currentThreshold)} credits`
+                ? `Currently ${minorToCreditsInput(currentThreshold)} ETB`
                 : 'Deposits at or below this amount verify automatically.'
             }
           />
@@ -306,7 +306,7 @@ export function AgentSettings() {
                       {account.minAmount || account.maxAmount
                         ? ` · ${account.minAmount ? minorToCreditsInput(account.minAmount) : '0'}–${
                             account.maxAmount ? minorToCreditsInput(account.maxAmount) : '∞'
-                          } cr`
+                          } ETB`
                         : ''}
                     </p>
                     {account.instructions ? (
@@ -381,13 +381,13 @@ export function AgentSettings() {
             />
             <div className="grid grid-cols-2 gap-3">
               <Input
-                label="Min credits (optional)"
+                label="Min ETB (optional)"
                 inputMode="decimal"
                 value={draft.minAmount}
                 onChange={(event) => setDraft({ ...draft, minAmount: event.target.value })}
               />
               <Input
-                label="Max credits (optional)"
+                label="Max ETB (optional)"
                 inputMode="decimal"
                 value={draft.maxAmount}
                 onChange={(event) => setDraft({ ...draft, maxAmount: event.target.value })}

@@ -736,15 +736,35 @@ export function fetchStaffMembers(
   return apiRequest(`/admin/staff${queryString(filter)}`, { fullEnvelope: true });
 }
 
+export interface AgentAccountInput {
+  method: PaymentMethod;
+  provider?: string;
+  accountName: string;
+  accountNumber: string;
+  instructions?: string;
+}
+
 export function createStaffMember(input: {
   role: StaffRole;
   displayName: string;
   email?: string;
   phone?: string;
   password?: string;
-  agent?: { region: string; city?: string; district?: string };
+  agent?: {
+    region: string;
+    city?: string;
+    district?: string;
+    account?: AgentAccountInput;
+  };
 }): Promise<CreatedStaff> {
   return apiRequest('/admin/staff', { method: 'POST', body: input });
+}
+
+export function createAgentPaymentAccount(
+  agentId: string,
+  input: AgentAccountInput,
+): Promise<{ id: string }> {
+  return apiRequest(`/admin/agents/${agentId}/payment-accounts`, { method: 'POST', body: input });
 }
 
 export function setStaffMemberStatus(userId: string, status: 'ACTIVE' | 'SUSPENDED'): Promise<{ user: User }> {

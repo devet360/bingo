@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState, type ButtonHTMLAttributes, type InputHTMLAttributes, type ReactNode } from 'react';
+import { createPortal } from 'react-dom';
 
 export function cn(...values: Array<string | false | null | undefined>): string {
   return values.filter(Boolean).join(' ');
@@ -283,27 +284,51 @@ export function Sheet({
   onClose: () => void;
   children: ReactNode;
 }) {
+  // Portalled to <body>: ancestors such as Panel use backdrop-blur, which makes
+  // them the containing block for fixed children, so an inline sheet would be
+  // clipped under the app header and tab bar.
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => setMounted(true), []);
+
   useEffect(() => {
     if (!open) return;
     const onKey = (event: KeyboardEvent) => {
       if (event.key === 'Escape') onClose();
     };
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
     window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener('keydown', onKey);
+    };
   }, [open, onClose]);
 
-  if (!open) return null;
-  return (
-    <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/70 p-0 sm:items-center sm:p-6">
-      <div className="w-full max-w-lg rounded-t-3xl border border-line bg-panel p-5 shadow-2xl sm:rounded-3xl">
-        <div className="mb-3 flex items-center justify-between gap-4">
+  if (!open || !mounted) return null;
+  return createPortal(
+    <div
+      className="fixed inset-0 z-[100] flex items-end justify-center bg-black/70 backdrop-blur-sm sm:items-center sm:p-6"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label={title}
+        className="flex max-h-[calc(100dvh-0.5rem)] w-full max-w-lg flex-col overflow-hidden rounded-t-3xl border border-line bg-panel shadow-2xl sm:max-h-[calc(100dvh-3rem)] sm:rounded-3xl"
+      >
+        <div className="flex shrink-0 items-center justify-between gap-4 border-b border-line/70 px-5 py-3">
           <h2 className="font-display text-lg font-semibold">{title}</h2>
           <Button variant="ghost" size="sm" onClick={onClose} aria-label="Close">
             ✕
           </Button>
         </div>
-        {children}
+        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-5 py-4 pb-[max(1rem,env(safe-area-inset-bottom))]">
+          {children}
+        </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }

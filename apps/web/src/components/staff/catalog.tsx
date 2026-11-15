@@ -286,7 +286,7 @@ function ProviderSettingsPanel() {
     try {
       const saved = await updateProviderSettings(minor);
       setDraft(minorToCreditsInput(saved.maxWin));
-      setNotice(`Platform win cap set to ${formatCredits(saved.maxWin)} credits.`);
+      setNotice(`Platform win cap set to ${formatCredits(saved.maxWin)} ETB.`);
     } catch (caught) {
       setError(caught instanceof ApiError ? caught.message : 'Could not save the win cap.');
     } finally {
@@ -304,12 +304,12 @@ function ProviderSettingsPanel() {
       <div className="mt-3 flex flex-wrap items-end gap-2">
         <div className="w-44">
           <Input
-            label="Platform max win (credits)"
+            label="Platform max win (ETB)"
             inputMode="decimal"
             value={draft}
             onChange={(event) => setDraft(event.target.value)}
             hint={
-              defaultMaxWin ? `Default ${formatCredits(defaultMaxWin)} credits` : undefined
+              defaultMaxWin ? `Default ${formatCredits(defaultMaxWin)} ETB` : undefined
             }
           />
         </div>
@@ -445,7 +445,7 @@ function ProviderSheet({
             hint="Callbacks in another currency are rejected."
           />
           <Input
-            label="Max win (credits)"
+            label="Max win (ETB)"
             inputMode="decimal"
             value={draft.maxWin}
             onChange={(event) => patch({ maxWin: event.target.value })}
@@ -625,19 +625,19 @@ function GameSheet({
         />
         <div className="grid grid-cols-2 gap-3">
           <Input
-            label="Min stake (credits)"
+            label="Min stake (ETB)"
             inputMode="decimal"
             value={draft.minStake}
             onChange={(event) => patch({ minStake: event.target.value })}
           />
           <Input
-            label="Max stake (credits)"
+            label="Max stake (ETB)"
             inputMode="decimal"
             value={draft.maxStake}
             onChange={(event) => patch({ maxStake: event.target.value })}
           />
           <Input
-            label="Max win (credits)"
+            label="Max win (ETB)"
             inputMode="decimal"
             value={draft.maxWin}
             onChange={(event) => patch({ maxWin: event.target.value })}

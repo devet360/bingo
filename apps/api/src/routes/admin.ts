@@ -10,7 +10,12 @@ import { PHONE_RE } from '../lib/phone';
 import { serializeAgent, serializeUser } from '../lib/serializers';
 import { authenticate, requireRole } from '../middleware/auth';
 import { moneyLimiter } from '../middleware/rateLimit';
-import { createAgent, topUpAgentFloat, updateAutoDepositSettings } from '../services/agents';
+import {
+  createAgent,
+  createPaymentAccount,
+  topUpAgentFloat,
+  updateAutoDepositSettings,
+} from '../services/agents';
 import { writeAudit } from '../services/audit';
 import {
   listAllProviders,
@@ -58,6 +63,16 @@ import {
   upsertProvider,
 } from '../services/gameProviders';
 
+const AgentAccountSchema = z.object({
+  method: z.nativeEnum(PaymentMethod),
+  provider: z.string().trim().max(64).optional(),
+  accountName: z.string().trim().min(1).max(128),
+  accountNumber: z.string().trim().min(1).max(64),
+  instructions: z.string().trim().max(500).optional(),
+  minAmount: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
+  maxAmount: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
+});
+
 const CreateAgentSchema = z
   .object({
     userId: z.string().uuid().optional(),
@@ -92,6 +107,8 @@ const CreateStaffSchema = z
         region: z.string().trim().min(1).max(64),
         city: z.string().max(64).optional(),
         district: z.string().max(64).optional(),
+        // Optional receiving account so a new agent can take deposits at once.
+        account: AgentAccountSchema.optional(),
       })
       .optional(),
   })
@@ -354,6 +371,19 @@ adminRouter.post(
         district: body.agent.district,
         approvedById: req.auth!.userId,
       });
+      if (body.agent.account) {
+        await createPaymentAccount(agent.id, {
+          method: body.agent.account.method,
+          provider: body.agent.account.provider,
+          accountName: body.agent.account.accountName,
+          accountNumber: body.agent.account.accountNumber,
+          instructions: body.agent.account.instructions,
+          minAmount:
+            body.agent.account.minAmount === undefined ? undefined : BigInt(body.agent.account.minAmount),
+          maxAmount:
+            body.agent.account.maxAmount === undefined ? undefined : BigInt(body.agent.account.maxAmount),
+        });
+      }
     }
 
     await writeAudit({
@@ -539,6 +569,39 @@ adminRouter.post(
       userAgent: req.headers['user-agent'],
     });
     res.status(201).json({ data: serializeAgent(agent, { includeBalances: true }) });
+  }),
+);
+
+adminRouter.post(
+  '/agents/:agentId/payment-accounts',
+  asyncHandler(async (req, res) => {
+    const body = parse(AgentAccountSchema, req.body);
+    const agent = await prisma.agentProfile.findUnique({
+      where: { id: req.params.agentId },
+      select: { id: true },
+    });
+    if (!agent) throw Errors.notFound('Agent');
+
+    const account = await createPaymentAccount(agent.id, {
+      method: body.method,
+      provider: body.provider,
+      accountName: body.accountName,
+      accountNumber: body.accountNumber,
+      instructions: body.instructions,
+      minAmount: body.minAmount === undefined ? undefined : BigInt(body.minAmount),
+      maxAmount: body.maxAmount === undefined ? undefined : BigInt(body.maxAmount),
+    });
+    await writeAudit({
+      actorId: req.auth!.userId,
+      actorRole: req.auth!.role,
+      action: 'agent.payment_account',
+      entityType: 'AgentPaymentAccount',
+      entityId: account.id,
+      after: { agentProfileId: agent.id, method: body.method },
+      ip: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
+    res.status(201).json({ data: { id: account.id } });
   }),
 );
 

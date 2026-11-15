@@ -26,6 +26,14 @@ if (!token) {
   logger.fatal('SUPPORT_BOT_TOKEN is not set; the support bot cannot start');
   process.exit(1);
 }
+// Both processes long-poll; the same token makes Telegram answer 409 Conflict
+// and the support bot silently stops receiving updates.
+if (token === env.BOT_TOKEN) {
+  logger.fatal(
+    'SUPPORT_BOT_TOKEN is the same as BOT_TOKEN; create a separate BotFather bot for support',
+  );
+  process.exit(1);
+}
 
 const bot = new Bot(token);
 

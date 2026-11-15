@@ -268,7 +268,7 @@ requests, `Help & FAQ`) and a "Talk to an agent" action that creates a `SupportT
 | --- | --- | --- | --- |
 | GET | `/admin/overview` | — | Users, players, staff, agents, open queues, round and money totals |
 | GET | `/admin/staff` | `?query=&status=&page=` | Staff accounts |
-| POST | `/admin/staff` | `{ role, displayName, email?, phone?, password?, agent? }` | `agent` (`{ region, city?, district? }`) is required for `AGENT`; returns the temporary password when generated |
+| POST | `/admin/staff` | `{ role, displayName, email?, phone?, password?, agent? }` | `agent` (`{ region, city?, district?, account? }`) is required for `AGENT`; `account` (`{ method, provider?, accountName, accountNumber, instructions?, minAmount?, maxAmount? }`) saves the receiving account in the same request; returns the temporary password when generated |
 | PATCH | `/admin/staff/:userId/status` | `{ status: "ACTIVE" \| "SUSPENDED" }` | Cannot suspend yourself or the last active super admin (`LAST_SUPER_ADMIN`) |
 | POST | `/admin/staff/:userId/reset-password` | `{ password? }` | Forces `mustChangePassword` on next login |
 | PATCH | `/admin/staff/:userId/telegram` | `{ telegramId: "123456789" \| null }` | Links or unlinks the staff Telegram id (Mini App access) |
@@ -277,6 +277,7 @@ requests, `Help & FAQ`) and a "Talk to an agent" action that creates a `SupportT
 | POST | `/admin/agents` | `{ userId \| telegramId, region, city?, district? }` | Promotes a user, provisions float accounts |
 | GET | `/admin/agents` | `?status=` | |
 | PATCH | `/admin/agents/:agentId` | `{ status?, tier?, autoDepositEnabled?, autoDepositThreshold? }` | |
+| POST | `/admin/agents/:agentId/payment-accounts` | `{ method, provider?, accountName, accountNumber, instructions?, minAmount?, maxAmount? }` | Adds a receiving account; the setup screen shows it to players the moment they pick a deposit method |
 | POST | `/admin/agents/:agentId/float` | `{ amount, method, externalRef?, proofUrl? }` | `Idempotency-Key` required; posts `SUSPENSE → FLOAT` |
 | GET | `/admin/deposit-providers` | — | Every rail, including disabled ones |
 | PATCH | `/admin/deposit-providers/:code` | `{ name?, enabled?, supported?, requiresPhone?, accountDigits?, opaqueReference?, clientSide?, sortOrder?, instructions?, refPattern?, refHint?, minAmount?, maxAmount? }` | Availability and payer prompts only — parsers and host allowlists stay in code |

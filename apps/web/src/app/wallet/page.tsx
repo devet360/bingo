@@ -185,7 +185,7 @@ function AmountField({
           className="h-14 w-full rounded-xl border border-line bg-ink/60 pl-3 pr-12 font-display text-2xl font-bold text-text placeholder:text-sm placeholder:font-normal placeholder:text-muted/60 focus:border-mint/60 focus:outline-none disabled:opacity-50"
         />
         <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-[10px] font-semibold uppercase text-muted">
-          cr
+          ETB
         </span>
       </div>
       {hint ? <p className="mt-1 text-[10px] text-muted">{hint}</p> : null}
@@ -489,7 +489,6 @@ function DepositPanel({
   const { refreshWallet } = useSession();
   const { t } = useI18n();
   const [amount, setAmount] = useState('');
-  const [providerCode, setProviderCode] = useState('');
   const [reference, setReference] = useState('');
   const [receiptAccount, setReceiptAccount] = useState('');
   const [receiptPhone, setReceiptPhone] = useState('');
@@ -505,14 +504,11 @@ function DepositPanel({
   const [verifying, setVerifying] = useState(false);
   const idempotency = useRef(newIdempotencyKey('dep'));
 
-  const provider = providers.find((item) => item.code === providerCode) ?? null;
   const createdProvider = providers.find((item) => item.code === created?.providerCode) ?? null;
   const account = created?.paymentAccount ?? null;
   const open = Boolean(created && (created.status === 'PENDING' || created.status === 'PROCESSING'));
   const showConfirmation = Boolean(created && submitted && created.verificationStatus !== 'FAILED');
-  const providerMinimum = provider?.minAmount ? BigInt(provider.minAmount) : 0n;
-  const floorMinor = providerMinimum > MIN_DEPOSIT_MINOR ? providerMinimum : MIN_DEPOSIT_MINOR;
-  const minLabel = formatStake(floorMinor.toString());
+  const minLabel = formatStake(MIN_DEPOSIT_MINOR.toString());
   const methodLabel = (method: PaymentMethod) => t(`method.${method}`);
 
   const loadPending = useCallback(async () => {
@@ -640,37 +636,42 @@ function DepositPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [created?.id, created?.status, created?.verificationStatus, createdProvider?.clientSide]);
 
-  const submit = async () => {
+  /**
+   * Phase 1 → 2: tapping a method validates the amount and opens the deposit,
+   * which is what makes the server assign an agent and reveal the account to
+   * pay. The agent details and the receipt form then share one screen.
+   */
+  const begin = async (item: DepositProvider) => {
+    setError(null);
+    setNotice(null);
     const minor = creditsToMinor(amount);
     if (minor === null) {
-      setError(t('wallet.invalidAmount'));
+      setError(t('wallet.enterAmountFirst'));
       return;
     }
-    if (!provider) {
-      setError(t('wallet.chooseMethod'));
+    const itemFloor =
+      item.minAmount && BigInt(item.minAmount) > MIN_DEPOSIT_MINOR
+        ? BigInt(item.minAmount)
+        : MIN_DEPOSIT_MINOR;
+    if (BigInt(minor) < itemFloor) {
+      setError(t('wallet.minHint', { amount: formatStake(itemFloor.toString()) }));
       return;
     }
-    if (BigInt(minor) < floorMinor) {
-      setError(t('wallet.minHint', { amount: minLabel }));
-      return;
-    }
-    if (provider.maxAmount && BigInt(minor) > BigInt(provider.maxAmount)) {
+    if (item.maxAmount && BigInt(minor) > BigInt(item.maxAmount)) {
       setError(
         t('wallet.providerLimits', {
-          min: minLabel,
-          max: provider.maxAmount ? formatStake(provider.maxAmount) : '∞',
+          min: formatStake(itemFloor.toString()),
+          max: formatStake(item.maxAmount),
         }),
       );
       return;
     }
     setBusy(true);
-    setError(null);
-    setNotice(null);
     try {
       const deposit = await createDeposit({
         amount: minor,
-        method: provider.method,
-        providerCode: provider.code,
+        method: item.method,
+        providerCode: item.code,
         playerNote: note.trim() || undefined,
         idempotencyKey: idempotency.current,
       });
@@ -715,18 +716,19 @@ function DepositPanel({
           onNewDeposit={startNewDeposit}
           onViewHistory={onViewHistory}
         />
-      ) : created ? (
-        <Panel className="p-4">
-          <div className="flex items-start justify-between gap-2">
+      ) : null}
+
+      {created && !showConfirmation ? (
+        <Panel className="overflow-hidden">
+          <div className="flex items-start justify-between gap-2 border-b border-line/70 px-4 py-3">
             <div>
-              <p className="text-[10px] font-semibold uppercase tracking-widest text-muted">
-                {t('wallet.depositOpened')}
+              <p className="text-[10px] font-semibold uppercase tracking-widest text-mint">
+                {t('wallet.stepPayVerify')}
               </p>
               <h2 className="mt-0.5 font-display text-xl font-black tracking-[0.2em]">{created.code}</h2>
               <p className="text-[11px] text-muted">
-                {methodLabel(created.method)}
-                {created.providerCode ? ` · ${createdProvider?.name ?? created.providerCode}` : ''} ·{' '}
-                {formatCredits(created.amount)} credits
+                {formatCredits(created.amount)} ETB · {methodLabel(created.method)}
+                {created.providerCode ? ` · ${createdProvider?.name ?? created.providerCode}` : ''}
               </p>
             </div>
             <div className="flex flex-col items-end gap-1">
@@ -735,211 +737,254 @@ function DepositPanel({
             </div>
           </div>
 
-          {open && created.agent ? (
-            <div className="mt-3 rounded-xl border border-mint/30 bg-mint/5 p-3 text-[11px]">
-              <p className="text-[10px] font-semibold uppercase tracking-widest text-mint">
-                {t('wallet.stepPay')}
-              </p>
-              <p className="mt-1 font-semibold text-text">
-                {t('wallet.payAgent', {
-                  name: created.agent.displayName ?? created.agent.agentCode,
-                })}
-                {created.agent.isOnline ? ` · ${t('wallet.online')}` : ''}
-              </p>
-              <p className="text-muted">{created.agent.agentCode}</p>
-              {account ? (
-                <div className="mt-2 rounded-lg bg-ink/50 p-2.5">
-                  <p className="text-text">
-                    {account.accountName}
-                    {account.provider ? <span className="text-muted"> · {account.provider}</span> : null}
-                  </p>
-                  <div className="mt-0.5 flex items-center justify-between gap-2">
-                    <span className="font-mono text-sm tracking-wide text-gold">{account.accountNumber}</span>
-                    <CopyButton value={account.accountNumber} />
+          <div className="space-y-3 p-4">
+            {created.agent ? (
+              <div className="rounded-xl border border-mint/30 bg-mint/5 p-3">
+                <p className="text-[10px] font-semibold uppercase tracking-widest text-mint">
+                  {t('wallet.agentAccountTitle')}
+                </p>
+                <p className="mt-1 text-sm font-semibold text-text">
+                  {created.agent.displayName ?? created.agent.agentCode}
+                  {created.agent.isOnline ? (
+                    <span className="ml-1 text-[10px] font-normal uppercase tracking-wide text-mint">
+                      · {t('wallet.online')}
+                    </span>
+                  ) : null}
+                </p>
+                <p className="text-[10px] text-muted">{created.agent.agentCode}</p>
+
+                {account ? (
+                  <div className="mt-2 rounded-lg bg-ink/60 p-3">
+                    <p className="text-xs text-text">
+                      {account.accountName}
+                      {account.provider ? <span className="text-muted"> · {account.provider}</span> : null}
+                    </p>
+                    <div className="mt-1 flex items-center justify-between gap-2">
+                      <span className="font-mono text-base tracking-wide text-gold">
+                        {account.accountNumber}
+                      </span>
+                      <CopyButton value={account.accountNumber} />
+                    </div>
+                    {account.instructions ? (
+                      <p className="mt-1 text-[11px] text-muted">{account.instructions}</p>
+                    ) : null}
                   </div>
-                  {account.instructions ? <p className="mt-1 text-muted">{account.instructions}</p> : null}
-                </div>
-              ) : null}
-              <p className="mt-2 text-muted">
-                {t('wallet.depositCodeHint')}{' '}
-                <span className="font-display font-bold tracking-[0.2em] text-text">{created.code}</span>
-              </p>
-            </div>
-          ) : (
-            <div className="mt-3">
+                ) : (
+                  <p className="mt-2 rounded-lg border border-warn/30 bg-warn/10 px-3 py-2 text-[11px] text-warn">
+                    {t('wallet.noAccountYet')}
+                  </p>
+                )}
+
+                <p className="mt-2 text-[11px] text-muted">
+                  {t('wallet.amountDue')}:{' '}
+                  <span className="font-semibold text-text">{formatCredits(created.amount)} ETB</span>
+                  {' · '}
+                  {t('wallet.depositCode')}:{' '}
+                  <span className="font-display font-bold tracking-[0.2em] text-text">{created.code}</span>
+                </p>
+
+                {created.agent.telegramUsername || created.agent.phone ? (
+                  <div className="mt-2 grid grid-cols-2 gap-2">
+                    {created.agent.telegramUsername ? (
+                      <a
+                        href={`https://t.me/${created.agent.telegramUsername.replace(/^@/, '')}`}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="flex h-9 items-center justify-center gap-1.5 rounded-xl border border-mint/40 bg-mint/10 text-[11px] font-semibold text-mint"
+                      >
+                        <TelegramIcon />
+                        {t('wallet.contactTelegram')}
+                      </a>
+                    ) : null}
+                    {created.agent.phone ? (
+                      <a
+                        href={`tel:${created.agent.phone.replace(/[^+\d]/g, '')}`}
+                        className="flex h-9 items-center justify-center gap-1.5 rounded-xl border border-line/70 bg-raised/50 text-[11px] font-semibold text-text"
+                      >
+                        <PhoneIcon />
+                        {t('wallet.callAgent')}
+                      </a>
+                    ) : null}
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+
+            {open && createdProvider ? (
+              <div className="space-y-3">
+                <p className="text-[10px] font-semibold uppercase tracking-widest text-muted">
+                  {t('wallet.stepSubmit')}
+                </p>
+                <Input
+                  label={t('wallet.receiptReference')}
+                  placeholder={createdProvider.refHint ?? 'FT…'}
+                  value={reference}
+                  onChange={(event) => setReference(event.target.value)}
+                  hint={createdProvider.refHint ?? undefined}
+                />
+                {createdProvider.accountDigits || createdProvider.requiresPhone ? (
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    {createdProvider.accountDigits ? (
+                      <Input
+                        label={t('wallet.receiptAccount', { count: createdProvider.accountDigits })}
+                        inputMode="numeric"
+                        value={receiptAccount}
+                        onChange={(event) => setReceiptAccount(event.target.value)}
+                      />
+                    ) : null}
+                    {createdProvider.requiresPhone ? (
+                      <Input
+                        label={t('wallet.receiptPhone')}
+                        inputMode="tel"
+                        placeholder="+2519…"
+                        value={receiptPhone}
+                        onChange={(event) => setReceiptPhone(event.target.value)}
+                      />
+                    ) : null}
+                  </div>
+                ) : null}
+                <label className="block">
+                  <span className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-muted">
+                    {t('wallet.proofLabel')}
+                  </span>
+                  <input
+                    type="file"
+                    accept="image/png,image/jpeg,image/webp"
+                    onChange={(event) => void attachProof(event.target.files?.[0] ?? null)}
+                    className="block w-full text-xs text-muted file:mr-3 file:rounded-lg file:border-0 file:bg-raised file:px-3 file:py-2 file:text-xs file:font-semibold file:text-text"
+                  />
+                  <span className="mt-1 block text-[10px] text-muted">
+                    {proof ? t('wallet.proofSelected', { name: proof.name }) : t('wallet.proofHint')}
+                  </span>
+                </label>
+                <Button className="w-full" size="lg" loading={verifying} onClick={() => void markPaid()}>
+                  {verifying ? t('wallet.verifying') : t('wallet.submitForVerification')}
+                </Button>
+              </div>
+            ) : null}
+
+            {!open ? (
               <CodeBlock
                 label={t('wallet.depositCode')}
                 code={created.code}
                 hint={`${t('wallet.depositCodeHint')} ${t('wallet.depositExpires', { when: formatDateTime(created.expiresAt) })}`}
               />
-            </div>
-          )}
+            ) : null}
 
-          {open && createdProvider ? (
-            <div className="mt-3 space-y-3">
-              <p className="text-[10px] font-semibold uppercase tracking-widest text-muted">
-                {t('wallet.stepSubmit')}
+            {created.receiptReference ? (
+              <p className="text-[11px] text-muted">
+                {t('wallet.receiptReference')}: <span className="font-mono text-text">{created.receiptReference}</span>
               </p>
-              <Input
-                label={t('wallet.receiptReference')}
-                placeholder={createdProvider.refHint ?? 'FT…'}
-                value={reference}
-                onChange={(event) => setReference(event.target.value)}
-                hint={createdProvider.refHint ?? undefined}
-              />
-              {createdProvider.accountDigits || createdProvider.requiresPhone ? (
-                <div className="grid gap-3 sm:grid-cols-2">
-                  {createdProvider.accountDigits ? (
-                    <Input
-                      label={t('wallet.receiptAccount', { count: createdProvider.accountDigits })}
-                      inputMode="numeric"
-                      value={receiptAccount}
-                      onChange={(event) => setReceiptAccount(event.target.value)}
-                    />
-                  ) : null}
-                  {createdProvider.requiresPhone ? (
-                    <Input
-                      label={t('wallet.receiptPhone')}
-                      inputMode="tel"
-                      placeholder="+2519…"
-                      value={receiptPhone}
-                      onChange={(event) => setReceiptPhone(event.target.value)}
-                    />
-                  ) : null}
-                </div>
-              ) : null}
-              <label className="block">
-                <span className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-muted">
-                  {t('wallet.proofLabel')}
-                </span>
-                <input
-                  type="file"
-                  accept="image/png,image/jpeg,image/webp"
-                  onChange={(event) => void attachProof(event.target.files?.[0] ?? null)}
-                  className="block w-full text-xs text-muted file:mr-3 file:rounded-lg file:border-0 file:bg-raised file:px-3 file:py-2 file:text-xs file:font-semibold file:text-text"
-                />
-                <span className="mt-1 block text-[10px] text-muted">
-                  {proof ? t('wallet.proofSelected', { name: proof.name }) : t('wallet.proofHint')}
-                </span>
-              </label>
-              <Button className="w-full" loading={verifying} onClick={() => void markPaid()}>
-                {verifying ? t('wallet.verifying') : t('wallet.iHavePaid')}
-              </Button>
-            </div>
-          ) : null}
+            ) : null}
+            {created.verificationMessage ? (
+              <p className="text-[11px] text-muted">{created.verificationMessage}</p>
+            ) : null}
+            {notice ? <p className="text-[11px] text-mint">{notice}</p> : null}
+            <p className="text-[11px] text-muted">{t('wallet.depositBalanceNote')}</p>
 
-          {created.receiptReference ? (
-            <p className="mt-2 text-[11px] text-muted">
-              {t('wallet.receiptReference')}: <span className="font-mono text-text">{created.receiptReference}</span>
-            </p>
-          ) : null}
-          {created.verificationMessage ? (
-            <p className="mt-1 text-[11px] text-muted">{created.verificationMessage}</p>
-          ) : null}
-          {notice ? <p className="mt-2 text-[11px] text-mint">{notice}</p> : null}
-          <p className="mt-2 text-[11px] text-muted">{t('wallet.depositBalanceNote')}</p>
+            <div className="flex flex-wrap items-center justify-between gap-2 border-t border-line/60 pt-2">
+              <button
+                type="button"
+                onClick={startNewDeposit}
+                className="text-[11px] font-semibold text-muted underline-offset-2 hover:text-text hover:underline"
+              >
+                {t('wallet.chooseAnother')}
+              </button>
+              <span className="text-[10px] text-muted">
+                {t('wallet.depositExpires', { when: formatDateTime(created.expiresAt) })}
+              </span>
+            </div>
+          </div>
         </Panel>
       ) : null}
 
-      <Panel className="p-4">
-        <h2 className="font-display text-base font-bold">{t('wallet.deposit')}</h2>
-        <p className="mt-0.5 text-[11px] text-muted">{t('wallet.buyCreditsBlurb')}</p>
-
-        <div className="mt-3">
-          <AmountField
-            label={t('wallet.depositAmount')}
-            value={amount}
-            onChange={setAmount}
-            placeholder={t('wallet.amountPlaceholder', { min: minLabel })}
-            hint={t('wallet.minHint', { amount: minLabel })}
-          />
-          <QuickAmounts value={amount} onPick={setAmount} />
-        </div>
-
-        <div className="mt-4">
-          <p className="text-[10px] font-semibold uppercase tracking-widest text-muted">
-            {t('wallet.selectPaymentMethod')}
+      {!created ? (
+        <Panel className="p-4">
+          <p className="text-[10px] font-semibold uppercase tracking-widest text-mint">
+            {t('wallet.stepChooseMethod')}
           </p>
-          {providers.length === 0 ? (
-            <p className="mt-1 text-[11px] text-warn">{t('wallet.noDepositMethods')}</p>
-          ) : (
-            <div className="mt-1.5 grid grid-cols-2 gap-2">
-              {providers.map((item) => {
-                const active = item.code === providerCode;
-                return (
+          <h2 className="mt-0.5 font-display text-base font-bold">{t('wallet.deposit')}</h2>
+          <p className="mt-0.5 text-[11px] text-muted">{t('wallet.buyCreditsBlurb')}</p>
+
+          <div className="mt-3">
+            <AmountField
+              label={t('wallet.depositAmount')}
+              value={amount}
+              onChange={setAmount}
+              placeholder={t('wallet.amountPlaceholder', { min: minLabel })}
+              hint={t('wallet.minHint', { amount: minLabel })}
+            />
+            <QuickAmounts value={amount} onPick={setAmount} />
+          </div>
+
+          <div className="mt-4">
+            <p className="text-[10px] font-semibold uppercase tracking-widest text-muted">
+              {t('wallet.selectPaymentMethod')}
+            </p>
+            {providers.length === 0 ? (
+              <p className="mt-1 text-[11px] text-warn">{t('wallet.noDepositMethods')}</p>
+            ) : (
+              <div className="mt-1.5 grid grid-cols-1 gap-2 sm:grid-cols-2">
+                {providers.map((item) => (
                   <button
                     key={item.code}
                     type="button"
-                    onClick={() => setProviderCode(item.code)}
-                    aria-pressed={active}
-                    className={cn(
-                      'rounded-xl border p-2.5 text-left transition',
-                      active
-                        ? 'border-mint/60 bg-mint/10'
-                        : 'border-line/70 bg-raised/50 hover:border-mint/40',
-                    )}
+                    disabled={busy}
+                    onClick={() => void begin(item)}
+                    className="flex items-center justify-between gap-2 rounded-xl border border-line/70 bg-raised/50 p-3 text-left transition hover:border-mint/50 hover:bg-mint/5 disabled:opacity-50"
                   >
-                    <span className={cn('block text-xs font-semibold', active ? 'text-mint' : 'text-text')}>
-                      {item.name}
+                    <span className="min-w-0">
+                      <span className="block truncate text-sm font-semibold text-text">{item.name}</span>
+                      <span className="block text-[10px] text-muted">{methodLabel(item.method)}</span>
+                      {item.minAmount || item.maxAmount ? (
+                        <span className="mt-0.5 block text-[10px] text-muted">
+                          {item.minAmount ? formatStake(item.minAmount) : '0'} –{' '}
+                          {item.maxAmount ? formatStake(item.maxAmount) : '∞'}
+                        </span>
+                      ) : null}
                     </span>
-                    <span className="block text-[10px] text-muted">{methodLabel(item.method)}</span>
-                    {item.minAmount || item.maxAmount ? (
-                      <span className="mt-0.5 block text-[10px] text-muted">
-                        {item.minAmount ? formatStake(item.minAmount) : '0'} –{' '}
-                        {item.maxAmount ? formatStake(item.maxAmount) : '∞'}
-                      </span>
-                    ) : null}
+                    {busy ? (
+                      <Spinner className="h-4 w-4 text-mint" />
+                    ) : (
+                      <svg viewBox="0 0 24 24" className="h-4 w-4 shrink-0 text-mint" fill="currentColor" aria-hidden>
+                        <path d="M9 5l7 7-7 7z" />
+                      </svg>
+                    )}
                   </button>
-                );
-              })}
-            </div>
-          )}
-        </div>
-
-        {provider ? (
-          <div className="mt-2 rounded-xl border border-gold/25 bg-gold/5 p-3 text-[11px] text-muted">
-            <p className="font-semibold text-gold">{provider.name}</p>
-            {provider.instructions ? <p className="mt-1">{provider.instructions}</p> : null}
-            <p className="mt-1">{provider.supported ? t('wallet.autoCheckOn') : t('wallet.manualConfirm')}</p>
+                ))}
+              </div>
+            )}
+            <p className="mt-1.5 text-[10px] text-muted">{t('wallet.tapMethodHint')}</p>
           </div>
-        ) : null}
 
-        <div className="mt-3">
-          <Input
-            label={t('wallet.noteOptional')}
-            placeholder="Cash at Main Street kiosk"
-            value={note}
-            onChange={(event) => setNote(event.target.value)}
-          />
-        </div>
-        {error ? (
           <div className="mt-3">
-            <ErrorNote>{error}</ErrorNote>
+            <Input
+              label={t('wallet.noteOptional')}
+              placeholder="Cash at Main Street kiosk"
+              value={note}
+              onChange={(event) => setNote(event.target.value)}
+            />
           </div>
-        ) : null}
-        <Button
-          className="mt-3 w-full"
-          size="lg"
-          loading={busy}
-          disabled={!provider || providers.length === 0}
-          onClick={() => void submit()}
-        >
-          {t('wallet.depositButton')}
-        </Button>
-        <div className="mt-3">
-          <HelpSteps
-            title={t('wallet.helpHowToDeposit')}
-            steps={[
-              t('wallet.depositStep1'),
-              t('wallet.depositStep2'),
-              t('wallet.depositStep3'),
-              t('wallet.depositStep4'),
-              t('wallet.depositStep5'),
-              t('wallet.depositStep6'),
-            ]}
-          />
-        </div>
-      </Panel>
+          {error ? (
+            <div className="mt-3">
+              <ErrorNote>{error}</ErrorNote>
+            </div>
+          ) : null}
+          <div className="mt-3">
+            <HelpSteps
+              title={t('wallet.helpHowToDeposit')}
+              steps={[
+                t('wallet.depositStep1'),
+                t('wallet.depositStep2'),
+                t('wallet.depositStep3'),
+                t('wallet.depositStep4'),
+                t('wallet.depositStep5'),
+                t('wallet.depositStep6'),
+              ]}
+            />
+          </div>
+        </Panel>
+      ) : null}
 
       {pending.length > 0 ? (
         <Panel className="p-4">
@@ -957,7 +1002,7 @@ function DepositPanel({
                   </div>
                 </div>
                 <p className="mt-1 text-[11px] text-muted">
-                  {formatCredits(deposit.amount)} cr · {formatDateTime(deposit.createdAt)} ·
+                  {formatCredits(deposit.amount)} ETB · {formatDateTime(deposit.createdAt)} ·
                   expires {formatDateTime(deposit.expiresAt)}
                 </p>
               </li>
@@ -1158,7 +1203,7 @@ function WithdrawPanel({ onChanged }: { onChanged: () => void }) {
             value={amount}
             onChange={setAmount}
             placeholder={t('wallet.withdrawPlaceholder')}
-            hint={`${t('wallet.available')} ${wallet ? formatCredits(wallet.available) : '—'} cr`}
+            hint={`${t('wallet.available')} ${wallet ? formatCredits(wallet.available) : '—'} ETB`}
             action={
               <button
                 type="button"
@@ -1356,7 +1401,7 @@ function WithdrawPanel({ onChanged }: { onChanged: () => void }) {
                     <StatusPill status={withdrawal.status} />
                   </div>
                   <p className="mt-1 text-[11px] text-muted">
-                    {formatCredits(withdrawal.amount)} cr · {formatDateTime(withdrawal.createdAt)}
+                    {formatCredits(withdrawal.amount)} ETB · {formatDateTime(withdrawal.createdAt)}
                   </p>
                   {withdrawal.status === 'PROCESSING' ? (
                     <p className="mt-1 text-[11px] text-muted">{t('wallet.processingHint')}</p>
@@ -1751,7 +1796,7 @@ export default function WalletPage() {
               </p>
               <p className="mt-1 font-display text-4xl font-black tracking-tight text-text">
                 {wallet ? formatCredits(wallet.available) : '—'}
-                <span className="ml-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted">cr</span>
+                <span className="ml-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted">ETB</span>
               </p>
             </div>
             <button

@@ -119,7 +119,7 @@ export function ReceiptsTab() {
               {receipt.deposit ? (
                 <p className="mt-1 text-[11px] text-muted">
                   Deposit <span className="font-semibold text-text">{receipt.deposit.code}</span> ·{' '}
-                  {formatCredits(receipt.deposit.amount)} cr · {receipt.deposit.status.toLowerCase()} ·{' '}
+                  {formatCredits(receipt.deposit.amount)} ETB · {receipt.deposit.status.toLowerCase()} ·{' '}
                   {receipt.deposit.player.displayName}
                   {receipt.deposit.player.phone ? ` (${receipt.deposit.player.phone})` : ''}
                 </p>

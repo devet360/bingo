@@ -5,6 +5,8 @@ import {
   ApiError,
   cancelDepositByStaff,
   cancelWithdrawalByStaff,
+  createAgentPaymentAccount,
+  createStaffMember,
   fetchMediaBlobUrl,
   fetchStaffAgents,
   fetchStaffDeposits,
@@ -19,6 +21,7 @@ import { PAYMENT_METHODS, creditsToMinor, formatCredits, formatDateTime } from '
 import { useI18n } from '@/lib/i18n';
 import type {
   Agent,
+  CreatedStaff,
   DepositStatus,
   PageMeta,
   PaymentMethod,
@@ -29,6 +32,7 @@ import type {
 } from '@/lib/types';
 import {
   Button,
+  CopyButton,
   EmptyState,
   ErrorNote,
   Input,
@@ -522,7 +526,7 @@ export function WithdrawalsTab() {
                 <span className="font-display font-bold tracking-[0.2em] text-gold">
                   {reviewTarget.payoutCode}
                 </span>{' '}
-                · net {formatCredits(reviewTarget.netAmount)} cr
+                · net {formatCredits(reviewTarget.netAmount)} ETB
               </p>
               <p className="mt-1 text-muted">
                 {reviewTarget.player.displayName}
@@ -616,6 +620,9 @@ export function AgentsTab({ canManage }: { canManage: boolean }) {
   const [floatAmount, setFloatAmount] = useState('');
   const [floatMethod, setFloatMethod] = useState<PaymentMethod>('BANK_TRANSFER');
   const [floatBusy, setFloatBusy] = useState(false);
+  const [createOpen, setCreateOpen] = useState(false);
+  const [created, setCreated] = useState<CreatedStaff | null>(null);
+  const [accountTarget, setAccountTarget] = useState<Agent | null>(null);
   const idempotency = useRef(newIdempotencyKey('float'));
 
   const load = useCallback(async () => {
@@ -673,6 +680,16 @@ export function AgentsTab({ canManage }: { canManage: boolean }) {
 
   return (
     <>
+      {canManage ? (
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+          <p className="max-w-xl text-[11px] text-muted">
+            Players pay the account saved here — it appears the moment they pick a method.
+          </p>
+          <Button size="sm" variant="gold" onClick={() => setCreateOpen(true)}>
+            Add agent
+          </Button>
+        </div>
+      ) : null}
       {notice ? (
         <p className="mb-3 rounded-xl border border-mint/30 bg-mint/10 px-3 py-2 text-xs text-mint">
           {notice}
@@ -685,7 +702,17 @@ export function AgentsTab({ canManage }: { canManage: boolean }) {
         </Panel>
       ) : agents.length === 0 ? (
         <Panel className="p-4">
-          <EmptyState title="No agents yet" body="Create an agent from the Staff tab." />
+          <EmptyState
+            title="No agents yet"
+            body="An agent needs a login and a receiving account before players can deposit."
+            action={
+              canManage ? (
+                <Button size="sm" onClick={() => setCreateOpen(true)}>
+                  Add the first agent
+                </Button>
+              ) : undefined
+            }
+          />
         </Panel>
       ) : (
         <ul className="grid gap-3 sm:grid-cols-2">
@@ -734,6 +761,19 @@ export function AgentsTab({ canManage }: { canManage: boolean }) {
                 </div>
               </div>
 
+              {agent.paymentAccounts?.length ? (
+                <p className="mt-2 truncate text-[10px] text-muted">
+                  Pays to:{' '}
+                  {agent.paymentAccounts
+                    .map((entry) => `${entry.method.replaceAll('_', ' ')} ${entry.accountNumber}`)
+                    .join(' · ')}
+                </p>
+              ) : (
+                <p className="mt-2 rounded-lg border border-warn/30 bg-warn/10 px-2 py-1 text-[10px] text-warn">
+                  No receiving account — players cannot pay this agent yet.
+                </p>
+              )}
+
               {canManage ? (
                 <div className="mt-3 flex flex-wrap items-center gap-2">
                   <Select
@@ -771,6 +811,16 @@ export function AgentsTab({ canManage }: { canManage: boolean }) {
                   >
                     Top up float
                   </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => {
+                      setAccountTarget(agent);
+                      setError(null);
+                    }}
+                  >
+                    Add account
+                  </Button>
                 </div>
               ) : null}
             </li>
@@ -786,7 +836,7 @@ export function AgentsTab({ canManage }: { canManage: boolean }) {
               {floatTarget.floatAvailable ? formatCredits(floatTarget.floatAvailable) : '—'}
             </p>
             <Input
-              label="Amount (credits)"
+              label="Amount (ETB)"
               inputMode="decimal"
               placeholder="500"
               value={floatAmount}
@@ -809,6 +859,297 @@ export function AgentsTab({ canManage }: { canManage: boolean }) {
           </div>
         ) : null}
       </Sheet>
+
+      <CreateAgentSheet
+        open={createOpen}
+        onClose={() => setCreateOpen(false)}
+        onCreated={(result) => {
+          setCreateOpen(false);
+          setCreated(result);
+          void load();
+        }}
+      />
+
+      <Sheet open={created !== null} title="Agent created" onClose={() => setCreated(null)}>
+        {created ? (
+          <div className="space-y-3">
+            <p className="text-xs text-muted">
+              {created.user.displayName} · {created.agent?.agentCode ?? 'AGENT'}
+            </p>
+            <div className="rounded-xl border border-gold/30 bg-gold/5 p-3">
+              <p className="text-[10px] font-semibold uppercase tracking-widest text-gold">
+                Login password
+              </p>
+              <p className="mt-1 font-mono text-lg font-bold tracking-wider text-text">
+                {created.temporaryPassword}
+              </p>
+              <div className="mt-2">
+                <CopyButton value={created.temporaryPassword} label="Copy" />
+              </div>
+            </div>
+            <p className="text-[11px] text-muted">
+              Share this with the agent. They sign in at the agent portal with their phone or email
+              and this password, then change it. Top up their float before they start accepting cash.
+            </p>
+          </div>
+        ) : null}
+      </Sheet>
+
+      <AgentAccountSheet
+        agent={accountTarget}
+        onClose={() => setAccountTarget(null)}
+        onSaved={() => {
+          setAccountTarget(null);
+          void load();
+        }}
+      />
     </>
+  );
+}
+
+function CreateAgentSheet({
+  open,
+  onClose,
+  onCreated,
+}: {
+  open: boolean;
+  onClose: () => void;
+  onCreated: (result: CreatedStaff) => void;
+}) {
+  const [displayName, setDisplayName] = useState('');
+  const [phone, setPhone] = useState('');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [region, setRegion] = useState('Addis Ababa');
+  const [city, setCity] = useState('');
+  const [district, setDistrict] = useState('');
+  const [method, setMethod] = useState<PaymentMethod>('MOBILE_MONEY');
+  const [accountName, setAccountName] = useState('');
+  const [accountNumber, setAccountNumber] = useState('');
+  const [instructions, setInstructions] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const submit = async () => {
+    setError(null);
+    if (!displayName.trim()) {
+      setError('Enter the agent name.');
+      return;
+    }
+    if (!phone.trim() && !email.trim()) {
+      setError('Add a phone or email — the agent signs in with it.');
+      return;
+    }
+    if (!region.trim()) {
+      setError('Enter the region.');
+      return;
+    }
+    if (!accountName.trim() || !accountNumber.trim()) {
+      setError('Add the account that receives player deposits.');
+      return;
+    }
+    setBusy(true);
+    try {
+      const result = await createStaffMember({
+        role: 'AGENT',
+        displayName: displayName.trim(),
+        phone: phone.trim() || undefined,
+        email: email.trim() || undefined,
+        password: password.trim() || undefined,
+        agent: {
+          region: region.trim(),
+          city: city.trim() || undefined,
+          district: district.trim() || undefined,
+          account: {
+            method,
+            accountName: accountName.trim(),
+            accountNumber: accountNumber.trim(),
+            instructions: instructions.trim() || undefined,
+          },
+        },
+      });
+      onCreated(result);
+      setDisplayName('');
+      setPhone('');
+      setEmail('');
+      setPassword('');
+      setCity('');
+      setDistrict('');
+      setAccountName('');
+      setAccountNumber('');
+      setInstructions('');
+    } catch (caught) {
+      setError(caught instanceof ApiError ? caught.message : 'Could not create the agent.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Sheet open={open} title="Add agent" onClose={onClose}>
+      <div className="space-y-3">
+        <Input
+          label="Agent name"
+          value={displayName}
+          onChange={(event) => setDisplayName(event.target.value)}
+        />
+        <div className="grid gap-3 sm:grid-cols-2">
+          <Input
+            label="Phone"
+            placeholder="+2519…"
+            value={phone}
+            onChange={(event) => setPhone(event.target.value)}
+          />
+          <Input
+            label="Email (optional)"
+            type="email"
+            value={email}
+            onChange={(event) => setEmail(event.target.value)}
+          />
+        </div>
+        <div className="grid gap-3 sm:grid-cols-3">
+          <Input label="Region" value={region} onChange={(event) => setRegion(event.target.value)} />
+          <Input label="City" value={city} onChange={(event) => setCity(event.target.value)} />
+          <Input label="District" value={district} onChange={(event) => setDistrict(event.target.value)} />
+        </div>
+        <Input
+          label="Password (optional)"
+          type="password"
+          value={password}
+          onChange={(event) => setPassword(event.target.value)}
+          hint="Leave empty to generate a temporary password."
+        />
+
+        <div className="rounded-xl border border-line/70 bg-ink/40 p-3">
+          <p className="text-[10px] font-semibold uppercase tracking-widest text-mint">
+            Receiving account
+          </p>
+          <p className="mt-1 text-[10px] text-muted">
+            Players transfer here. Use the exact account the agent will check.
+          </p>
+          <div className="mt-2 space-y-3">
+            <Select
+              label="Method"
+              value={method}
+              onChange={(event) => setMethod(event.target.value as PaymentMethod)}
+            >
+              {PAYMENT_METHODS.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </Select>
+            <Input
+              label="Account holder"
+              value={accountName}
+              onChange={(event) => setAccountName(event.target.value)}
+            />
+            <Input
+              label="Account number"
+              inputMode="numeric"
+              value={accountNumber}
+              onChange={(event) => setAccountNumber(event.target.value)}
+            />
+            <Input
+              label="Instructions (optional)"
+              placeholder="Use the deposit code as the transfer reason"
+              value={instructions}
+              onChange={(event) => setInstructions(event.target.value)}
+            />
+          </div>
+        </div>
+
+        {error ? <ErrorNote>{error}</ErrorNote> : null}
+        <Button className="w-full" loading={busy} onClick={() => void submit()}>
+          Create agent
+        </Button>
+      </div>
+    </Sheet>
+  );
+}
+
+function AgentAccountSheet({
+  agent,
+  onClose,
+  onSaved,
+}: {
+  agent: Agent | null;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [method, setMethod] = useState<PaymentMethod>('MOBILE_MONEY');
+  const [accountName, setAccountName] = useState('');
+  const [accountNumber, setAccountNumber] = useState('');
+  const [instructions, setInstructions] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const submit = async () => {
+    if (!agent) return;
+    setError(null);
+    if (!accountName.trim() || !accountNumber.trim()) {
+      setError('Enter the account holder and number.');
+      return;
+    }
+    setBusy(true);
+    try {
+      await createAgentPaymentAccount(agent.id, {
+        method,
+        accountName: accountName.trim(),
+        accountNumber: accountNumber.trim(),
+        instructions: instructions.trim() || undefined,
+      });
+      setAccountName('');
+      setAccountNumber('');
+      setInstructions('');
+      onSaved();
+    } catch (caught) {
+      setError(caught instanceof ApiError ? caught.message : 'Could not save the account.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Sheet open={agent !== null} title="Add receiving account" onClose={onClose}>
+      {agent ? (
+        <div className="space-y-3">
+          <p className="text-xs text-muted">
+            {agent.displayName ?? agent.agentCode} · {agent.agentCode}
+          </p>
+          <Select
+            label="Method"
+            value={method}
+            onChange={(event) => setMethod(event.target.value as PaymentMethod)}
+          >
+            {PAYMENT_METHODS.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </Select>
+          <Input
+            label="Account holder"
+            value={accountName}
+            onChange={(event) => setAccountName(event.target.value)}
+          />
+          <Input
+            label="Account number"
+            inputMode="numeric"
+            value={accountNumber}
+            onChange={(event) => setAccountNumber(event.target.value)}
+          />
+          <Input
+            label="Instructions (optional)"
+            value={instructions}
+            onChange={(event) => setInstructions(event.target.value)}
+          />
+          {error ? <ErrorNote>{error}</ErrorNote> : null}
+          <Button className="w-full" loading={busy} onClick={() => void submit()}>
+            Save account
+          </Button>
+        </div>
+      ) : null}
+    </Sheet>
   );
 }
