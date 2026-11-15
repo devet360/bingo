@@ -70,10 +70,19 @@ BEGIN
       CHECK ("floatAvailable" >= 0 AND "floatEscrow" >= 0 AND "commissionEarned" >= 0);
   END IF;
 
-  -- The external settlement bridge and expense accounts may carry debit balances.
+  -- The external settlement bridge, expense and guaranteed-prize accounts may
+  -- carry debit balances. TREASURY funds fixed bingo prizes the pot does not.
+  IF EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'LedgerAccount_negative_balance_guard'
+      AND pg_get_constraintdef(oid) NOT LIKE '%TREASURY%'
+  ) THEN
+    ALTER TABLE "LedgerAccount" DROP CONSTRAINT "LedgerAccount_negative_balance_guard";
+  END IF;
+
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'LedgerAccount_negative_balance_guard') THEN
     ALTER TABLE "LedgerAccount" ADD CONSTRAINT "LedgerAccount_negative_balance_guard"
-      CHECK ("balance" >= 0 OR "code" IN ('SUSPENSE', 'COMMISSION_EXPENSE', 'BONUS_EXPENSE'));
+      CHECK ("balance" >= 0 OR "code" IN ('SUSPENSE', 'COMMISSION_EXPENSE', 'BONUS_EXPENSE', 'TREASURY'));
   END IF;
 
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'LedgerEntry_amount_non_zero') THEN
@@ -124,9 +133,18 @@ BEGIN
       CHECK ("rakeBps" BETWEEN 0 AND 10000);
   END IF;
 
+  -- MAIN rooms hand a player up to 30 cards; FAST rooms stay at one.
+  IF EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'BingoRoom_card_limits'
+      AND pg_get_constraintdef(oid) NOT LIKE '%30%'
+  ) THEN
+    ALTER TABLE "BingoRoom" DROP CONSTRAINT "BingoRoom_card_limits";
+  END IF;
+
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'BingoRoom_card_limits') THEN
     ALTER TABLE "BingoRoom" ADD CONSTRAINT "BingoRoom_card_limits"
-      CHECK ("maxCardsPerPlayer" BETWEEN 1 AND 4 AND "minPlayersToStart" >= 1);
+      CHECK ("maxCardsPerPlayer" BETWEEN 1 AND 30 AND "minPlayersToStart" >= 1);
   END IF;
 
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'DepositRequest_amount_positive') THEN
@@ -139,15 +157,36 @@ BEGIN
       CHECK ("amount" > 0 AND "fee" >= 0 AND "netAmount" >= 0 AND "fee" + "netAmount" = "amount");
   END IF;
 
+  -- Bonus cards cost nothing; MAIN rooms number a player's cards up to 29.
+  IF EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'BingoCard_stake_positive'
+      AND pg_get_constraintdef(oid) NOT LIKE '%29%'
+  ) THEN
+    ALTER TABLE "BingoCard" DROP CONSTRAINT "BingoCard_stake_positive";
+  END IF;
+
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'BingoCard_stake_positive') THEN
     ALTER TABLE "BingoCard" ADD CONSTRAINT "BingoCard_stake_positive"
-      CHECK ("stake" > 0 AND "cardIndex" BETWEEN 0 AND 3);
+      CHECK (("stake" > 0 OR "isBonus") AND "cardIndex" BETWEEN 0 AND 29);
+  END IF;
+
+  -- FAST rounds fund their own prize, so the pot must split exactly. MAIN rooms
+  -- advertise a guaranteed prize before cards are sold and treasury covers any
+  -- shortfall, which makes the rake negative; only non-negativity applies there.
+  IF EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'BingoRound_pot_consistency'
+      AND pg_get_constraintdef(oid) NOT LIKE '%MAIN%'
+  ) THEN
+    ALTER TABLE "BingoRound" DROP CONSTRAINT "BingoRound_pot_consistency";
   END IF;
 
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'BingoRound_pot_consistency') THEN
     ALTER TABLE "BingoRound" ADD CONSTRAINT "BingoRound_pot_consistency"
-      CHECK ("grossPot" >= 0 AND "rakeAmount" >= 0 AND "prizePool" >= 0
-         AND "grossPot" = "rakeAmount" + "prizePool");
+      CHECK ("grossPot" >= 0 AND "prizePool" >= 0
+         AND ("mode" = 'MAIN'
+              OR ("rakeAmount" >= 0 AND "grossPot" = "rakeAmount" + "prizePool")));
   END IF;
 
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'OtpCode_attempts_range') THEN
@@ -195,10 +234,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS "TransactionLedger_ref_kind_unique"
   ON "TransactionLedger" ("refType", "refId", "kind")
   WHERE "refId" IS NOT NULL AND "kind" NOT IN ('CARD_PURCHASE', 'AFFILIATE_COMMISSION');
 
--- At most one live round per room: prevents two sockets starting competing rounds.
+-- At most one live round per room: prevents two sockets starting competing
+-- rounds. RUNNER_UP is live too, so the next round cannot open mid-window.
+DROP INDEX IF EXISTS "BingoRound_one_active_per_room";
 CREATE UNIQUE INDEX IF NOT EXISTS "BingoRound_one_active_per_room"
   ON "BingoRound" ("roomId")
-  WHERE "status" IN ('WAITING', 'LOCKED', 'PLAYING', 'CLAIM_VERIFICATION');
+  WHERE "status" IN ('WAITING', 'LOCKED', 'PLAYING', 'CLAIM_VERIFICATION', 'RUNNER_UP');
 
 -- A player cannot hold two live withdrawal requests at once. PROCESSING is
 -- still live: the agent has the money but the proof has not cleared.
