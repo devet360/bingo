@@ -5,11 +5,13 @@ import {
   ApiError,
   cancelDepositByStaff,
   cancelWithdrawalByStaff,
+  fetchMediaBlobUrl,
   fetchStaffAgents,
   fetchStaffDeposits,
   fetchStaffTransactions,
   fetchStaffWithdrawals,
   newIdempotencyKey,
+  reviewWithdrawalProof,
   topUpAgentFloat,
   updateAgentByAdmin,
 } from '@/lib/api';
@@ -34,6 +36,7 @@ import {
   Pill,
   Select,
   Sheet,
+  Spinner,
   cn,
 } from '@/components/ui';
 import {
@@ -42,6 +45,7 @@ import {
   LEDGER_KINDS,
   LoadingBlock,
   Pager,
+  Row,
   StatusPill,
   WITHDRAWAL_STATUSES,
 } from './shared';
@@ -287,6 +291,14 @@ export function DepositsTab() {
   );
 }
 
+const PROOF_TONE: Record<string, 'mint' | 'gold' | 'blue' | 'danger' | 'neutral'> = {
+  NOT_REQUIRED: 'neutral',
+  PENDING: 'gold',
+  MANUAL: 'blue',
+  VERIFIED: 'mint',
+  FAILED: 'danger',
+};
+
 export function WithdrawalsTab() {
   const { t } = useI18n();
   const [status, setStatus] = useState<'ALL' | WithdrawalStatus>('ALL');
@@ -295,6 +307,14 @@ export function WithdrawalsTab() {
   const [meta, setMeta] = useState<PageMeta | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  const [reviewTarget, setReviewTarget] = useState<StaffWithdrawal | null>(null);
+  const [reviewNote, setReviewNote] = useState('');
+  const [reviewBusy, setReviewBusy] = useState<'VERIFIED' | 'FAILED' | null>(null);
+  const [reviewError, setReviewError] = useState<string | null>(null);
+  const [shotUrl, setShotUrl] = useState<string | null>(null);
+  const [shotError, setShotError] = useState<string | null>(null);
+
+  const reviewProof = reviewTarget?.proofs[0] ?? null;
 
   const load = useCallback(async () => {
     try {
@@ -314,6 +334,30 @@ export function WithdrawalsTab() {
     void load();
   }, [load]);
 
+  useEffect(() => {
+    setShotUrl(null);
+    setShotError(null);
+    if (!reviewProof?.mediaAssetId) return;
+    let revoked: string | null = null;
+    let cancelled = false;
+    void fetchMediaBlobUrl(reviewProof.mediaAssetId)
+      .then((url) => {
+        if (cancelled) {
+          URL.revokeObjectURL(url);
+          return;
+        }
+        revoked = url;
+        setShotUrl(url);
+      })
+      .catch(() => {
+        if (!cancelled) setShotError('Could not load the screenshot.');
+      });
+    return () => {
+      cancelled = true;
+      if (revoked) URL.revokeObjectURL(revoked);
+    };
+  }, [reviewProof?.mediaAssetId]);
+
   const cancel = async (withdrawal: StaffWithdrawal) => {
     setBusy(withdrawal.id);
     try {
@@ -326,75 +370,236 @@ export function WithdrawalsTab() {
     }
   };
 
+  const openReview = (withdrawal: StaffWithdrawal) => {
+    setReviewTarget(withdrawal);
+    setReviewNote('');
+    setReviewError(null);
+  };
+
+  const submitReview = async (decision: 'VERIFIED' | 'FAILED') => {
+    if (!reviewTarget || !reviewProof) return;
+    setReviewBusy(decision);
+    setReviewError(null);
+    try {
+      await reviewWithdrawalProof(reviewTarget.id, reviewProof.id, {
+        decision,
+        note: reviewNote.trim() || undefined,
+      });
+      setReviewTarget(null);
+      await load();
+    } catch (caught) {
+      setReviewError(caught instanceof ApiError ? caught.message : t('common.failed'));
+    } finally {
+      setReviewBusy(null);
+    }
+  };
+
   return (
-    <Panel className="overflow-hidden">
-      <FilterBar>
-        <div className="w-44">
-          <Select
-            label={t('common.status')}
-            value={status}
-            onChange={(event) => {
-              setStatus(event.target.value as 'ALL' | WithdrawalStatus);
-              setPage(0);
-            }}
-          >
-            <option value="ALL">{t('common.all')}</option>
-            {WITHDRAWAL_STATUSES.map((option) => (
-              <option key={option} value={option}>
-                {option.toLowerCase()}
-              </option>
-            ))}
-          </Select>
+    <>
+      <Panel className="overflow-hidden">
+        <FilterBar>
+          <div className="w-44">
+            <Select
+              label={t('common.status')}
+              value={status}
+              onChange={(event) => {
+                setStatus(event.target.value as 'ALL' | WithdrawalStatus);
+                setPage(0);
+              }}
+            >
+              <option value="ALL">{t('common.all')}</option>
+              {WITHDRAWAL_STATUSES.map((option) => (
+                <option key={option} value={option}>
+                  {option.toLowerCase()}
+                </option>
+              ))}
+            </Select>
+          </div>
+        </FilterBar>
+        {error ? (
+          <div className="p-4">
+            <ErrorNote>{error}</ErrorNote>
+          </div>
+        ) : null}
+        {rows === null ? (
+          <LoadingBlock />
+        ) : rows.length === 0 ? (
+          <div className="p-4">
+            <EmptyState title={t('staff.noRows')} />
+          </div>
+        ) : (
+          <ul className="divide-y divide-line/60">
+            {rows.map((withdrawal) => {
+              const proof = withdrawal.proofs[0] ?? null;
+              const reviewable =
+                withdrawal.status === 'PROCESSING' &&
+                proof !== null &&
+                (proof.status === 'PENDING' || proof.status === 'MANUAL');
+              return (
+                <li key={withdrawal.id} className="px-4 py-3">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div className="flex items-center gap-3">
+                      <span className="font-display text-lg font-bold tracking-[0.18em]">
+                        {withdrawal.payoutCode}
+                      </span>
+                      <div>
+                        <PlayerCell player={withdrawal.player} agentCode={withdrawal.agentCode} />
+                        <p className="text-[10px] text-muted">
+                          {formatCredits(withdrawal.amount)} · net {formatCredits(withdrawal.netAmount)} ·{' '}
+                          {formatDateTime(withdrawal.createdAt)}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <StatusPill status={withdrawal.status} />
+                      {withdrawal.status === 'PROCESSING' || withdrawal.status === 'ESCROWED' ? (
+                        <Button
+                          size="sm"
+                          variant="danger"
+                          loading={busy === withdrawal.id}
+                          onClick={() => void cancel(withdrawal)}
+                        >
+                          {t('staff.cancelRequest')}
+                        </Button>
+                      ) : null}
+                    </div>
+                  </div>
+                  {withdrawal.payoutAccount ? (
+                    <p className="mt-1 text-[10px] text-muted">
+                      Payout account: {withdrawal.payoutAccount.accountName} ·{' '}
+                      <span className="font-mono">{withdrawal.payoutAccount.accountNumber}</span>
+                      {withdrawal.payoutAccount.provider
+                        ? ` · ${withdrawal.payoutAccount.provider}`
+                        : ''}
+                    </p>
+                  ) : null}
+                  {withdrawal.task ? (
+                    <p className="text-[10px] text-muted">
+                      Task {withdrawal.task.status.toLowerCase()}
+                      {withdrawal.task.slaDeadline
+                        ? ` · SLA ${formatDateTime(withdrawal.task.slaDeadline)}`
+                        : ''}
+                    </p>
+                  ) : null}
+                  {proof ? (
+                    <div className="mt-2 flex flex-wrap items-center justify-between gap-2 rounded-lg bg-ink/40 px-2.5 py-1.5">
+                      <p className="text-[10px] text-muted">
+                        Proof {proof.status.toLowerCase()}
+                        {proof.reference ? ` · ref ${proof.reference}` : ''}
+                        {proof.paidAmount ? ` · paid ${formatCredits(proof.paidAmount)}` : ''}
+                      </p>
+                      {reviewable ? (
+                        <Button size="sm" variant="gold" onClick={() => openReview(withdrawal)}>
+                          Review proof
+                        </Button>
+                      ) : null}
+                    </div>
+                  ) : withdrawal.status === 'PROCESSING' ? (
+                    <p className="mt-1 text-[10px] text-warn">
+                      {t('staff.noProofs')}
+                    </p>
+                  ) : null}
+                </li>
+              );
+            })}
+          </ul>
+        )}
+        <div className="px-4 pb-3">
+          <Pager page={meta} onPage={setPage} />
         </div>
-      </FilterBar>
-      {error ? (
-        <div className="p-4">
-          <ErrorNote>{error}</ErrorNote>
-        </div>
-      ) : null}
-      {rows === null ? (
-        <LoadingBlock />
-      ) : rows.length === 0 ? (
-        <div className="p-4">
-          <EmptyState title={t('staff.noRows')} />
-        </div>
-      ) : (
-        <ul className="divide-y divide-line/60">
-          {rows.map((withdrawal) => (
-            <li key={withdrawal.id} className="flex flex-wrap items-center justify-between gap-3 px-4 py-3">
-              <div className="flex items-center gap-3">
-                <span className="font-display text-lg font-bold tracking-[0.18em]">
-                  {withdrawal.payoutCode}
-                </span>
-                <div>
-                  <PlayerCell player={withdrawal.player} agentCode={withdrawal.agentCode} />
-                  <p className="text-[10px] text-muted">
-                    {formatCredits(withdrawal.amount)} · net {formatCredits(withdrawal.netAmount)} ·{' '}
-                    {formatDateTime(withdrawal.createdAt)}
-                  </p>
-                </div>
+      </Panel>
+
+      <Sheet
+        open={reviewTarget !== null}
+        title="Review payout proof"
+        onClose={() => setReviewTarget(null)}
+      >
+        {reviewTarget && reviewProof ? (
+          <div className="max-h-[70vh] space-y-3 overflow-y-auto pr-1">
+            <div className="rounded-xl bg-ink/50 p-3 text-xs">
+              <p>
+                Payout{' '}
+                <span className="font-display font-bold tracking-[0.2em] text-gold">
+                  {reviewTarget.payoutCode}
+                </span>{' '}
+                · net {formatCredits(reviewTarget.netAmount)} cr
+              </p>
+              <p className="mt-1 text-muted">
+                {reviewTarget.player.displayName}
+                {reviewTarget.player.phone ? ` · ${reviewTarget.player.phone}` : ''}
+                {reviewTarget.agentCode ? ` · agent ${reviewTarget.agentCode}` : ''}
+              </p>
+              {reviewTarget.payoutAccount ? (
+                <p className="mt-1 text-muted">
+                  Target: {reviewTarget.payoutAccount.accountName} ·{' '}
+                  <span className="font-mono">{reviewTarget.payoutAccount.accountNumber}</span>
+                </p>
+              ) : null}
+            </div>
+
+            <div className="space-y-1 rounded-xl border border-line/70 bg-ink/30 p-3 text-[11px]">
+              <Row label="Status">
+                <Pill tone={PROOF_TONE[reviewProof.status] ?? 'neutral'}>
+                  {reviewProof.status.toLowerCase()}
+                </Pill>
+              </Row>
+              <Row label="Reference">{reviewProof.reference ?? '—'}</Row>
+              <Row label="Paid amount">
+                {reviewProof.paidAmount ? formatCredits(reviewProof.paidAmount) : '—'}
+              </Row>
+              <Row label="Sender account">{reviewProof.senderAccount ?? '—'}</Row>
+              <Row label="Receiver account">{reviewProof.receiverAccount ?? '—'}</Row>
+              <Row label="Paid at">
+                {reviewProof.paidAt ? formatDateTime(reviewProof.paidAt) : '—'}
+              </Row>
+              <Row label="Submitted">{formatDateTime(reviewProof.createdAt)}</Row>
+              {reviewProof.notes ? <Row label="Notes">{reviewProof.notes}</Row> : null}
+              {reviewProof.message ? <Row label="Message">{reviewProof.message}</Row> : null}
+            </div>
+
+            {reviewProof.mediaAssetId ? (
+              <div className="rounded-xl border border-line/70 bg-ink/30 p-2">
+                {shotUrl ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img src={shotUrl} alt="Payment proof" className="max-h-72 w-full rounded-lg object-contain" />
+                ) : shotError ? (
+                  <p className="text-[11px] text-danger">{shotError}</p>
+                ) : (
+                  <div className="flex justify-center py-4">
+                    <Spinner className="h-4 w-4 text-mint" />
+                  </div>
+                )}
               </div>
-              <div className="flex items-center gap-2">
-                <StatusPill status={withdrawal.status} />
-                {withdrawal.status === 'ESCROWED' ? (
-                  <Button
-                    size="sm"
-                    variant="danger"
-                    loading={busy === withdrawal.id}
-                    onClick={() => void cancel(withdrawal)}
-                  >
-                    {t('staff.cancelRequest')}
-                  </Button>
-                ) : null}
-              </div>
-            </li>
-          ))}
-        </ul>
-      )}
-      <div className="px-4 pb-3">
-        <Pager page={meta} onPage={setPage} />
-      </div>
-    </Panel>
+            ) : null}
+
+            <Input
+              label="Review note (optional)"
+              value={reviewNote}
+              onChange={(event) => setReviewNote(event.target.value)}
+            />
+            {reviewError ? <ErrorNote>{reviewError}</ErrorNote> : null}
+            <div className="grid grid-cols-2 gap-2">
+              <Button
+                variant="danger"
+                loading={reviewBusy === 'FAILED'}
+                disabled={reviewBusy !== null}
+                onClick={() => void submitReview('FAILED')}
+              >
+                Reject proof
+              </Button>
+              <Button
+                variant="gold"
+                loading={reviewBusy === 'VERIFIED'}
+                disabled={reviewBusy !== null}
+                onClick={() => void submitReview('VERIFIED')}
+              >
+                Verify & settle
+              </Button>
+            </div>
+          </div>
+        ) : null}
+      </Sheet>
+    </>
   );
 }
 

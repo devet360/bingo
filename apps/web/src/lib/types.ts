@@ -9,7 +9,13 @@ export type Variant = 'US_75' | 'UK_90';
 export type WinPattern = 'HORIZONTAL' | 'VERTICAL' | 'DIAGONAL' | 'FOUR_CORNERS' | 'FULL_HOUSE';
 export type PaymentMethod = 'MOBILE_MONEY' | 'BANK_TRANSFER' | 'CASH' | 'CARD' | 'CRYPTO';
 export type DepositStatus = 'PENDING' | 'PROCESSING' | 'CREDITED' | 'REJECTED' | 'EXPIRED' | 'CANCELLED' | 'DISPUTED';
-export type WithdrawalStatus = 'ESCROWED' | 'SETTLED' | 'CANCELLED' | 'EXPIRED' | 'DISPUTED';
+export type WithdrawalStatus =
+  | 'ESCROWED'
+  | 'PROCESSING'
+  | 'SETTLED'
+  | 'CANCELLED'
+  | 'EXPIRED'
+  | 'DISPUTED';
 export type VerificationStatus = 'NOT_REQUIRED' | 'PENDING' | 'VERIFIED' | 'FAILED' | 'MANUAL';
 export type VerificationSource = 'SERVER' | 'CLIENT' | 'RELAY';
 
@@ -112,6 +118,55 @@ export interface VerifyReceiptResult {
   needsClientFetch?: boolean;
 }
 
+export interface PayoutAccount {
+  id: string;
+  method: PaymentMethod;
+  provider: string | null;
+  accountName: string;
+  accountNumber: string;
+  isDefault: boolean;
+  isActive: boolean;
+  verifiedAt: string | null;
+  lastUsedAt: string | null;
+  createdAt: string;
+}
+
+export interface WithdrawalProof {
+  id: string;
+  withdrawalId: string;
+  method: PaymentMethod;
+  reference: string | null;
+  paidAmount: string | null;
+  currency: string;
+  senderAccount: string | null;
+  receiverAccount: string | null;
+  paidAt: string | null;
+  mediaAssetId: string | null;
+  notes: string | null;
+  status: VerificationStatus;
+  message: string | null;
+  reviewedAt: string | null;
+  createdAt: string;
+}
+
+export type AgentTaskStatus = 'OFFERED' | 'CLAIMED' | 'COMPLETED' | 'CANCELLED' | 'EXPIRED';
+
+export interface AgentTask {
+  id: string;
+  type: 'DEPOSIT' | 'WITHDRAWAL';
+  status: AgentTaskStatus;
+  agentProfileId: string;
+  agentCode?: string | null;
+  depositId: string | null;
+  withdrawalId: string | null;
+  assignedAt: string;
+  claimedAt: string | null;
+  completedAt: string | null;
+  slaDeadline: string | null;
+  overdue: boolean;
+  reassignCount: number;
+}
+
 export interface Agent {
   id: string;
   agentCode: string;
@@ -123,6 +178,7 @@ export interface Agent {
   city: string | null;
   district: string | null;
   isOnline: boolean;
+  acceptingTasks: boolean;
   lastSeenAt: string | null;
   ratingAvg: string;
   ratingCount: number;
@@ -303,8 +359,11 @@ export interface Withdrawal {
   netAmount: string;
   agentProfileId: string | null;
   paymentAccountId: string | null;
+  payoutAccountId: string | null;
+  proofRequired: boolean;
   playerNote: string | null;
   agentNote: string | null;
+  holdAt: string | null;
   expiresAt: string;
   settledAt: string | null;
   cancelledAt: string | null;
@@ -420,6 +479,9 @@ export interface StaffDeposit extends Deposit {
 export interface StaffWithdrawal extends Withdrawal {
   player: { displayName: string; phone: string | null };
   agentCode: string | null;
+  payoutAccount: { accountName: string; accountNumber: string; provider: string | null } | null;
+  proofs: WithdrawalProof[];
+  task: { status: AgentTaskStatus; slaDeadline: string | null } | null;
 }
 
 export interface UserDetail {
@@ -570,6 +632,7 @@ export interface GameProviderGame {
   launchUrlTemplate: string | null;
   minStake: string | null;
   maxStake: string | null;
+  maxWin: string | null;
   enabled: boolean;
   sortOrder: number;
 }
@@ -581,11 +644,41 @@ export interface GameProvider {
   kind: ProviderKind;
   apiBaseUrl: string | null;
   hasSecret: boolean;
+  currency: string;
+  maxWin: string | null;
   enabled: boolean;
   sortOrder: number;
   config: unknown;
   createdAt: string;
   games: GameProviderGame[];
+}
+
+export interface ProviderCallbackLog {
+  id: string;
+  type: string;
+  externalTxnId: string | null;
+  externalSessionId: string | null;
+  signatureValid: boolean | null;
+  httpStatus: number;
+  amount: string | null;
+  currency: string | null;
+  error: string | null;
+  ip: string | null;
+  payload: unknown;
+  createdAt: string;
+}
+
+export interface ProviderTransaction {
+  id: string;
+  type: string;
+  externalTxnId: string;
+  status: string;
+  amount: string;
+  currency: string;
+  ledgerId: string | null;
+  user: { displayName: string; phone: string | null } | null;
+  externalSessionId: string | null;
+  createdAt: string;
 }
 
 export interface ProviderSession {
@@ -602,5 +695,100 @@ export interface ProviderSession {
 export interface AdminSettings {
   referral: { commissionBps: number; minRakeToPay: string };
   bonus: { defaultWageringMultiplier: number; defaultExpiryDays: number };
+}
+
+// ─────────────────────────────── support tickets ───────────────────────────────
+
+export type SupportTicketStatus = 'OPEN' | 'PENDING' | 'RESOLVED' | 'CLOSED';
+export type SupportTopic = 'DEPOSIT' | 'WITHDRAWAL' | 'ACCOUNT' | 'PAYMENTS' | 'OTHER';
+export type SupportAuthor = 'PLAYER' | 'STAFF' | 'BOT' | 'SYSTEM';
+
+export interface SupportTicket {
+  id: string;
+  code: string;
+  playerId: string;
+  topic: SupportTopic;
+  status: SupportTicketStatus;
+  locale: string;
+  subject: string;
+  assigneeId: string | null;
+  claimedAt: string | null;
+  resolvedAt: string | null;
+  unreadForStaff: number;
+  unreadForPlayer: number;
+  lastMessageAt: string;
+  lastPlayerMessageAt: string | null;
+  lastStaffMessageAt: string | null;
+  createdAt: string;
+}
+
+export interface SupportPlayerSummary {
+  id: string;
+  displayName: string;
+  phone: string | null;
+  telegramUsername: string | null;
+  locale?: string;
+  status?: string;
+  createdAt?: string;
+}
+
+export interface SupportPreview {
+  author: SupportAuthor;
+  body: string;
+  mediaAssetId: string | null;
+  createdAt: string;
+}
+
+export interface SupportTicketRow extends SupportTicket {
+  player: SupportPlayerSummary;
+  assignee: { id: string; displayName: string } | null;
+  /** Absent on the detail endpoint, which returns the full message list instead. */
+  preview?: SupportPreview | null;
+}
+
+export interface SupportMessage {
+  id: string;
+  ticketId: string;
+  author: SupportAuthor;
+  authorUserId: string | null;
+  body: string;
+  mediaAssetId: string | null;
+  deliveredAt: string | null;
+  deliveryAttempts: number;
+  deliveryError: string | null;
+  createdAt: string;
+}
+
+export interface SupportWalletSnapshot {
+  available: string;
+  bonus: string;
+  escrow: string;
+  locked: string;
+}
+
+export interface SupportDepositRow {
+  id: string;
+  code: string;
+  amount: string;
+  status: string;
+  method: string;
+  createdAt: string;
+}
+
+export interface SupportWithdrawalRow {
+  id: string;
+  amount: string;
+  netAmount: string;
+  status: string;
+  method: string;
+  createdAt: string;
+}
+
+export interface SupportTicketDetail {
+  ticket: SupportTicketRow;
+  messages: SupportMessage[];
+  wallet: SupportWalletSnapshot | null;
+  deposits: SupportDepositRow[];
+  withdrawals: SupportWithdrawalRow[];
 }
 

@@ -150,17 +150,24 @@ export interface AgentAssignment {
 }
 
 /**
- * Picks the agent a player should pay for a deposit. Online and
- * automation-capable agents come first, then reputation and float; the
+ * Picks the agent a player should pay. Only signed-in, accepting, free agents
+ * qualify: the task lock means an agent works one request at a time. Online
+ * and automation-capable agents come first, then reputation and float; the
  * payment account must also accept the requested amount.
  */
 export async function assignAgentForPayment(params: {
   method: PaymentMethod;
   amount: bigint;
+  excludeAgentIds?: string[];
 }): Promise<AgentAssignment | null> {
   const agents = await prisma.agentProfile.findMany({
     where: {
       status: AgentStatus.ACTIVE,
+      acceptingTasks: true,
+      ...(params.excludeAgentIds?.length
+        ? { id: { notIn: params.excludeAgentIds } }
+        : {}),
+      tasks: { none: { status: { in: ['OFFERED', 'CLAIMED'] } } },
       paymentAccounts: { some: { isActive: true, method: params.method } },
     },
     include: {
@@ -205,6 +212,16 @@ export async function setAgentPresence(userId: string, isOnline: boolean): Promi
   return prisma.agentProfile.update({
     where: { userId },
     data: { isOnline, lastSeenAt: new Date() },
+  });
+}
+
+export async function setAgentAvailability(
+  userId: string,
+  acceptingTasks: boolean,
+): Promise<AgentProfile> {
+  return prisma.agentProfile.update({
+    where: { userId },
+    data: { acceptingTasks, lastSeenAt: new Date() },
   });
 }
 

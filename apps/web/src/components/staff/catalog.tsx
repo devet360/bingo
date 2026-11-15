@@ -6,10 +6,14 @@ import {
   deleteGameProvider,
   deleteGameProviderGame,
   fetchGameProviders,
+  fetchProviderCallbacks,
+  fetchProviderSettings,
+  fetchProviderTransactions,
+  updateProviderSettings,
   upsertGameProvider,
   upsertGameProviderGame,
 } from '@/lib/api';
-import { creditsToMinor, formatStake } from '@/lib/format';
+import { creditsToMinor, formatCredits, formatDateTime, formatStake, minorToCreditsInput } from '@/lib/format';
 import { getRuntimeConfig } from '@/lib/runtime-config';
 import {
   Button,
@@ -20,9 +24,17 @@ import {
   Pill,
   Select,
   Sheet,
+  Spinner,
 } from '@/components/ui';
-import type { GameProvider, GameProviderGame, ProviderKind } from '@/lib/types';
-import { LoadingBlock, SectionTitle } from './shared';
+import type {
+  GameProvider,
+  GameProviderGame,
+  PageMeta,
+  ProviderCallbackLog,
+  ProviderKind,
+  ProviderTransaction,
+} from '@/lib/types';
+import { LoadingBlock, Pager, SectionTitle } from './shared';
 
 interface ProviderDraft {
   code: string;
@@ -30,6 +42,8 @@ interface ProviderDraft {
   kind: ProviderKind;
   apiBaseUrl: string;
   webhookSecret: string;
+  currency: string;
+  maxWin: string;
   enabled: boolean;
   sortOrder: string;
 }
@@ -41,6 +55,8 @@ function emptyProvider(): ProviderDraft {
     kind: 'AGGREGATOR',
     apiBaseUrl: '',
     webhookSecret: '',
+    currency: 'ETB',
+    maxWin: '',
     enabled: false,
     sortOrder: '0',
   };
@@ -53,6 +69,8 @@ function toProviderDraft(provider: GameProvider): ProviderDraft {
     kind: provider.kind,
     apiBaseUrl: provider.apiBaseUrl ?? '',
     webhookSecret: '',
+    currency: provider.currency,
+    maxWin: provider.maxWin ? minorToCreditsInput(provider.maxWin) : '',
     enabled: provider.enabled,
     sortOrder: String(provider.sortOrder),
   };
@@ -64,6 +82,7 @@ export function GameProvidersTab() {
   const [editing, setEditing] = useState<GameProvider | null>(null);
   const [creating, setCreating] = useState(false);
   const [gameTarget, setGameTarget] = useState<GameProvider | null>(null);
+  const [logsTarget, setLogsTarget] = useState<GameProvider | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -102,6 +121,7 @@ export function GameProvidersTab() {
 
   return (
     <div className="space-y-4">
+      <ProviderSettingsPanel />
       <Panel className="overflow-hidden">
         <div className="flex flex-wrap items-start justify-between gap-3 border-b border-line/60 px-4 py-3">
           <div>
@@ -147,6 +167,10 @@ export function GameProvidersTab() {
                       <Pill tone={provider.hasSecret ? 'gold' : 'danger'}>
                         {provider.hasSecret ? 'signed' : 'no secret'}
                       </Pill>
+                      <Pill tone="neutral">{provider.currency}</Pill>
+                      {provider.maxWin ? (
+                        <Pill tone="warn">cap {formatStake(provider.maxWin)}</Pill>
+                      ) : null}
                     </div>
                     <p className="mt-0.5 font-mono text-[11px] text-muted">{provider.code}</p>
                     <p className="mt-1 break-all text-[10px] text-muted">
@@ -156,6 +180,9 @@ export function GameProvidersTab() {
                   <div className="flex shrink-0 flex-wrap gap-1.5">
                     <Button size="sm" variant="outline" onClick={() => setEditing(provider)}>
                       Configure
+                    </Button>
+                    <Button size="sm" variant="ghost" onClick={() => setLogsTarget(provider)}>
+                      Logs
                     </Button>
                     <Button size="sm" variant="ghost" onClick={() => setGameTarget(provider)}>
                       Add game
@@ -225,7 +252,78 @@ export function GameProvidersTab() {
           void load();
         }}
       />
+
+      <ProviderLogSheet provider={logsTarget} onClose={() => setLogsTarget(null)} />
     </div>
+  );
+}
+
+function ProviderSettingsPanel() {
+  const [draft, setDraft] = useState('');
+  const [defaultMaxWin, setDefaultMaxWin] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+
+  useEffect(() => {
+    fetchProviderSettings()
+      .then((settings) => {
+        setDraft(minorToCreditsInput(settings.maxWin));
+        setDefaultMaxWin(settings.defaultMaxWin);
+      })
+      .catch(() => setError('Could not load provider payout settings.'));
+  }, []);
+
+  const save = async () => {
+    const minor = creditsToMinor(draft);
+    if (minor === null) {
+      setError('Enter a cap like 30000 or 12500.50.');
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const saved = await updateProviderSettings(minor);
+      setDraft(minorToCreditsInput(saved.maxWin));
+      setNotice(`Platform win cap set to ${formatCredits(saved.maxWin)} credits.`);
+    } catch (caught) {
+      setError(caught instanceof ApiError ? caught.message : 'Could not save the win cap.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Panel className="p-4">
+      <SectionTitle>Provider payout limits</SectionTitle>
+      <p className="mt-1 max-w-2xl text-[11px] text-muted">
+        Every provider callback is checked against the game cap, then the provider cap, then this
+        platform-wide fallback. Single wins above the applicable cap are rejected and logged.
+      </p>
+      <div className="mt-3 flex flex-wrap items-end gap-2">
+        <div className="w-44">
+          <Input
+            label="Platform max win (credits)"
+            inputMode="decimal"
+            value={draft}
+            onChange={(event) => setDraft(event.target.value)}
+            hint={
+              defaultMaxWin ? `Default ${formatCredits(defaultMaxWin)} credits` : undefined
+            }
+          />
+        </div>
+        <Button loading={busy} onClick={() => void save()}>
+          Save cap
+        </Button>
+      </div>
+      {notice ? <p className="mt-2 text-[11px] text-mint">{notice}</p> : null}
+      {error ? (
+        <div className="mt-2">
+          <ErrorNote>{error}</ErrorNote>
+        </div>
+      ) : null}
+    </Panel>
   );
 }
 
@@ -268,6 +366,16 @@ function ProviderSheet({
       setError('The signing secret must be at least 16 characters.');
       return;
     }
+    const currency = draft.currency.trim().toUpperCase();
+    if (!/^[A-Z]{3,8}$/.test(currency)) {
+      setError('Use a currency code like ETB or USD.');
+      return;
+    }
+    const maxWin = draft.maxWin.trim() ? creditsToMinor(draft.maxWin) : null;
+    if (draft.maxWin.trim() && maxWin === null) {
+      setError('The provider win cap must look like 30000 or 12500.50.');
+      return;
+    }
     const order = Number(draft.sortOrder || '0');
     if (!Number.isInteger(order) || order < 0) {
       setError('Sort order must be zero or a positive whole number.');
@@ -280,6 +388,8 @@ function ProviderSheet({
         kind: draft.kind,
         apiBaseUrl: draft.apiBaseUrl.trim() || null,
         webhookSecret: draft.webhookSecret.trim() || undefined,
+        currency,
+        maxWin,
         enabled: draft.enabled,
         sortOrder: order,
       });
@@ -326,6 +436,22 @@ function ProviderSheet({
           onChange={(event) => patch({ apiBaseUrl: event.target.value })}
           placeholder="https://api.provider.example"
         />
+        <div className="grid grid-cols-2 gap-3">
+          <Input
+            label="Currency"
+            value={draft.currency}
+            onChange={(event) => patch({ currency: event.target.value.toUpperCase() })}
+            placeholder="ETB"
+            hint="Callbacks in another currency are rejected."
+          />
+          <Input
+            label="Max win (credits)"
+            inputMode="decimal"
+            value={draft.maxWin}
+            onChange={(event) => patch({ maxWin: event.target.value })}
+            hint="Falls back to the platform cap when blank."
+          />
+        </div>
         <Input
           label="Webhook secret"
           type="password"
@@ -370,6 +496,7 @@ interface GameDraft {
   launchUrlTemplate: string;
   minStake: string;
   maxStake: string;
+  maxWin: string;
   enabled: boolean;
   sortOrder: string;
 }
@@ -383,6 +510,7 @@ function emptyGame(): GameDraft {
     launchUrlTemplate: '',
     minStake: '',
     maxStake: '',
+    maxWin: '',
     enabled: true,
     sortOrder: '0',
   };
@@ -418,12 +546,17 @@ function GameSheet({
     }
     const minStake = draft.minStake.trim() ? creditsToMinor(draft.minStake) : null;
     const maxStake = draft.maxStake.trim() ? creditsToMinor(draft.maxStake) : null;
+    const maxWin = draft.maxWin.trim() ? creditsToMinor(draft.maxWin) : null;
     if (draft.minStake.trim() && minStake === null) {
       setError('The minimum stake must look like 1 or 0.50.');
       return;
     }
     if (draft.maxStake.trim() && maxStake === null) {
       setError('The maximum stake must look like 100 or 99.50.');
+      return;
+    }
+    if (draft.maxWin.trim() && maxWin === null) {
+      setError('The game win cap must look like 30000 or 12500.50.');
       return;
     }
     const order = Number(draft.sortOrder || '0');
@@ -441,6 +574,7 @@ function GameSheet({
         launchUrlTemplate: draft.launchUrlTemplate.trim() || null,
         minStake,
         maxStake,
+        maxWin,
         enabled: draft.enabled,
         sortOrder: order,
       });
@@ -503,6 +637,13 @@ function GameSheet({
             onChange={(event) => patch({ maxStake: event.target.value })}
           />
           <Input
+            label="Max win (credits)"
+            inputMode="decimal"
+            value={draft.maxWin}
+            onChange={(event) => patch({ maxWin: event.target.value })}
+            hint="Overrides the provider cap for this game."
+          />
+          <Input
             label="Sort order"
             inputMode="numeric"
             value={draft.sortOrder}
@@ -514,6 +655,138 @@ function GameSheet({
           Save game
         </Button>
       </div>
+    </Sheet>
+  );
+}
+
+function ProviderLogSheet({
+  provider,
+  onClose,
+}: {
+  provider: GameProvider | null;
+  onClose: () => void;
+}) {
+  const [mode, setMode] = useState<'callbacks' | 'transactions'>('callbacks');
+  const [callbacks, setCallbacks] = useState<ProviderCallbackLog[] | null>(null);
+  const [transactions, setTransactions] = useState<ProviderTransaction[] | null>(null);
+  const [meta, setMeta] = useState<PageMeta | null>(null);
+  const [page, setPage] = useState(0);
+  const [error, setError] = useState<string | null>(null);
+  const code = provider?.code ?? null;
+
+  useEffect(() => {
+    setPage(0);
+  }, [code, mode]);
+
+  useEffect(() => {
+    if (!code) return;
+    let cancelled = false;
+    setError(null);
+    const request =
+      mode === 'callbacks'
+        ? fetchProviderCallbacks(code, { page }).then((result) => {
+            if (cancelled) return;
+            setCallbacks(result.data);
+            setMeta(result.page);
+          })
+        : fetchProviderTransactions(code, { page }).then((result) => {
+            if (cancelled) return;
+            setTransactions(result.data);
+            setMeta(result.page);
+          });
+    request.catch((caught) => {
+      if (!cancelled) {
+        setError(caught instanceof ApiError ? caught.message : 'Could not load provider logs.');
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [code, mode, page]);
+
+  const rows = mode === 'callbacks' ? callbacks : transactions;
+
+  return (
+    <Sheet open={provider !== null} title={`${provider?.name ?? 'Provider'} activity`} onClose={onClose}>
+      {provider ? (
+        <div className="space-y-3">
+          <div className="grid grid-cols-2 gap-1 rounded-xl border border-line/70 bg-ink/40 p-1">
+            {(
+              [
+                { value: 'callbacks' as const, label: 'Callbacks' },
+                { value: 'transactions' as const, label: 'Transactions' },
+              ]
+            ).map((item) => (
+              <button
+                key={item.value}
+                type="button"
+                aria-pressed={mode === item.value}
+                onClick={() => setMode(item.value)}
+                className={
+                  mode === item.value
+                    ? 'h-9 rounded-lg bg-mint/15 text-xs font-semibold text-mint'
+                    : 'h-9 rounded-lg text-xs font-semibold text-muted hover:text-text'
+                }
+              >
+                {item.label}
+              </button>
+            ))}
+          </div>
+
+          {error ? <ErrorNote>{error}</ErrorNote> : null}
+
+          {rows === null ? (
+            <div className="flex justify-center py-6">
+              <Spinner className="h-5 w-5 text-mint" />
+            </div>
+          ) : rows.length === 0 ? (
+            <EmptyState title="Nothing logged yet" body="Provider traffic appears here as it happens." />
+          ) : mode === 'callbacks' ? (
+            <ul className="divide-y divide-line/60">
+              {(callbacks ?? []).map((log) => (
+                <li key={log.id} className="py-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-xs font-semibold">{log.type}</span>
+                    <Pill tone={log.httpStatus < 300 ? 'mint' : 'danger'}>{log.httpStatus}</Pill>
+                  </div>
+                  <p className="text-[10px] text-muted">
+                    {log.externalTxnId ?? '—'}
+                    {log.amount ? ` · ${formatCredits(log.amount)}` : ''}
+                    {log.currency ? ` ${log.currency}` : ''}
+                    {log.signatureValid === false ? ' · bad signature' : ''}
+                  </p>
+                  <p className="text-[10px] text-muted">
+                    {formatDateTime(log.createdAt)}
+                    {log.error ? ` · ${log.error}` : ''}
+                  </p>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <ul className="divide-y divide-line/60">
+              {(transactions ?? []).map((transaction) => (
+                <li key={transaction.id} className="py-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-xs font-semibold">
+                      {transaction.type} · {formatCredits(transaction.amount)} {transaction.currency}
+                    </span>
+                    <Pill tone={transaction.status === 'ROLLED_BACK' ? 'neutral' : 'mint'}>
+                      {transaction.status.toLowerCase()}
+                    </Pill>
+                  </div>
+                  <p className="text-[10px] text-muted">
+                    {transaction.externalTxnId}
+                    {transaction.user ? ` · ${transaction.user.displayName}` : ''}
+                  </p>
+                  <p className="text-[10px] text-muted">{formatDateTime(transaction.createdAt)}</p>
+                </li>
+              ))}
+            </ul>
+          )}
+
+          <Pager page={meta} onPage={setPage} />
+        </div>
+      ) : null}
     </Sheet>
   );
 }

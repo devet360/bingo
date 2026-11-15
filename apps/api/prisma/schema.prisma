@@ -126,7 +126,8 @@ enum VerificationSource {
 
 enum WithdrawalStatus {
   ESCROWED // player funds locked, payout code issued
-  SETTLED // agent redeemed payout code, escrow moved to agent float
+  PROCESSING // agent claimed the task and is paying out; commission withheld
+  SETTLED // proof verified, escrow moved to agent float
   CANCELLED
   EXPIRED
   DISPUTED
@@ -164,6 +165,9 @@ enum LedgerKind {
   DEPOSIT
   DEPOSIT_COMMISSION
   WITHDRAWAL_ESCROW
+  WITHDRAWAL_HOLD // escrow -> agent FLOAT_ESCROW while the payout is proven
+  WITHDRAWAL_HOLD_RELEASE // FLOAT_ESCROW -> agent FLOAT once proof is verified
+  WITHDRAWAL_HOLD_REFUND // escrow returned to the player when the agent failed
   WITHDRAWAL_SETTLEMENT
   WITHDRAWAL_COMMISSION
   WITHDRAWAL_REFUND
@@ -195,6 +199,17 @@ enum FloatRequestStatus {
   PENDING
   APPROVED
   REJECTED
+}
+
+// Routing assignment for one deposit or withdrawal. A partial unique index in
+// sql/constraints.sql allows at most one OFFERED/CLAIMED task per agent, which
+// is the single-task lock: an agent never holds two payouts at once.
+enum AgentTaskStatus {
+  OFFERED // pushed to the agent, not yet accepted
+  CLAIMED // agent owns the request and is working it
+  COMPLETED
+  CANCELLED // reassigned to another agent or the request was cancelled
+  EXPIRED // SLA elapsed without completion
 }
 
 enum BingoVariant {
@@ -243,68 +258,103 @@ enum NotificationType {
   DEPOSIT_CREDITED
   DEPOSIT_REJECTED
   WITHDRAWAL_SETTLED
+  WITHDRAWAL_PROCESSING
+  WITHDRAWAL_REFUNDED
   WITHDRAWAL_EXPIRED
   COMMISSION_PAID
   ROUND_RESULT
   AGENT_ALERT
+  SUPPORT_MESSAGE // a player is waiting in the support chat (staff only)
+  SYSTEM
+}
+
+// Support chat opened from the support bot. OPEN = staff should answer,
+// PENDING = waiting for the player, RESOLVED/CLOSED are terminal.
+enum SupportTicketStatus {
+  OPEN
+  PENDING
+  RESOLVED
+  CLOSED
+}
+
+enum SupportTopic {
+  DEPOSIT
+  WITHDRAWAL
+  ACCOUNT
+  PAYMENTS
+  OTHER
+}
+
+enum SupportMessageAuthor {
+  PLAYER
+  STAFF
+  BOT
   SYSTEM
 }
 
 // ═══════════════════════════════ IDENTITY & ACCESS ════════════════════════════
 
 model User {
-  id               String     @id @default(uuid()) @db.Uuid
+  id                    String     @id @default(uuid()) @db.Uuid
   // Telegram is the primary identity for the Mini App. Null for phone-only users.
-  telegramId       BigInt?    @unique
-  telegramUsername String?
-  phone            String?    @unique
+  telegramId            BigInt?    @unique
+  telegramUsername      String?
+  phone                 String?    @unique
   // Set only when the number arrived via the Telegram bot's contact share, which
   // is the sole signup path for players.
-  phoneVerifiedAt  DateTime?
-  email            String?    @unique
-  passwordHash     String?
-  mustChangePassword Boolean  @default(false)
-  displayName      String
-  avatarUrl        String?
-  locale           String     @default("en")
-  countryCode      String?
-  role             UserRole   @default(PLAYER)
-  status           UserStatus @default(ACTIVE)
-  kycStatus        KycStatus  @default(UNVERIFIED)
-  kycReviewedAt    DateTime?
-  referralCode     String     @unique
-  referredById     String?    @db.Uuid
+  phoneVerifiedAt       DateTime?
+  email                 String?    @unique
+  passwordHash          String?
+  mustChangePassword    Boolean    @default(false)
+  displayName           String
+  avatarUrl             String?
+  locale                String     @default("en")
+  countryCode           String?
+  role                  UserRole   @default(PLAYER)
+  status                UserStatus @default(ACTIVE)
+  kycStatus             KycStatus  @default(UNVERIFIED)
+  kycReviewedAt         DateTime?
+  referralCode          String     @unique
+  referredById          String?    @db.Uuid
   // One-time token the staff dashboard puts in a t.me/<bot>?start=staff_<token>
   // link, so a staff member can attach their own Telegram account without the
   // super admin knowing their numeric id.
-  telegramLinkToken     String?   @unique
+  telegramLinkToken     String?    @unique
   telegramLinkExpiresAt DateTime?
-  lastLoginAt      DateTime?
-  createdAt        DateTime   @default(now())
-  updatedAt        DateTime   @updatedAt
+  lastLoginAt           DateTime?
+  createdAt             DateTime   @default(now())
+  updatedAt             DateTime   @updatedAt
 
-  referredBy            User?               @relation("UserReferrals", fields: [referredById], references: [id], onDelete: SetNull)
-  referrals             User[]              @relation("UserReferrals")
+  referredBy            User?                 @relation("UserReferrals", fields: [referredById], references: [id], onDelete: SetNull)
+  referrals             User[]                @relation("UserReferrals")
   wallet                Wallet?
   agentProfile          AgentProfile?
   sessions              AuthSession[]
   bingoCards            BingoCard[]
   bingoClaims           BingoClaim[]
   roundWins             RoundWinner[]
-  ratingsGiven          AgentRating[]       @relation("RatingAuthor")
+  ratingsGiven          AgentRating[]         @relation("RatingAuthor")
   notifications         Notification[]
-  auditLogs             AuditLog[]          @relation("AuditActor")
-  ledgersCreated        TransactionLedger[] @relation("LedgerCreator")
-  depositsAsPlayer      DepositRequest[]    @relation("DepositPlayer")
-  depositsProcessed     DepositRequest[]    @relation("DepositProcessor")
-  withdrawalsAsPlayer   WithdrawalRequest[] @relation("WithdrawalPlayer")
-  withdrawalsProcessed  WithdrawalRequest[] @relation("WithdrawalProcessor")
-  floatRequestsReviewed AgentFloatRequest[] @relation("FloatReviewer")
-  bonuses               Bonus[]              @relation("BonusOwner")
-  bonusesGranted        Bonus[]              @relation("BonusGrantor")
-  referralCommissions   ReferralCommission[] @relation("ReferralCommissions")
-  referralPlays         ReferralCommission[] @relation("ReferralPlayer")
+  auditLogs             AuditLog[]            @relation("AuditActor")
+  ledgersCreated        TransactionLedger[]   @relation("LedgerCreator")
+  depositsAsPlayer      DepositRequest[]      @relation("DepositPlayer")
+  depositsProcessed     DepositRequest[]      @relation("DepositProcessor")
+  withdrawalsAsPlayer   WithdrawalRequest[]   @relation("WithdrawalPlayer")
+  withdrawalsProcessed  WithdrawalRequest[]   @relation("WithdrawalProcessor")
+  floatRequestsReviewed AgentFloatRequest[]   @relation("FloatReviewer")
+  bonuses               Bonus[]               @relation("BonusOwner")
+  bonusesGranted        Bonus[]               @relation("BonusGrantor")
+  referralCommissions   ReferralCommission[]  @relation("ReferralCommissions")
+  referralPlays         ReferralCommission[]  @relation("ReferralPlayer")
   providerSessions      ProviderSession[]
+  providerTransactions  ProviderTransaction[] @relation("ProviderTransactions")
+  payoutAccounts        PlayerPayoutAccount[]
+  mediaAssets           MediaAsset[]          @relation("MediaUploader")
+  proofsSubmitted       WithdrawalProof[]     @relation("ProofSubmitter")
+  proofsReviewed        WithdrawalProof[]     @relation("ProofReviewer")
+  supportTickets        SupportTicket[]       @relation("SupportTickets")
+  supportAssigned       SupportTicket[]       @relation("SupportAssignee")
+  supportMessages       SupportMessage[]      @relation("SupportMessageAuthor")
 
   @@index([role, status])
   @@index([createdAt])
@@ -358,6 +408,9 @@ model AgentProfile {
   city                    String?
   district                String?
   isOnline                Boolean     @default(false)
+  // Agent-controlled availability switch. ACTIVE + isOnline + acceptingTasks
+  // are all required before the routing engine will offer new work.
+  acceptingTasks          Boolean     @default(true)
   lastSeenAt              DateTime?
   ratingAvg               Decimal     @default(0) @db.Decimal(3, 2)
   ratingCount             Int         @default(0)
@@ -392,6 +445,8 @@ model AgentProfile {
   commissions     AgentCommission[]
   ratings         AgentRating[]
   floatRequests   AgentFloatRequest[]
+  tasks           AgentTask[]
+  proofs          WithdrawalProof[]
 
   @@index([status, isOnline, region])
   @@index([tier, status])
@@ -460,7 +515,31 @@ model AgentFloatRequest {
   @@index([agentProfileId, createdAt])
 }
 
-// ═══════════════════════════ DOUBLE-ENTRY LEDGER ══════════════════════════════
+// One row per routed deposit or withdrawal. Exactly one of depositId /
+// withdrawalId is set (CHECK in sql/constraints.sql). Reassignment keeps the
+// row and swaps the agent, bumping reassignCount, so the SLA history is intact.
+model AgentTask {
+  id             String          @id @default(uuid()) @db.Uuid
+  agentProfileId String          @db.Uuid
+  depositId      String?         @unique @db.Uuid
+  withdrawalId   String?         @unique @db.Uuid
+  status         AgentTaskStatus @default(CLAIMED)
+  slaDeadline    DateTime?
+  assignedAt     DateTime        @default(now())
+  claimedAt      DateTime?
+  completedAt    DateTime?
+  reassignCount  Int             @default(0)
+  note           String?
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+
+  agentProfile AgentProfile       @relation(fields: [agentProfileId], references: [id], onDelete: Restrict)
+  deposit      DepositRequest?    @relation(fields: [depositId], references: [id], onDelete: Cascade)
+  withdrawal   WithdrawalRequest? @relation(fields: [withdrawalId], references: [id], onDelete: Cascade)
+
+  @@index([agentProfileId, status])
+  @@index([status, slaDeadline])
+}
 
 // Chart of accounts. Balance is a cache: SUM of its journal entries.
 // Negative balances are only legal on the platform bridge/expense accounts
@@ -582,34 +661,34 @@ model Wallet {
 // bank changing host or a new minimum does not need a deploy. A provider with
 // no parser (or supported = false) can still be offered for manual deposits.
 model DepositProvider {
-  code              String        @id // "telebirr", "cbe", "boa", ...
-  name              String
-  method            PaymentMethod
+  code            String        @id // "telebirr", "cbe", "boa", ...
+  name            String
+  method          PaymentMethod
   // Parser implementation in services/receipts/parsers (null = manual only).
-  parser            String?
+  parser          String?
   // URL template with {ref}, {account} and {phone}. Null = manual only.
-  endpoint          String?
+  endpoint        String?
   // Regex source a reference must match (anchored, no flags).
-  refPattern        String?
-  refHint           String?
-  accountDigits     Int? // last N digits of the receiving account, when required
-  requiresPhone     Boolean       @default(false)
+  refPattern      String?
+  refHint         String?
+  accountDigits   Int? // last N digits of the receiving account, when required
+  requiresPhone   Boolean       @default(false)
   // The reference is a lookup token, not printed on the receipt (Awash, Bunna,
   // ZamZam, eBirr, CBE receipt ids): skip the reference-equality gate.
-  opaqueReference   Boolean       @default(false)
+  opaqueReference Boolean       @default(false)
   // Telebirr and M-Pesa receipt hosts reject connections from outside
   // Ethiopia: the payer's device may fetch the page and submit it back.
-  clientSide        Boolean       @default(false)
+  clientSide      Boolean       @default(false)
   // Whether cheki has a parser for `code`. Admin may enable/disable a
   // supported provider but cannot make an unsupported one auto-verify.
-  supported         Boolean       @default(false)
-  enabled           Boolean       @default(false)
-  sortOrder         Int           @default(0)
-  instructions      String?
-  minAmount         BigInt?
-  maxAmount         BigInt?
-  createdAt         DateTime      @default(now())
-  updatedAt         DateTime      @updatedAt
+  supported       Boolean       @default(false)
+  enabled         Boolean       @default(false)
+  sortOrder       Int           @default(0)
+  instructions    String?
+  minAmount       BigInt?
+  maxAmount       BigInt?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
 
   deposits      DepositRequest[]
   verifications ReceiptVerification[]
@@ -618,41 +697,41 @@ model DepositProvider {
 }
 
 model DepositRequest {
-  id               String        @id @default(uuid()) @db.Uuid
+  id                  String              @id @default(uuid()) @db.Uuid
   // 6-digit code the player shows the agent. Unique only among open requests
   // (partial index in sql/constraints.sql) so the 1M namespace can be recycled.
-  code             String
-  idempotencyKey   String        @unique
-  playerId         String        @db.Uuid
-  agentProfileId   String?       @db.Uuid // null = open to any online agent
-  paymentAccountId String?       @db.Uuid
-  method           PaymentMethod
-  amount           BigInt
-  creditedAmount   BigInt?
-  status           DepositStatus @default(PENDING)
-  receiptUrl       String?
-  externalRef      String? // MoMo/bank reference typed by the player
+  code                String
+  idempotencyKey      String              @unique
+  playerId            String              @db.Uuid
+  agentProfileId      String?             @db.Uuid // null = open to any online agent
+  paymentAccountId    String?             @db.Uuid
+  method              PaymentMethod
+  amount              BigInt
+  creditedAmount      BigInt?
+  status              DepositStatus       @default(PENDING)
+  receiptUrl          String?
+  externalRef         String? // MoMo/bank reference typed by the player
   // Provider + receipt reference when the deposit is to be verified
   // automatically against the bank's receipt page.
-  providerCode     String?
-  receiptReference String?
+  providerCode        String?
+  receiptReference    String?
   // Extra inputs some banks need to look the receipt up (BOA: last 5 digits of
   // an account; CBE Birr: the payer phone). Kept only until verification.
-  receiptAccount   String?
-  receiptPhone     String?
-  verificationStatus  VerificationStatus @default(NOT_REQUIRED)
+  receiptAccount      String?
+  receiptPhone        String?
+  verificationStatus  VerificationStatus  @default(NOT_REQUIRED)
   verificationMessage String?
   verificationSource  VerificationSource?
-  autoVerified     Boolean       @default(false)
-  verifiedAt       DateTime?
-  playerNote       String?
-  agentNote        String?
-  processedById    String?       @db.Uuid
-  expiresAt        DateTime
-  claimedAt        DateTime? // agent opened/claimed the request
-  settledAt        DateTime? // wallet credited
-  createdAt        DateTime      @default(now())
-  updatedAt        DateTime      @updatedAt
+  autoVerified        Boolean             @default(false)
+  verifiedAt          DateTime?
+  playerNote          String?
+  agentNote           String?
+  processedById       String?             @db.Uuid
+  expiresAt           DateTime
+  claimedAt           DateTime? // agent opened/claimed the request
+  settledAt           DateTime? // wallet credited
+  createdAt           DateTime            @default(now())
+  updatedAt           DateTime            @updatedAt
 
   player         User                 @relation("DepositPlayer", fields: [playerId], references: [id], onDelete: Restrict)
   agentProfile   AgentProfile?        @relation(fields: [agentProfileId], references: [id], onDelete: SetNull)
@@ -662,6 +741,7 @@ model DepositRequest {
   verification   ReceiptVerification?
   commission     AgentCommission?
   rating         AgentRating?
+  task           AgentTask?
 
   @@index([agentProfileId, status, createdAt])
   @@index([playerId, status])
@@ -675,26 +755,26 @@ model DepositRequest {
 // row keeps the parse result for audit and disputes. Values are snapshots; the
 // deposit's own columns win once an agent edits it.
 model ReceiptVerification {
-  id               String             @id @default(uuid()) @db.Uuid
-  providerCode     String
-  reference        String
-  depositId        String?            @unique @db.Uuid
-  status           VerificationStatus @default(PENDING)
-  source           VerificationSource?
-  amount           BigInt?
-  currency         String?
-  senderName       String?
-  senderAccount    String?
-  receiverName     String?
-  receiverAccount  String?
-  transactionDate  String?
+  id                String              @id @default(uuid()) @db.Uuid
+  providerCode      String
+  reference         String
+  depositId         String?             @unique @db.Uuid
+  status            VerificationStatus  @default(PENDING)
+  source            VerificationSource?
+  amount            BigInt?
+  currency          String?
+  senderName        String?
+  senderAccount     String?
+  receiverName      String?
+  receiverAccount   String?
+  transactionDate   String?
   transactionStatus String?
-  message          String?
-  detail           Json?
-  attempts         Int                @default(0)
-  verifiedAt       DateTime?
-  createdAt        DateTime           @default(now())
-  updatedAt        DateTime           @updatedAt
+  message           String?
+  detail            Json?
+  attempts          Int                 @default(0)
+  verifiedAt        DateTime?
+  createdAt         DateTime            @default(now())
+  updatedAt         DateTime            @updatedAt
 
   provider DepositProvider @relation(fields: [providerCode], references: [code], onDelete: Restrict)
   deposit  DepositRequest? @relation(fields: [depositId], references: [id], onDelete: SetNull)
@@ -711,7 +791,10 @@ model WithdrawalRequest {
   idempotencyKey   String           @unique
   playerId         String           @db.Uuid
   agentProfileId   String?          @db.Uuid // null = any active agent may settle it
-  paymentAccountId String?          @db.Uuid
+  paymentAccountId String?          @db.Uuid // agent's paying account
+  // Player's destination account. Required for automated proof checks; cash
+  // payouts still need a screenshot and a manual decision.
+  payoutAccountId  String?          @db.Uuid
   method           PaymentMethod
   amount           BigInt // gross, debited from player
   fee              BigInt           @default(0)
@@ -720,8 +803,10 @@ model WithdrawalRequest {
   playerNote       String?
   agentNote        String?
   processedById    String?          @db.Uuid
+  proofRequired    Boolean          @default(true)
   expiresAt        DateTime
-  settledAt        DateTime? // agent redeemed the payout code
+  holdAt           DateTime? // escrow moved to agent FLOAT_ESCROW
+  settledAt        DateTime? // proof verified, agent float released
   cancelledAt      DateTime?
   createdAt        DateTime         @default(now())
   updatedAt        DateTime         @updatedAt
@@ -729,13 +814,94 @@ model WithdrawalRequest {
   player         User                 @relation("WithdrawalPlayer", fields: [playerId], references: [id], onDelete: Restrict)
   agentProfile   AgentProfile?        @relation(fields: [agentProfileId], references: [id], onDelete: SetNull)
   paymentAccount AgentPaymentAccount? @relation(fields: [paymentAccountId], references: [id], onDelete: SetNull)
+  payoutAccount  PlayerPayoutAccount? @relation(fields: [payoutAccountId], references: [id], onDelete: SetNull)
   processedBy    User?                @relation("WithdrawalProcessor", fields: [processedById], references: [id], onDelete: SetNull)
   commission     AgentCommission?
+  proofs         WithdrawalProof[]
+  task           AgentTask?
 
   @@index([agentProfileId, status, createdAt])
   @@index([playerId, status])
   @@index([status, expiresAt])
   @@index([payoutCode])
+}
+
+// A player's own payout destination (mobile-money wallet, bank account...).
+// Agents pay into this; proofs are cross-checked against its digits.
+model PlayerPayoutAccount {
+  id            String        @id @default(uuid()) @db.Uuid
+  playerId      String        @db.Uuid
+  method        PaymentMethod
+  provider      String? // "Telebirr", "CBE", "Awash", ...
+  accountName   String
+  accountNumber String
+  isDefault     Boolean       @default(false)
+  isActive      Boolean       @default(true)
+  verifiedAt    DateTime?
+  lastUsedAt    DateTime?
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  player      User                @relation(fields: [playerId], references: [id], onDelete: Cascade)
+  withdrawals WithdrawalRequest[]
+
+  @@unique([playerId, method, accountNumber])
+  @@index([playerId, isActive])
+}
+
+// Uploaded evidence (payment screenshots). Bytes live on the media volume;
+// the row keeps the digest so the same file cannot be attached twice.
+model MediaAsset {
+  id           String   @id @default(uuid()) @db.Uuid
+  sha256       String   @unique
+  storageKey   String   @unique
+  mimeType     String
+  byteSize     Int
+  originalName String?
+  purpose      String   @default("proof")
+  uploadedById String?  @db.Uuid
+  createdAt    DateTime @default(now())
+
+  uploadedBy      User?             @relation("MediaUploader", fields: [uploadedById], references: [id], onDelete: SetNull)
+  proofs          WithdrawalProof[]
+  supportMessages SupportMessage[]
+
+  @@index([uploadedById, createdAt])
+}
+
+// Payment evidence for one withdrawal. Agents append a row per attempt; the
+// newest row decides the request. `status` reuses VerificationStatus so an
+// automated check, a manual review and a rejection share one vocabulary.
+model WithdrawalProof {
+  id              String             @id @default(uuid()) @db.Uuid
+  withdrawalId    String             @db.Uuid
+  agentProfileId  String?            @db.Uuid
+  submittedById   String?            @db.Uuid
+  method          PaymentMethod
+  reference       String?
+  paidAmount      BigInt?
+  currency        String             @default("ETB")
+  senderAccount   String? // agent's paying account, as shown on the receipt
+  receiverAccount String? // player's destination, as shown on the receipt
+  paidAt          DateTime?
+  mediaAssetId    String?            @db.Uuid
+  notes           String?
+  status          VerificationStatus @default(PENDING)
+  message         String?
+  reviewedById    String?            @db.Uuid
+  reviewedAt      DateTime?
+  createdAt       DateTime           @default(now())
+  updatedAt       DateTime           @updatedAt
+
+  withdrawal   WithdrawalRequest @relation(fields: [withdrawalId], references: [id], onDelete: Cascade)
+  agentProfile AgentProfile?     @relation(fields: [agentProfileId], references: [id], onDelete: SetNull)
+  submittedBy  User?             @relation("ProofSubmitter", fields: [submittedById], references: [id], onDelete: SetNull)
+  reviewedBy   User?             @relation("ProofReviewer", fields: [reviewedById], references: [id], onDelete: SetNull)
+  mediaAsset   MediaAsset?       @relation(fields: [mediaAssetId], references: [id], onDelete: SetNull)
+
+  @@index([withdrawalId, createdAt])
+  @@index([status, createdAt])
+  @@index([reference])
 }
 
 // ═══════════════════════════════ BINGO ENGINE ═════════════════════════════════
@@ -882,23 +1048,82 @@ model RoundWinner {
 // ═══════════════════════════════ PLATFORM OPS ═════════════════════════════════
 
 model Notification {
-  id        String           @id @default(uuid()) @db.Uuid
-  userId    String           @db.Uuid
-  type      NotificationType
-  title     String
-  body      String
-  data      Json?
-  readAt    DateTime?
+  id             String           @id @default(uuid()) @db.Uuid
+  userId         String           @db.Uuid
+  type           NotificationType
+  title          String
+  body           String
+  data           Json?
+  readAt         DateTime?
   // Set once the bot has pushed this notification to Telegram, so the worker
   // sweep can retry without double-sending.
   telegramSentAt DateTime?
-  createdAt DateTime         @default(now())
+  createdAt      DateTime         @default(now())
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId, readAt])
   @@index([createdAt])
   @@index([telegramSentAt, createdAt])
+}
+
+// One support conversation. The support bot reuses the player's OPEN/PENDING
+// ticket instead of opening another; a partial unique index backs that rule.
+model SupportTicket {
+  id                  String              @id @default(uuid()) @db.Uuid
+  code                String              @unique // short code staff can read out
+  playerId            String              @db.Uuid
+  // Private chat the support bot delivers staff replies to. Snapshot, so the
+  // thread stays routable even if the account is edited later.
+  telegramChatId      BigInt
+  topic               SupportTopic        @default(OTHER)
+  status              SupportTicketStatus @default(OPEN)
+  locale              String              @default("en")
+  subject             String              @default("Support request")
+  assigneeId          String?             @db.Uuid
+  claimedAt           DateTime?
+  resolvedAt          DateTime?
+  // Badge counters for the staff queue and the player's "unread" hint.
+  unreadForStaff      Int                 @default(0)
+  unreadForPlayer     Int                 @default(0)
+  lastMessageAt       DateTime            @default(now())
+  lastPlayerMessageAt DateTime?
+  lastStaffMessageAt  DateTime?
+  createdAt           DateTime            @default(now())
+  updatedAt           DateTime            @updatedAt
+
+  player   User             @relation("SupportTickets", fields: [playerId], references: [id], onDelete: Cascade)
+  assignee User?            @relation("SupportAssignee", fields: [assigneeId], references: [id], onDelete: SetNull)
+  messages SupportMessage[]
+
+  @@index([status, lastMessageAt])
+  @@index([playerId, lastMessageAt])
+  @@index([assigneeId, status])
+}
+
+// Append-only chat transcript. Inbound rows come from the support bot; staff
+// replies are written by the API and delivered over the Bot API.
+model SupportMessage {
+  id                String               @id @default(uuid()) @db.Uuid
+  ticketId          String               @db.Uuid
+  author            SupportMessageAuthor
+  authorUserId      String?              @db.Uuid
+  body              String
+  mediaAssetId      String?              @db.Uuid
+  telegramMessageId BigInt?
+  // Staff replies are queued here and pushed by the support bot. Attempts stop
+  // at 5 so a blocked bot does not retry forever.
+  deliveredAt       DateTime?
+  deliveryAttempts  Int                  @default(0)
+  deliveryError     String?
+  createdAt         DateTime             @default(now())
+
+  ticket     SupportTicket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  authorUser User?         @relation("SupportMessageAuthor", fields: [authorUserId], references: [id], onDelete: SetNull)
+  mediaAsset MediaAsset?   @relation(fields: [mediaAssetId], references: [id], onDelete: SetNull)
+
+  @@index([ticketId, createdAt])
+  @@index([authorUserId, createdAt])
 }
 
 model AuditLog {
@@ -944,25 +1169,25 @@ enum CampaignAudience {
 // Operator-authored announcement / promo surface. Content lives here rather than
 // in SystemConfig so scheduling history and audience targeting stay queryable.
 model Campaign {
-  id            String           @id @default(uuid()) @db.Uuid
-  kind          CampaignKind
-  audience      CampaignAudience @default(ALL)
+  id           String           @id @default(uuid()) @db.Uuid
+  kind         CampaignKind
+  audience     CampaignAudience @default(ALL)
   // Locale-independent defaults; locale variants can be added per row.
-  locale        String           @default("en")
-  title         String
-  body          String
-  imageUrl      String?
-  linkUrl       String?
-  linkLabel     String?
-  enabled       Boolean          @default(true)
-  priority      Int              @default(0)
+  locale       String           @default("en")
+  title        String
+  body         String
+  imageUrl     String?
+  linkUrl      String?
+  linkLabel    String?
+  enabled      Boolean          @default(true)
+  priority     Int              @default(0)
   // POPUP only: how long a dismissal is honoured before it shows again.
-  dismissHours  Int              @default(24)
-  startsAt      DateTime?
-  endsAt        DateTime?
-  createdById   String?          @db.Uuid
-  createdAt     DateTime         @default(now())
-  updatedAt     DateTime         @updatedAt
+  dismissHours Int              @default(24)
+  startsAt     DateTime?
+  endsAt       DateTime?
+  createdById  String?          @db.Uuid
+  createdAt    DateTime         @default(now())
+  updatedAt    DateTime         @updatedAt
 
   @@index([enabled, kind, startsAt, endsAt])
 }
@@ -1028,9 +1253,9 @@ model Bonus {
   createdAt   DateTime    @default(now())
   updatedAt   DateTime    @updatedAt
 
-  user        User            @relation("BonusOwner", fields: [userId], references: [id], onDelete: Cascade)
-  grantedBy   User?           @relation("BonusGrantor", fields: [grantedById], references: [id], onDelete: SetNull)
-  promotion   BonusPromotion? @relation(fields: [promotionId], references: [id], onDelete: SetNull)
+  user      User            @relation("BonusOwner", fields: [userId], references: [id], onDelete: Cascade)
+  grantedBy User?           @relation("BonusGrantor", fields: [grantedById], references: [id], onDelete: SetNull)
+  promotion BonusPromotion? @relation(fields: [promotionId], references: [id], onDelete: SetNull)
 
   @@index([userId, status])
   @@index([status, expiresAt])
@@ -1043,14 +1268,14 @@ model Bonus {
 // player's staked round. Unique per (referrer, round) so a retried settlement
 // cannot pay twice.
 model ReferralCommission {
-  id          String   @id @default(uuid()) @db.Uuid
-  referrerId  String   @db.Uuid
-  playerId    String   @db.Uuid
-  roundId     String?  @db.Uuid
-  rakeBase    BigInt // rake the bps were applied to
-  bps         Int
-  amount      BigInt
-  createdAt   DateTime @default(now())
+  id         String   @id @default(uuid()) @db.Uuid
+  referrerId String   @db.Uuid
+  playerId   String   @db.Uuid
+  roundId    String?  @db.Uuid
+  rakeBase   BigInt // rake the bps were applied to
+  bps        Int
+  amount     BigInt
+  createdAt  DateTime @default(now())
 
   referrer User @relation("ReferralCommissions", fields: [referrerId], references: [id], onDelete: Cascade)
   player   User @relation("ReferralPlayer", fields: [playerId], references: [id], onDelete: Cascade)
@@ -1072,6 +1297,19 @@ enum ProviderSessionStatus {
   EXPIRED
 }
 
+enum ProviderCallbackType {
+  BET
+  WIN
+  ROLLBACK
+  BALANCE
+}
+
+enum ProviderTransactionStatus {
+  APPLIED
+  REJECTED
+  ROLLED_BACK
+}
+
 // Registered games provider. Wallet movements for AGGREGATOR games arrive on a
 // signed callback; `webhookSecret` is rotated from the admin console and never
 // returned by the API.
@@ -1082,14 +1320,21 @@ model GameProvider {
   kind          ProviderKind @default(AGGREGATOR)
   apiBaseUrl    String?
   webhookSecret String?
+  // ISO-4217 code this provider settles in. Callbacks in any other currency
+  // are rejected instead of silently credited.
+  currency      String       @default("ETB")
+  // Operator-wide single-win ceiling in minor units; ProviderGame.maxWin wins.
+  maxWin        BigInt?
   enabled       Boolean      @default(false)
   sortOrder     Int          @default(0)
   config        Json?
   createdAt     DateTime     @default(now())
   updatedAt     DateTime     @updatedAt
 
-  games    ProviderGame[]
-  sessions ProviderSession[]
+  games        ProviderGame[]
+  sessions     ProviderSession[]
+  callbackLogs ProviderCallbackLog[]
+  transactions ProviderTransaction[]
 
   @@index([enabled, sortOrder])
 }
@@ -1104,12 +1349,15 @@ model ProviderGame {
   launchUrlTemplate String? // {token}, {lang}, {currency} placeholders
   minStake          BigInt?
   maxStake          BigInt?
+  // Per-game single-win ceiling in minor units. Null falls back to the
+  // provider cap, then to SystemConfig.
+  maxWin            BigInt?
   enabled           Boolean  @default(true)
   sortOrder         Int      @default(0)
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
 
-  provider GameProvider     @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  provider GameProvider      @relation(fields: [providerId], references: [id], onDelete: Cascade)
   sessions ProviderSession[]
 
   @@unique([providerId, externalId])
@@ -1134,6 +1382,57 @@ model ProviderSession {
   provider GameProvider  @relation(fields: [providerId], references: [id], onDelete: Cascade)
   game     ProviderGame? @relation(fields: [gameId], references: [id], onDelete: SetNull)
 
+  transactions ProviderTransaction[]
+
   @@index([userId, status])
   @@index([providerId, status])
+}
+
+// Raw callback audit. Every hit on /games/callback/:code writes one row,
+// including forged and malformed ones, so replays are always explainable.
+model ProviderCallbackLog {
+  id                String                @id @default(uuid()) @db.Uuid
+  providerCode      String
+  type              ProviderCallbackType? // null when the body did not parse
+  externalTxnId     String?
+  externalSessionId String?
+  signatureValid    Boolean
+  httpStatus        Int?
+  amount            BigInt?
+  currency          String?
+  payload           Json
+  error             String?
+  ip                String?
+  createdAt         DateTime              @default(now())
+
+  provider GameProvider @relation(fields: [providerCode], references: [code], onDelete: Cascade)
+
+  @@index([providerCode, createdAt])
+  @@index([externalTxnId])
+}
+
+// Applied wallet movements. The unique key is per callback type, fixing the
+// old bug where a bet and its win shared one idempotency key.
+model ProviderTransaction {
+  id            String                    @id @default(uuid()) @db.Uuid
+  providerCode  String
+  type          ProviderCallbackType
+  externalTxnId String
+  userId        String?                   @db.Uuid
+  sessionId     String?                   @db.Uuid
+  gameId        String?                   @db.Uuid
+  amount        BigInt
+  currency      String
+  status        ProviderTransactionStatus @default(APPLIED)
+  ledgerId      String?                   @db.Uuid
+  createdAt     DateTime                  @default(now())
+  updatedAt     DateTime                  @updatedAt
+
+  provider GameProvider     @relation(fields: [providerCode], references: [code], onDelete: Cascade)
+  user     User?            @relation("ProviderTransactions", fields: [userId], references: [id], onDelete: SetNull)
+  session  ProviderSession? @relation(fields: [sessionId], references: [id], onDelete: SetNull)
+
+  @@unique([providerCode, externalTxnId, type])
+  @@index([providerCode, createdAt])
+  @@index([userId, createdAt])
 }

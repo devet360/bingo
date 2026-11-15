@@ -35,6 +35,7 @@ import {
 } from '../services/campaigns';
 import {
   getBonusSettings,
+  getConfig,
   getReferralSettings,
   setConfig,
   BONUS_CONFIG_KEY,
@@ -47,6 +48,8 @@ import {
   serializeBonusPromotion,
 } from '../services/bonuses';
 import {
+  DEFAULT_PROVIDER_MAX_WIN,
+  PROVIDER_MAX_WIN_CONFIG_KEY,
   deleteGame,
   deleteProvider,
   listProviderCatalog,
@@ -220,6 +223,8 @@ const ProviderBodySchema = z.object({
   kind: z.enum(['NATIVE', 'AGGREGATOR']).default('AGGREGATOR'),
   apiBaseUrl: z.string().url().max(2048).nullable().optional(),
   webhookSecret: z.string().min(16).max(128).nullable().optional(),
+  currency: z.string().trim().regex(/^[A-Za-z]{3,8}$/).transform((value) => value.toUpperCase()).default('ETB'),
+  maxWin: moneyOrNull,
   enabled: z.boolean().default(false),
   sortOrder: z.number().int().min(0).max(10_000).optional(),
   config: z.unknown().optional(),
@@ -233,8 +238,23 @@ const GameBodySchema = z.object({
   launchUrlTemplate: z.string().trim().max(2048).nullable().optional(),
   minStake: moneyOrNull,
   maxStake: moneyOrNull,
+  maxWin: moneyOrNull,
   enabled: z.boolean().default(true),
   sortOrder: z.number().int().min(0).max(10_000).optional(),
+});
+
+const ProviderMaxWinSchema = z.object({
+  maxWin: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+});
+
+const ProviderCallbacksQuery = z.object({
+  page: z.coerce.number().int().min(0).max(2000).default(0),
+});
+
+const ProviderTransactionsQuery = z.object({
+  type: z.enum(['BET', 'WIN', 'ROLLBACK', 'BALANCE']).optional(),
+  status: z.enum(['APPLIED', 'REJECTED', 'ROLLED_BACK']).optional(),
+  page: z.coerce.number().int().min(0).max(2000).default(0),
 });
 
 export const adminRouter = Router();
@@ -1067,11 +1087,47 @@ adminRouter.get(
           launchUrlTemplate: game.launchUrlTemplate,
           minStake: game.minStake?.toString() ?? null,
           maxStake: game.maxStake?.toString() ?? null,
+          maxWin: game.maxWin?.toString() ?? null,
           enabled: game.enabled,
           sortOrder: game.sortOrder,
         })),
       })),
     });
+  }),
+);
+
+adminRouter.get(
+  '/game-providers/settings',
+  asyncHandler(async (_req, res) => {
+    const stored = await getConfig<string | null>(PROVIDER_MAX_WIN_CONFIG_KEY, null);
+    res.json({
+      data: {
+        maxWin:
+          typeof stored === 'string' && /^\d+$/.test(stored) && BigInt(stored) > 0n
+            ? stored
+            : DEFAULT_PROVIDER_MAX_WIN.toString(),
+        defaultMaxWin: DEFAULT_PROVIDER_MAX_WIN.toString(),
+      },
+    });
+  }),
+);
+
+adminRouter.put(
+  '/game-providers/settings',
+  asyncHandler(async (req, res) => {
+    const body = parse(ProviderMaxWinSchema, req.body);
+    await setConfig(PROVIDER_MAX_WIN_CONFIG_KEY, String(body.maxWin), req.auth!.userId);
+    await writeAudit({
+      actorId: req.auth!.userId,
+      actorRole: req.auth!.role,
+      action: 'provider.max_win',
+      entityType: 'SystemConfig',
+      entityId: PROVIDER_MAX_WIN_CONFIG_KEY,
+      after: { maxWin: String(body.maxWin) },
+      ip: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
+    res.json({ data: { maxWin: String(body.maxWin) } });
   }),
 );
 
@@ -1085,6 +1141,8 @@ adminRouter.put(
       kind: body.kind,
       apiBaseUrl: body.apiBaseUrl,
       webhookSecret: body.webhookSecret,
+      currency: body.currency,
+      maxWin: body.maxWin === undefined || body.maxWin === null ? body.maxWin : BigInt(body.maxWin),
       enabled: body.enabled,
       sortOrder: body.sortOrder,
       config: body.config,
@@ -1095,7 +1153,12 @@ adminRouter.put(
       action: 'provider.game_upsert',
       entityType: 'GameProvider',
       entityId: provider.code,
-      after: { enabled: provider.enabled, kind: provider.kind },
+      after: {
+        enabled: provider.enabled,
+        kind: provider.kind,
+        currency: provider.currency,
+        maxWin: provider.maxWin?.toString() ?? null,
+      },
       ip: req.ip,
       userAgent: req.headers['user-agent'],
     });
@@ -1132,6 +1195,7 @@ adminRouter.post(
       launchUrlTemplate: body.launchUrlTemplate,
       minStake: body.minStake == null ? null : BigInt(body.minStake),
       maxStake: body.maxStake == null ? null : BigInt(body.maxStake),
+      maxWin: body.maxWin == null ? null : BigInt(body.maxWin),
       enabled: body.enabled,
       sortOrder: body.sortOrder,
     });
@@ -1170,5 +1234,79 @@ adminRouter.delete(
       userAgent: req.headers['user-agent'],
     });
     res.json({ data: { deleted: true } });
+  }),
+);
+
+adminRouter.get(
+  '/game-providers/:code/callbacks',
+  asyncHandler(async (req, res) => {
+    const query = parse(ProviderCallbacksQuery, req.query);
+    const where = { providerCode: req.params.code };
+    const [total, logs] = await Promise.all([
+      prisma.providerCallbackLog.count({ where }),
+      prisma.providerCallbackLog.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        skip: query.page * PAGE_SIZE,
+        take: PAGE_SIZE,
+      }),
+    ]);
+    res.json({
+      data: logs.map((log) => ({
+        id: log.id,
+        type: log.type,
+        externalTxnId: log.externalTxnId,
+        externalSessionId: log.externalSessionId,
+        signatureValid: log.signatureValid,
+        httpStatus: log.httpStatus,
+        amount: log.amount?.toString() ?? null,
+        currency: log.currency,
+        error: log.error,
+        ip: log.ip,
+        payload: log.payload,
+        createdAt: log.createdAt,
+      })),
+      page: { index: query.page, size: PAGE_SIZE, total },
+    });
+  }),
+);
+
+adminRouter.get(
+  '/game-providers/:code/transactions',
+  asyncHandler(async (req, res) => {
+    const query = parse(ProviderTransactionsQuery, req.query);
+    const where = {
+      providerCode: req.params.code,
+      ...(query.type ? { type: query.type } : {}),
+      ...(query.status ? { status: query.status } : {}),
+    };
+    const [total, transactions] = await Promise.all([
+      prisma.providerTransaction.count({ where }),
+      prisma.providerTransaction.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        skip: query.page * PAGE_SIZE,
+        take: PAGE_SIZE,
+        include: {
+          user: { select: { displayName: true, phone: true } },
+          session: { select: { externalSessionId: true } },
+        },
+      }),
+    ]);
+    res.json({
+      data: transactions.map((transaction) => ({
+        id: transaction.id,
+        type: transaction.type,
+        externalTxnId: transaction.externalTxnId,
+        status: transaction.status,
+        amount: transaction.amount.toString(),
+        currency: transaction.currency,
+        ledgerId: transaction.ledgerId,
+        user: transaction.user,
+        externalSessionId: transaction.session?.externalSessionId ?? null,
+        createdAt: transaction.createdAt,
+      })),
+      page: { index: query.page, size: PAGE_SIZE, total },
+    });
   }),
 );

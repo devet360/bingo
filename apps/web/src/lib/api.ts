@@ -4,6 +4,7 @@ import type {
   AdminReferralRow,
   AdminSettings,
   Agent,
+  AgentTask,
   AuditEntry,
   Bonus,
   BonusPromotion,
@@ -26,8 +27,11 @@ import type {
   Paginated,
   PaymentAccount,
   PaymentMethod,
+  PayoutAccount,
+  ProviderCallbackLog,
   ProviderKind,
   ProviderSession,
+  ProviderTransaction,
   ReceiptVerificationView,
   ReferralOverview,
   Role,
@@ -39,6 +43,11 @@ import type {
   StaffMember,
   StaffRole,
   StaffWithdrawal,
+  SupportMessage,
+  SupportTicket,
+  SupportTicketDetail,
+  SupportTicketRow,
+  SupportTicketStatus,
   TransactionLine,
   User,
   UserDetail,
@@ -47,6 +56,7 @@ import type {
   VerifyReceiptResult,
   Wallet,
   Withdrawal,
+  WithdrawalProof,
   WithdrawalStatus,
   WinPattern,
 } from './types';
@@ -214,6 +224,19 @@ export async function apiRequest<T>(path: string, options: RequestOptions = {}):
   }
 }
 
+/** Private evidence is bearer-protected, so the UI renders it from a blob URL. */
+export async function fetchMediaBlobUrl(assetId: string): Promise<string> {
+  const accessToken = currentTokens?.accessToken ?? null;
+  const response = await fetch(urlFor(`/media/${assetId}`), {
+    headers: accessToken ? { authorization: `Bearer ${accessToken}` } : {},
+    cache: 'no-store',
+  });
+  if (!response.ok) {
+    throw new ApiError(response.status, 'MEDIA_UNAVAILABLE', 'Could not load the attachment.');
+  }
+  return URL.createObjectURL(await response.blob());
+}
+
 // ─────────────────────────────── auth ───────────────────────────────
 
 export interface AuthPayload {
@@ -375,6 +398,7 @@ export function createWithdrawal(input: {
   amount: number;
   method: PaymentMethod;
   agentProfileId?: string;
+  payoutAccountId?: string;
   playerNote?: string;
   idempotencyKey: string;
 }): Promise<Withdrawal> {
@@ -386,6 +410,43 @@ export function cancelWithdrawal(id: string): Promise<Withdrawal> {
   return apiRequest(`/wallet/withdrawals/${id}/cancel`, { method: 'POST' });
 }
 
+export interface PayoutAccountInput {
+  method: PaymentMethod;
+  provider?: string | null;
+  accountName: string;
+  accountNumber: string;
+  isDefault?: boolean;
+}
+
+export function fetchPayoutAccounts(): Promise<PayoutAccount[]> {
+  return apiRequest('/wallet/payout-accounts');
+}
+
+export function createPayoutAccount(input: PayoutAccountInput): Promise<PayoutAccount> {
+  return apiRequest('/wallet/payout-accounts', { method: 'POST', body: input });
+}
+
+export function updatePayoutAccount(
+  id: string,
+  patch: Partial<PayoutAccountInput> & { isActive?: boolean },
+): Promise<PayoutAccount> {
+  return apiRequest(`/wallet/payout-accounts/${id}`, { method: 'PATCH', body: patch });
+}
+
+export function deactivatePayoutAccount(id: string): Promise<PayoutAccount> {
+  return apiRequest(`/wallet/payout-accounts/${id}`, { method: 'DELETE' });
+}
+
+export function fetchWithdrawalProofs(withdrawalId: string): Promise<WithdrawalProof[]> {
+  return apiRequest(`/wallet/withdrawals/${withdrawalId}/proofs`);
+}
+
+export function confirmCashReceived(
+  withdrawalId: string,
+): Promise<{ withdrawal: Withdrawal; proof: WithdrawalProof }> {
+  return apiRequest(`/wallet/withdrawals/${withdrawalId}/confirm-received`, { method: 'POST' });
+}
+
 // ─────────────────────────────── agent ───────────────────────────────
 
 export function fetchAgentProfile(): Promise<{ agent: Agent; wallet: Wallet }> {
@@ -394,6 +455,41 @@ export function fetchAgentProfile(): Promise<{ agent: Agent; wallet: Wallet }> {
 
 export function setAgentPresence(isOnline: boolean): Promise<Agent> {
   return apiRequest('/agent/presence', { method: 'POST', body: { isOnline } });
+}
+
+export function setAgentAvailability(acceptingTasks: boolean): Promise<Agent> {
+  return apiRequest('/agent/availability', { method: 'POST', body: { acceptingTasks } });
+}
+
+export function fetchAgentTasks(): Promise<AgentTask[]> {
+  return apiRequest('/agent/tasks');
+}
+
+export function releaseAgentTask(taskId: string): Promise<AgentTask> {
+  return apiRequest(`/agent/tasks/${taskId}/release`, { method: 'POST' });
+}
+
+export function fetchAgentWithdrawalProofs(withdrawalId: string): Promise<WithdrawalProof[]> {
+  return apiRequest(`/agent/withdrawals/${withdrawalId}/proofs`);
+}
+
+export interface WithdrawalProofInput {
+  reference?: string;
+  paidAmount?: number;
+  currency?: string;
+  senderAccount?: string;
+  receiverAccount?: string;
+  paidAt?: string;
+  notes?: string;
+  mediaAssetId?: string;
+  screenshotBase64?: string;
+}
+
+export function submitWithdrawalProof(
+  withdrawalId: string,
+  input: WithdrawalProofInput,
+): Promise<WithdrawalProof> {
+  return apiRequest(`/agent/withdrawals/${withdrawalId}/proof`, { method: 'POST', body: input });
 }
 
 export function updateAgentSettings(input: {
@@ -533,6 +629,21 @@ export function cancelWithdrawalByStaff(withdrawalId: string): Promise<Withdrawa
   return apiRequest(`/support/withdrawals/${withdrawalId}/cancel`, { method: 'POST' });
 }
 
+export function fetchWithdrawalProofsByStaff(withdrawalId: string): Promise<WithdrawalProof[]> {
+  return apiRequest(`/support/withdrawals/${withdrawalId}/proofs`);
+}
+
+export function reviewWithdrawalProof(
+  withdrawalId: string,
+  proofId: string,
+  input: { decision: 'VERIFIED' | 'FAILED'; note?: string },
+): Promise<WithdrawalProof> {
+  return apiRequest(`/support/withdrawals/${withdrawalId}/proofs/${proofId}/review`, {
+    method: 'POST',
+    body: input,
+  });
+}
+
 export function cancelDepositByStaff(depositId: string): Promise<Deposit> {
   return apiRequest(`/support/deposits/${depositId}/cancel`, { method: 'POST' });
 }
@@ -541,6 +652,43 @@ export function fetchStaffReceipts(
   filter: { status?: VerificationStatus; providerCode?: string; page?: number } = {},
 ): Promise<Paginated<ReceiptVerificationView>> {
   return apiRequest(`/support/receipts${queryString(filter)}`, { fullEnvelope: true });
+}
+
+export interface SupportTicketFilter {
+  status?: SupportTicketStatus;
+  assignee?: string;
+  query?: string;
+  page?: number;
+}
+
+export function fetchSupportTickets(
+  filter: SupportTicketFilter = {},
+): Promise<Paginated<SupportTicketRow>> {
+  return apiRequest(`/support/tickets${queryString(filter)}`, { fullEnvelope: true });
+}
+
+export function fetchSupportTicket(ticketId: string): Promise<SupportTicketDetail> {
+  return apiRequest(`/support/tickets/${ticketId}`);
+}
+
+export function replySupportTicket(
+  ticketId: string,
+  body: string,
+): Promise<{ ticket: SupportTicket; message: SupportMessage }> {
+  return apiRequest(`/support/tickets/${ticketId}/messages`, {
+    method: 'POST',
+    body: { body },
+  });
+}
+
+export function claimSupportTicket(ticketId: string): Promise<SupportTicket> {
+  return apiRequest(`/support/tickets/${ticketId}/claim`, { method: 'POST' });
+}
+
+export function resolveSupportTicket(
+  ticketId: string,
+): Promise<{ ticket: SupportTicket; message: SupportMessage | null }> {
+  return apiRequest(`/support/tickets/${ticketId}/resolve`, { method: 'POST' });
 }
 
 export function fetchDepositProvidersAdmin(): Promise<DepositProvider[]> {
@@ -784,6 +932,8 @@ export interface GameProviderInput {
   kind: ProviderKind;
   apiBaseUrl?: string | null;
   webhookSecret?: string | null;
+  currency?: string;
+  maxWin?: number | null;
   enabled: boolean;
   sortOrder?: number;
   config?: unknown;
@@ -800,6 +950,33 @@ export function deleteGameProvider(code: string): Promise<{ deleted: true }> {
   return apiRequest(`/admin/game-providers/${encodeURIComponent(code)}`, { method: 'DELETE' });
 }
 
+export function fetchProviderSettings(): Promise<{ maxWin: string; defaultMaxWin: string }> {
+  return apiRequest('/admin/game-providers/settings');
+}
+
+export function updateProviderSettings(maxWin: number): Promise<{ maxWin: string }> {
+  return apiRequest('/admin/game-providers/settings', { method: 'PUT', body: { maxWin } });
+}
+
+export function fetchProviderCallbacks(
+  code: string,
+  filter: { page?: number } = {},
+): Promise<Paginated<ProviderCallbackLog>> {
+  return apiRequest(`/admin/game-providers/${encodeURIComponent(code)}/callbacks${queryString(filter)}`, {
+    fullEnvelope: true,
+  });
+}
+
+export function fetchProviderTransactions(
+  code: string,
+  filter: { type?: string; status?: string; page?: number } = {},
+): Promise<Paginated<ProviderTransaction>> {
+  return apiRequest(
+    `/admin/game-providers/${encodeURIComponent(code)}/transactions${queryString(filter)}`,
+    { fullEnvelope: true },
+  );
+}
+
 export interface GameProviderGameInput {
   externalId: string;
   name: string;
@@ -808,6 +985,7 @@ export interface GameProviderGameInput {
   launchUrlTemplate?: string | null;
   minStake?: number | null;
   maxStake?: number | null;
+  maxWin?: number | null;
   enabled: boolean;
   sortOrder?: number;
 }

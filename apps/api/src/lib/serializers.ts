@@ -2,6 +2,7 @@ import type {
   AgentCommission,
   AgentPaymentAccount,
   AgentProfile,
+  AgentTask,
   BingoCard,
   BingoClaim,
   BingoRoom,
@@ -9,10 +10,14 @@ import type {
   DepositRequest,
   LedgerAccount,
   LedgerEntry,
+  MediaAsset,
   RoundWinner,
+  SupportMessage,
+  SupportTicket,
   TransactionLedger,
   User,
   Wallet,
+  WithdrawalProof,
   WithdrawalRequest,
 } from '@prisma/client';
 import { parseCardCells } from '../game/types';
@@ -92,6 +97,32 @@ export function serializePaymentAccount(account: AgentPaymentAccount) {
   };
 }
 
+export function serializePayoutAccount(account: {
+  id: string;
+  method: string;
+  provider: string | null;
+  accountName: string;
+  accountNumber: string;
+  isDefault: boolean;
+  isActive: boolean;
+  verifiedAt: Date | null;
+  lastUsedAt: Date | null;
+  createdAt: Date;
+}) {
+  return {
+    id: account.id,
+    method: account.method,
+    provider: account.provider,
+    accountName: account.accountName,
+    accountNumber: account.accountNumber,
+    isDefault: account.isDefault,
+    isActive: account.isActive,
+    verifiedAt: account.verifiedAt,
+    lastUsedAt: account.lastUsedAt,
+    createdAt: account.createdAt,
+  };
+}
+
 export function serializeAgent(
   agent: AgentProfile & {
     user?: Pick<User, 'displayName' | 'avatarUrl'>;
@@ -110,6 +141,7 @@ export function serializeAgent(
     city: agent.city,
     district: agent.district,
     isOnline: agent.isOnline,
+    acceptingTasks: agent.acceptingTasks,
     lastSeenAt: agent.lastSeenAt,
     ratingAvg: agent.ratingAvg.toString(),
     ratingCount: agent.ratingCount,
@@ -173,8 +205,11 @@ export function serializeWithdrawal(withdrawal: WithdrawalRequest) {
     netAmount: minorToWire(withdrawal.netAmount),
     agentProfileId: withdrawal.agentProfileId,
     paymentAccountId: withdrawal.paymentAccountId,
+    payoutAccountId: withdrawal.payoutAccountId,
+    proofRequired: withdrawal.proofRequired,
     playerNote: withdrawal.playerNote,
     agentNote: withdrawal.agentNote,
+    holdAt: withdrawal.holdAt,
     expiresAt: withdrawal.expiresAt,
     settledAt: withdrawal.settledAt,
     cancelledAt: withdrawal.cancelledAt,
@@ -182,8 +217,7 @@ export function serializeWithdrawal(withdrawal: WithdrawalRequest) {
   };
 }
 
-export function serializeCommission(commission: AgentCommission) {
-  return {
+export function serializeCommission(commission: AgentCommission) {  return {
     id: commission.id,
     kind: commission.kind,
     baseAmount: minorToWire(commission.baseAmount),
@@ -295,5 +329,92 @@ export function serializeWinner(winner: RoundWinner) {
     pattern: winner.pattern,
     payout: minorToWire(winner.payout),
     isSplitPot: winner.isSplitPot,
+  };
+}
+
+export function serializeAgentTask(
+  task: AgentTask & { agentProfile?: { agentCode: string } | null },
+) {
+  return {
+    id: task.id,
+    type: task.depositId ? 'DEPOSIT' : 'WITHDRAWAL',
+    status: task.status,
+    agentProfileId: task.agentProfileId,
+    agentCode: task.agentProfile?.agentCode,
+    depositId: task.depositId,
+    withdrawalId: task.withdrawalId,
+    assignedAt: task.assignedAt,
+    claimedAt: task.claimedAt,
+    completedAt: task.completedAt,
+    slaDeadline: task.slaDeadline,
+    overdue: !task.completedAt && Boolean(task.slaDeadline && task.slaDeadline < new Date()),
+    reassignCount: task.reassignCount,
+  };
+}
+
+export function serializeMediaAsset(asset: MediaAsset) {
+  return {
+    id: asset.id,
+    mimeType: asset.mimeType,
+    byteSize: asset.byteSize,
+    purpose: asset.purpose,
+    url: `/media/${asset.id}`,
+    createdAt: asset.createdAt,
+  };
+}
+
+export function serializeSupportTicket(ticket: SupportTicket) {
+  return {
+    id: ticket.id,
+    code: ticket.code,
+    playerId: ticket.playerId,
+    topic: ticket.topic,
+    status: ticket.status,
+    locale: ticket.locale,
+    subject: ticket.subject,
+    assigneeId: ticket.assigneeId,
+    claimedAt: ticket.claimedAt,
+    resolvedAt: ticket.resolvedAt,
+    unreadForStaff: ticket.unreadForStaff,
+    unreadForPlayer: ticket.unreadForPlayer,
+    lastMessageAt: ticket.lastMessageAt,
+    lastPlayerMessageAt: ticket.lastPlayerMessageAt,
+    lastStaffMessageAt: ticket.lastStaffMessageAt,
+    createdAt: ticket.createdAt,
+  };
+}
+
+export function serializeSupportMessage(message: SupportMessage) {
+  return {
+    id: message.id,
+    ticketId: message.ticketId,
+    author: message.author,
+    authorUserId: message.authorUserId,
+    body: message.body,
+    mediaAssetId: message.mediaAssetId,
+    deliveredAt: message.deliveredAt,
+    deliveryAttempts: message.deliveryAttempts,
+    deliveryError: message.deliveryError,
+    createdAt: message.createdAt,
+  };
+}
+
+export function serializeProof(proof: WithdrawalProof) {
+  return {
+    id: proof.id,
+    withdrawalId: proof.withdrawalId,
+    method: proof.method,
+    reference: proof.reference,
+    paidAmount: minorToWire(proof.paidAmount),
+    currency: proof.currency,
+    senderAccount: proof.senderAccount,
+    receiverAccount: proof.receiverAccount,
+    paidAt: proof.paidAt,
+    mediaAssetId: proof.mediaAssetId,
+    notes: proof.notes,
+    status: proof.status,
+    message: proof.message,
+    reviewedAt: proof.reviewedAt,
+    createdAt: proof.createdAt,
   };
 }

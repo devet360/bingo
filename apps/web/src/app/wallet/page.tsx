@@ -4,12 +4,16 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import {
   ApiError,
   cancelWithdrawal,
+  confirmCashReceived,
   createDeposit,
+  createPayoutAccount,
   createWithdrawal,
   fetchDeposit,
   fetchDepositProviders,
   fetchDeposits,
+  fetchPayoutAccounts,
   fetchTransactions,
+  fetchWithdrawalProofs,
   fetchWithdrawals,
   newIdempotencyKey,
   verifyDepositReceipt,
@@ -42,9 +46,11 @@ import type {
   DepositProvider,
   DepositStatus,
   PaymentMethod,
+  PayoutAccount,
   TransactionLine,
   VerificationStatus,
   Withdrawal,
+  WithdrawalProof,
   WithdrawalStatus,
 } from '@/lib/types';
 
@@ -968,18 +974,43 @@ function WithdrawPanel({ onChanged }: { onChanged: () => void }) {
   const { t } = useI18n();
   const [amount, setAmount] = useState('');
   const [method, setMethod] = useState<PaymentMethod>('MOBILE_MONEY');
+  const [accountId, setAccountId] = useState('');
+  const [accounts, setAccounts] = useState<PayoutAccount[] | null>(null);
+  const [addingAccount, setAddingAccount] = useState(false);
+  const [accountName, setAccountName] = useState('');
+  const [accountNumber, setAccountNumber] = useState('');
+  const [savingAccount, setSavingAccount] = useState(false);
   const [note, setNote] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [created, setCreated] = useState<Withdrawal | null>(null);
   const [open, setOpen] = useState<Withdrawal[]>([]);
+  const [proofs, setProofs] = useState<Record<string, WithdrawalProof[]>>({});
   const [cancelling, setCancelling] = useState<string | null>(null);
+  const [confirming, setConfirming] = useState<string | null>(null);
   const idempotency = useRef(newIdempotencyKey('wd'));
+
+  const methodAccounts = (accounts ?? []).filter(
+    (account) => account.isActive && account.method === method,
+  );
 
   const loadOpen = useCallback(async () => {
     try {
-      const withdrawals = await fetchWithdrawals();
-      setOpen(withdrawals.filter((item) => item.status === 'ESCROWED'));
+      const [withdrawals, accountList] = await Promise.all([fetchWithdrawals(), fetchPayoutAccounts()]);
+      setAccounts(accountList);
+      const live = withdrawals.filter(
+        (item) => item.status === 'ESCROWED' || item.status === 'PROCESSING',
+      );
+      setOpen(live);
+      const proofsByWithdrawal = await Promise.all(
+        live
+          .filter((item) => item.status === 'PROCESSING')
+          .map(async (item) => {
+            const items = await fetchWithdrawalProofs(item.id).catch(() => [] as WithdrawalProof[]);
+            return [item.id, items] as const;
+          }),
+      );
+      setProofs(Object.fromEntries(proofsByWithdrawal));
     } catch {
       // Leave the form usable even when the queue is unreachable.
     }
@@ -987,12 +1018,55 @@ function WithdrawPanel({ onChanged }: { onChanged: () => void }) {
 
   useEffect(() => {
     void loadOpen();
+    const timer = setInterval(() => {
+      if (document.visibilityState === 'visible') void loadOpen();
+    }, 15_000);
+    return () => clearInterval(timer);
   }, [loadOpen]);
+
+  useEffect(() => {
+    const current = accounts?.find(
+      (account) => account.id === accountId && account.isActive && account.method === method,
+    );
+    if (current) return;
+    const fallback = accounts?.find((account) => account.isActive && account.method === method);
+    setAccountId(fallback?.id ?? '');
+  }, [accounts, method, accountId]);
+
+  const saveAccount = async () => {
+    if (!accountName.trim() || !accountNumber.trim()) {
+      setError(t('wallet.payoutAccountFields'));
+      return;
+    }
+    setSavingAccount(true);
+    setError(null);
+    try {
+      const account = await createPayoutAccount({
+        method,
+        accountName: accountName.trim(),
+        accountNumber: accountNumber.trim(),
+        isDefault: methodAccounts.length === 0,
+      });
+      setAccounts((current) => [...(current ?? []), account]);
+      setAccountId(account.id);
+      setAddingAccount(false);
+      setAccountName('');
+      setAccountNumber('');
+    } catch (cause) {
+      setError(cause instanceof ApiError ? cause.message : t('wallet.payoutAccountFailed'));
+    } finally {
+      setSavingAccount(false);
+    }
+  };
 
   const submit = async () => {
     const minor = creditsToMinor(amount);
     if (minor === null) {
       setError(t('wallet.invalidAmount'));
+      return;
+    }
+    if (method !== 'CASH' && !accountId) {
+      setError(t('wallet.payoutAccountRequired'));
       return;
     }
     setBusy(true);
@@ -1001,6 +1075,7 @@ function WithdrawPanel({ onChanged }: { onChanged: () => void }) {
       const withdrawal = await createWithdrawal({
         amount: minor,
         method,
+        payoutAccountId: method === 'CASH' ? undefined : accountId,
         playerNote: note.trim() || undefined,
         idempotencyKey: idempotency.current,
       });
@@ -1028,6 +1103,20 @@ function WithdrawPanel({ onChanged }: { onChanged: () => void }) {
       setError(cause instanceof ApiError ? cause.message : t('wallet.couldNotCancel'));
     } finally {
       setCancelling(null);
+    }
+  };
+
+  const confirmCash = async (withdrawal: Withdrawal) => {
+    setConfirming(withdrawal.id);
+    setError(null);
+    try {
+      await confirmCashReceived(withdrawal.id);
+      await Promise.all([loadOpen(), onChanged()]);
+      void refreshWallet();
+    } catch (cause) {
+      setError(cause instanceof ApiError ? cause.message : t('wallet.couldNotConfirm'));
+    } finally {
+      setConfirming(null);
     }
   };
 
@@ -1093,7 +1182,11 @@ function WithdrawPanel({ onChanged }: { onChanged: () => void }) {
                 <button
                   key={option.value}
                   type="button"
-                  onClick={() => setMethod(option.value)}
+                  onClick={() => {
+                    setMethod(option.value);
+                    setAccountId('');
+                    setAddingAccount(false);
+                  }}
                   aria-pressed={active}
                   className={cn(
                     'h-10 rounded-xl border text-xs font-semibold transition',
@@ -1107,6 +1200,97 @@ function WithdrawPanel({ onChanged }: { onChanged: () => void }) {
               );
             })}
           </div>
+        </div>
+
+        <div className="mt-4">
+          <p className="text-[10px] font-semibold uppercase tracking-widest text-muted">
+            {t('wallet.payoutAccount')}
+          </p>
+          {method === 'CASH' ? (
+            <p className="mt-1 text-[11px] text-muted">{t('wallet.cashNoAccount')}</p>
+          ) : accounts === null ? (
+            <div className="mt-1 flex justify-center py-2">
+              <Spinner className="h-4 w-4 text-mint" />
+            </div>
+          ) : (
+            <>
+              {methodAccounts.length === 0 ? (
+                <p className="mt-1 text-[11px] text-warn">{t('wallet.noPayoutAccounts')}</p>
+              ) : (
+                <div className="mt-1.5 space-y-1.5">
+                  {methodAccounts.map((account) => {
+                    const active = account.id === accountId;
+                    return (
+                      <button
+                        key={account.id}
+                        type="button"
+                        aria-pressed={active}
+                        onClick={() => setAccountId(account.id)}
+                        className={cn(
+                          'flex w-full items-center justify-between gap-2 rounded-xl border px-3 py-2 text-left transition',
+                          active
+                            ? 'border-mint/60 bg-mint/10'
+                            : 'border-line/70 bg-raised/50 hover:border-mint/40',
+                        )}
+                      >
+                        <span className="min-w-0">
+                          <span
+                            className={cn(
+                              'block truncate text-xs font-semibold',
+                              active ? 'text-mint' : 'text-text',
+                            )}
+                          >
+                            {account.accountName}
+                          </span>
+                          <span className="block truncate text-[10px] text-muted">
+                            {account.accountNumber}
+                            {account.provider ? ` · ${account.provider}` : ''}
+                          </span>
+                        </span>
+                        {account.isDefault ? <Pill tone="mint">{t('wallet.defaultAccount')}</Pill> : null}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+
+              {addingAccount ? (
+                <div className="mt-2 space-y-2 rounded-xl border border-line/70 bg-ink/40 p-3">
+                  <Input
+                    label={t('wallet.accountHolder')}
+                    value={accountName}
+                    onChange={(event) => setAccountName(event.target.value)}
+                  />
+                  <Input
+                    label={t('wallet.accountNumber')}
+                    value={accountNumber}
+                    onChange={(event) => setAccountNumber(event.target.value)}
+                  />
+                  <div className="flex gap-2">
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      disabled={savingAccount}
+                      onClick={() => setAddingAccount(false)}
+                    >
+                      {t('common.cancel')}
+                    </Button>
+                    <Button size="sm" loading={savingAccount} onClick={() => void saveAccount()}>
+                      {t('wallet.savePayoutAccount')}
+                    </Button>
+                  </div>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => setAddingAccount(true)}
+                  className="mt-2 text-[11px] font-semibold text-mint"
+                >
+                  + {t('wallet.addPayoutAccount')}
+                </button>
+              )}
+            </>
+          )}
         </div>
 
         <div className="mt-3">
@@ -1130,6 +1314,7 @@ function WithdrawPanel({ onChanged }: { onChanged: () => void }) {
           size="lg"
           variant="gold"
           loading={busy}
+          disabled={method !== 'CASH' && methodAccounts.length === 0}
           onClick={() => void submit()}
         >
           {t('wallet.requestWithdrawal')}
@@ -1155,31 +1340,75 @@ function WithdrawPanel({ onChanged }: { onChanged: () => void }) {
             {t('wallet.openPayouts')}
           </h2>
           <ul className="space-y-2">
-            {open.map((withdrawal) => (
-              <li key={withdrawal.id} className="rounded-xl border border-line/70 bg-ink/40 p-3">
-                <div className="flex items-center justify-between gap-2">
-                  <span className="font-display text-lg font-bold tracking-[0.2em]">
-                    {withdrawal.payoutCode}
-                  </span>
-                  <StatusPill status={withdrawal.status} />
-                </div>
-                <div className="mt-1 flex items-center justify-between gap-2">
-                  <p className="text-[11px] text-muted">
+            {open.map((withdrawal) => {
+              const latest = proofs[withdrawal.id]?.[0] ?? null;
+              const canConfirm =
+                withdrawal.method === 'CASH' &&
+                withdrawal.status === 'PROCESSING' &&
+                latest !== null &&
+                (latest.status === 'PENDING' || latest.status === 'MANUAL');
+              return (
+                <li key={withdrawal.id} className="rounded-xl border border-line/70 bg-ink/40 p-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-display text-lg font-bold tracking-[0.2em]">
+                      {withdrawal.payoutCode}
+                    </span>
+                    <StatusPill status={withdrawal.status} />
+                  </div>
+                  <p className="mt-1 text-[11px] text-muted">
                     {formatCredits(withdrawal.amount)} cr · {formatDateTime(withdrawal.createdAt)}
                   </p>
-                  {withdrawal.status === 'ESCROWED' ? (
-                    <Button
-                      variant="danger"
-                      size="sm"
-                      loading={cancelling === withdrawal.id}
-                      onClick={() => void cancel(withdrawal.id)}
-                    >
-                      {t('common.cancel')}
-                    </Button>
+                  {withdrawal.status === 'PROCESSING' ? (
+                    <p className="mt-1 text-[11px] text-muted">{t('wallet.processingHint')}</p>
                   ) : null}
-                </div>
-              </li>
-            ))}
+                  <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
+                    {withdrawal.status === 'PROCESSING' ? (
+                      latest ? (
+                        <Pill
+                          tone={
+                            latest.status === 'VERIFIED'
+                              ? 'mint'
+                              : latest.status === 'FAILED'
+                                ? 'danger'
+                                : 'gold'
+                          }
+                        >
+                          {t('wallet.proofStatus', { status: latest.status.toLowerCase() })}
+                        </Pill>
+                      ) : (
+                        <Pill tone="gold">{t('wallet.awaitingProof')}</Pill>
+                      )
+                    ) : (
+                      <span className="text-[10px] text-muted">
+                        {t('wallet.expiresAt', { when: formatDateTime(withdrawal.expiresAt) })}
+                      </span>
+                    )}
+                    <div className="flex items-center gap-2">
+                      {canConfirm ? (
+                        <Button
+                          variant="gold"
+                          size="sm"
+                          loading={confirming === withdrawal.id}
+                          onClick={() => void confirmCash(withdrawal)}
+                        >
+                          {t('wallet.confirmCashReceived')}
+                        </Button>
+                      ) : null}
+                      {withdrawal.status === 'ESCROWED' ? (
+                        <Button
+                          variant="danger"
+                          size="sm"
+                          loading={cancelling === withdrawal.id}
+                          onClick={() => void cancel(withdrawal.id)}
+                        >
+                          {t('common.cancel')}
+                        </Button>
+                      ) : null}
+                    </div>
+                  </div>
+                </li>
+              );
+            })}
           </ul>
         </Panel>
       ) : null}

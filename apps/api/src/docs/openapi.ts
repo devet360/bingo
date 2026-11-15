@@ -135,6 +135,7 @@ export const openApiDocument = {
           city: { type: 'string', nullable: true },
           district: { type: 'string', nullable: true },
           isOnline: { type: 'boolean' },
+          acceptingTasks: { type: 'boolean', description: 'Off when the agent paused new task offers' },
           ratingAvg: { type: 'string' },
           ratingCount: { type: 'integer' },
           completedDeposits: { type: 'integer' },
@@ -295,18 +296,148 @@ export const openApiDocument = {
       },
       Withdrawal: {
         type: 'object',
+        description:
+          'Two-phase payout. `ESCROWED` waits for an agent; redeeming the payout code moves it to `PROCESSING` ' +
+          'and holds the agent float until payment proof is verified or the player confirms cash. Only then does it settle.',
         properties: {
           id: { type: 'string', format: 'uuid' },
           payoutCode: { type: 'string', example: '089664' },
-          status: { type: 'string', enum: ['ESCROWED', 'SETTLED', 'CANCELLED', 'EXPIRED', 'DISPUTED'] },
+          status: {
+            type: 'string',
+            enum: ['ESCROWED', 'PROCESSING', 'SETTLED', 'CANCELLED', 'EXPIRED', 'DISPUTED'],
+            description: 'PROCESSING = paid out by the agent, awaiting proof verification or player cash confirmation',
+          },
           method: { type: 'string' },
           amount: money,
           fee: money,
           netAmount: money,
-          agentProfileId: { type: 'string' },
+          agentProfileId: { type: 'string', nullable: true },
+          paymentAccountId: { type: 'string', format: 'uuid', nullable: true },
+          payoutAccountId: {
+            type: 'string',
+            format: 'uuid',
+            nullable: true,
+            description: 'Player account the agent pays into (always set for non-CASH withdrawals)',
+          },
+          proofRequired: { type: 'boolean', description: 'Payment evidence is mandatory for every non-CASH method' },
+          playerNote: { type: 'string', nullable: true },
+          agentNote: { type: 'string', nullable: true },
+          holdAt: { type: 'string', format: 'date-time', nullable: true, description: 'When the agent float was held' },
           expiresAt: { type: 'string', format: 'date-time' },
           settledAt: { type: 'string', format: 'date-time', nullable: true },
+          cancelledAt: { type: 'string', format: 'date-time', nullable: true },
           createdAt: { type: 'string', format: 'date-time' },
+        },
+      },
+      PayoutAccount: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', format: 'uuid' },
+          method: { type: 'string', enum: ['MOBILE_MONEY', 'BANK_TRANSFER', 'CASH', 'CARD', 'CRYPTO'] },
+          provider: { type: 'string', nullable: true, description: 'Provider code, e.g. telebirr' },
+          accountName: { type: 'string' },
+          accountNumber: { type: 'string' },
+          isDefault: { type: 'boolean' },
+          isActive: { type: 'boolean' },
+          verifiedAt: { type: 'string', format: 'date-time', nullable: true },
+          lastUsedAt: { type: 'string', format: 'date-time', nullable: true },
+          createdAt: { type: 'string', format: 'date-time' },
+        },
+      },
+      PayoutAccountCreate: {
+        type: 'object',
+        required: ['method', 'accountName', 'accountNumber'],
+        properties: {
+          method: { type: 'string', enum: ['MOBILE_MONEY', 'BANK_TRANSFER', 'CASH', 'CARD', 'CRYPTO'] },
+          provider: { type: 'string', maxLength: 64, nullable: true },
+          accountName: { type: 'string', maxLength: 128 },
+          accountNumber: { type: 'string', maxLength: 64 },
+          isDefault: { type: 'boolean', description: 'Only one account per method is the default' },
+        },
+      },
+      PayoutAccountPatch: {
+        type: 'object',
+        properties: {
+          method: { type: 'string', enum: ['MOBILE_MONEY', 'BANK_TRANSFER', 'CASH', 'CARD', 'CRYPTO'] },
+          provider: { type: 'string', maxLength: 64, nullable: true },
+          accountName: { type: 'string', maxLength: 128 },
+          accountNumber: { type: 'string', maxLength: 64 },
+          isDefault: { type: 'boolean' },
+        },
+      },
+      WithdrawalProof: {
+        type: 'object',
+        description:
+          'Agent payment evidence. The newest proof decides the settlement: `VERIFIED` releases the agent hold, ' +
+          '`FAILED` keeps the payout in PROCESSING for a corrected resubmission.',
+        properties: {
+          id: { type: 'string', format: 'uuid' },
+          withdrawalId: { type: 'string', format: 'uuid' },
+          method: { type: 'string' },
+          reference: { type: 'string', nullable: true, description: 'Bank/rail transaction reference' },
+          paidAmount: money,
+          currency: { type: 'string' },
+          senderAccount: { type: 'string', nullable: true },
+          receiverAccount: { type: 'string', nullable: true },
+          paidAt: { type: 'string', format: 'date-time', nullable: true },
+          mediaAssetId: {
+            type: 'string',
+            format: 'uuid',
+            nullable: true,
+            description: 'Screenshot; fetch with GET /media/{assetId} and the bearer token',
+          },
+          notes: { type: 'string', nullable: true },
+          status: {
+            type: 'string',
+            enum: ['NOT_REQUIRED', 'PENDING', 'VERIFIED', 'FAILED', 'MANUAL'],
+          },
+          message: { type: 'string', nullable: true },
+          reviewedAt: { type: 'string', format: 'date-time', nullable: true },
+          createdAt: { type: 'string', format: 'date-time' },
+        },
+      },
+      WithdrawalProofSubmit: {
+        type: 'object',
+        description: 'A reference and/or a screenshot is required. Amounts are minor units.',
+        properties: {
+          reference: { type: 'string', maxLength: 128 },
+          paidAmount: { type: 'integer', minimum: 1 },
+          currency: { type: 'string', minLength: 3, maxLength: 3 },
+          senderAccount: { type: 'string', maxLength: 64 },
+          receiverAccount: { type: 'string', maxLength: 64 },
+          paidAt: { type: 'string', format: 'date-time' },
+          notes: { type: 'string', maxLength: 500 },
+          mediaAssetId: { type: 'string', format: 'uuid' },
+          screenshotBase64: {
+            type: 'string',
+            description: 'Alternative to mediaAssetId: inline PNG/JPEG/WebP upload (max ~5 MB)',
+          },
+        },
+      },
+      WithdrawalProofReview: {
+        type: 'object',
+        required: ['decision'],
+        properties: {
+          decision: { type: 'string', enum: ['VERIFIED', 'FAILED'] },
+          note: { type: 'string', maxLength: 500 },
+        },
+      },
+      AgentTask: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', format: 'uuid' },
+          type: { type: 'string', enum: ['DEPOSIT', 'WITHDRAWAL'] },
+          status: { type: 'string', enum: ['OFFERED', 'CLAIMED', 'COMPLETED', 'CANCELLED', 'EXPIRED'] },
+          agentProfileId: { type: 'string', format: 'uuid' },
+          agentCode: { type: 'string', nullable: true },
+          depositId: { type: 'string', format: 'uuid', nullable: true },
+          withdrawalId: { type: 'string', format: 'uuid', nullable: true },
+          assignedAt: { type: 'string', format: 'date-time' },
+          claimedAt: { type: 'string', format: 'date-time', nullable: true },
+          completedAt: { type: 'string', format: 'date-time', nullable: true },
+          slaDeadline: { type: 'string', format: 'date-time', nullable: true },
+          overdue: { type: 'boolean' },
+          reassignCount: { type: 'integer' },
         },
       },
       Room: {
@@ -520,13 +651,31 @@ export const openApiDocument = {
             description: 'Legacy override. Unassigned payouts can be settled by any active agent.',
           },
           paymentAccountId: { type: 'string', format: 'uuid' },
-          playerNote: { type: 'string' },
+          payoutAccountId: {
+            type: 'string',
+            format: 'uuid',
+            description:
+              'Player payout account from GET /wallet/payout-accounts. Omit to use the default/first active ' +
+              'account for the method. Non-CASH withdrawals without any matching account fail with ' +
+              'PAYOUT_ACCOUNT_REQUIRED.',
+          },
+          playerNote: { type: 'string', maxLength: 500 },
         },
       },
       Presence: {
         type: 'object',
         required: ['isOnline'],
         properties: { isOnline: { type: 'boolean' } },
+      },
+      Availability: {
+        type: 'object',
+        required: ['acceptingTasks'],
+        properties: {
+          acceptingTasks: {
+            type: 'boolean',
+            description: 'Paused agents keep their current task but receive no new offers',
+          },
+        },
       },
       AutoDepositPatch: {
         type: 'object',
@@ -789,6 +938,12 @@ export const openApiDocument = {
           kind: { type: 'string', enum: ['NATIVE', 'AGGREGATOR'] },
           apiBaseUrl: { type: 'string', nullable: true },
           hasSecret: { type: 'boolean', description: 'The webhook secret is write-only' },
+          currency: { type: 'string', example: 'ETB', description: 'Settlement currency; callbacks in another currency are rejected' },
+          maxWin: {
+            type: 'string',
+            nullable: true,
+            description: 'Per-provider single-win ceiling in minor units; null falls back to the platform setting',
+          },
           enabled: { type: 'boolean' },
           sortOrder: { type: 'integer' },
           config: { nullable: true },
@@ -803,9 +958,71 @@ export const openApiDocument = {
           kind: { type: 'string', enum: ['NATIVE', 'AGGREGATOR'], default: 'AGGREGATOR' },
           apiBaseUrl: { type: 'string', format: 'uri', nullable: true },
           webhookSecret: { type: 'string', minLength: 16, maxLength: 128, nullable: true, description: 'Write-only; omit to keep the current secret' },
+          currency: { type: 'string', pattern: '^[A-Za-z]{3,8}$', default: 'ETB', description: 'Stored uppercase' },
+          maxWin: {
+            type: 'integer',
+            minimum: 1,
+            nullable: true,
+            description: 'Per-provider win ceiling in minor units; null inherits the platform setting',
+          },
           enabled: { type: 'boolean', default: false },
           sortOrder: { type: 'integer', minimum: 0, maximum: 10000 },
           config: { nullable: true },
+        },
+      },
+      ProviderSettings: {
+        type: 'object',
+        properties: {
+          maxWin: { type: 'string', description: 'Effective platform default in minor units (3,000,000 = 30,000 ETB)' },
+          defaultMaxWin: { type: 'string' },
+        },
+      },
+      ProviderSettingsPatch: {
+        type: 'object',
+        required: ['maxWin'],
+        properties: {
+          maxWin: { type: 'integer', minimum: 1, description: 'Platform-wide fallback ceiling in minor units' },
+        },
+      },
+      ProviderCallbackLog: {
+        type: 'object',
+        description: 'Every callback attempt, including forged signatures and malformed bodies.',
+        properties: {
+          id: { type: 'string', format: 'uuid' },
+          type: { type: 'string', nullable: true, enum: ['BET', 'WIN', 'ROLLBACK', 'BALANCE'] },
+          externalTxnId: { type: 'string', nullable: true },
+          externalSessionId: { type: 'string', nullable: true },
+          signatureValid: { type: 'boolean' },
+          httpStatus: { type: 'integer' },
+          amount: money,
+          currency: { type: 'string', nullable: true },
+          error: { type: 'string', nullable: true },
+          ip: { type: 'string', nullable: true },
+          payload: { description: 'Raw callback body' },
+          createdAt: { type: 'string', format: 'date-time' },
+        },
+      },
+      ProviderTransaction: {
+        type: 'object',
+        description: 'Applied money movement. Unique per (provider, external txn id, type).',
+        properties: {
+          id: { type: 'string', format: 'uuid' },
+          type: { type: 'string', enum: ['BET', 'WIN', 'ROLLBACK', 'BALANCE'] },
+          externalTxnId: { type: 'string' },
+          status: { type: 'string', enum: ['APPLIED', 'REJECTED', 'ROLLED_BACK'] },
+          amount: money,
+          currency: { type: 'string' },
+          ledgerId: { type: 'string', format: 'uuid', nullable: true },
+          user: {
+            type: 'object',
+            nullable: true,
+            properties: {
+              displayName: { type: 'string', nullable: true },
+              phone: { type: 'string', nullable: true },
+            },
+          },
+          externalSessionId: { type: 'string', nullable: true },
+          createdAt: { type: 'string', format: 'date-time' },
         },
       },
       ProviderGame: {
@@ -822,6 +1039,11 @@ export const openApiDocument = {
           launchUrlTemplate: { type: 'string', nullable: true, description: 'Supports {token}, {sessionId}, {lang} and {currency}' },
           minStake: { type: 'string', nullable: true },
           maxStake: { type: 'string', nullable: true },
+          maxWin: {
+            type: 'string',
+            nullable: true,
+            description: 'Per-game win ceiling; falls back to the provider then platform setting',
+          },
           enabled: { type: 'boolean' },
           sortOrder: { type: 'integer' },
         },
@@ -837,6 +1059,7 @@ export const openApiDocument = {
           launchUrlTemplate: { type: 'string', maxLength: 2048, nullable: true },
           minStake: { type: 'integer', minimum: 1, nullable: true },
           maxStake: { type: 'integer', minimum: 1, nullable: true },
+          maxWin: { type: 'integer', minimum: 1, nullable: true, description: 'Minor units; null inherits the provider/platform ceiling' },
           enabled: { type: 'boolean', default: true },
           sortOrder: { type: 'integer', minimum: 0, maximum: 10000 },
         },
@@ -855,17 +1078,149 @@ export const openApiDocument = {
       },
       ProviderCallback: {
         type: 'object',
-        required: ['sessionId', 'type', 'txnId', 'amount'],
+        required: ['sessionId', 'type'],
         description:
           'Signed with HMAC-SHA256 over the raw request body in the `x-provider-signature` header. ' +
-          '`txnId` is idempotent per provider; rollbacks reference the original bet txnId.',
+          '`type: balance` returns a signed balance snapshot and needs no txnId/amount; the other types move money. ' +
+          '`txnId` is idempotent per provider; rollbacks reference the original bet txnId. ' +
+          'Wins above the game → provider → platform ceiling are rejected with WIN_LIMIT_EXCEEDED.',
         properties: {
           sessionId: { type: 'string', format: 'uuid' },
-          type: { type: 'string', enum: ['bet', 'win', 'rollback'] },
-          txnId: { type: 'string', maxLength: 128 },
-          amount: { type: 'string', pattern: '^\\d+$', description: 'Minor units' },
-          currency: { type: 'string' },
+          type: { type: 'string', enum: ['bet', 'win', 'rollback', 'balance'] },
+          txnId: { type: 'string', maxLength: 128, description: 'Required for bet/win/rollback' },
+          amount: { type: 'string', pattern: '^\\d+$', description: 'Minor units; required for bet/win/rollback' },
+          currency: { type: 'string', description: 'Must match the provider currency' },
           roundId: { type: 'string' },
+          nonce: { type: 'string', maxLength: 64, description: 'Balance requests only; echoed in the signed reply' },
+        },
+      },
+      SupportTicket: {
+        type: 'object',
+        description:
+          'One support conversation. A player has at most one OPEN/PENDING ticket at a time; resolved tickets ' +
+          'reopen when the player writes again.',
+        properties: {
+          id: { type: 'string', format: 'uuid' },
+          code: { type: 'string', example: 'SUP-7KQ2M9' },
+          playerId: { type: 'string', format: 'uuid' },
+          topic: { type: 'string', enum: ['DEPOSIT', 'WITHDRAWAL', 'ACCOUNT', 'PAYMENTS', 'OTHER'] },
+          status: { type: 'string', enum: ['OPEN', 'PENDING', 'RESOLVED', 'CLOSED'] },
+          locale: { type: 'string', enum: ['en', 'am'] },
+          subject: { type: 'string' },
+          assigneeId: { type: 'string', format: 'uuid', nullable: true },
+          claimedAt: { type: 'string', format: 'date-time', nullable: true },
+          resolvedAt: { type: 'string', format: 'date-time', nullable: true },
+          unreadForStaff: { type: 'integer' },
+          unreadForPlayer: { type: 'integer' },
+          lastMessageAt: { type: 'string', format: 'date-time' },
+          lastPlayerMessageAt: { type: 'string', format: 'date-time', nullable: true },
+          lastStaffMessageAt: { type: 'string', format: 'date-time', nullable: true },
+          createdAt: { type: 'string', format: 'date-time' },
+        },
+      },
+      SupportTicketRow: {
+        allOf: [
+          { $ref: '#/components/schemas/SupportTicket' },
+          {
+            type: 'object',
+            properties: {
+              player: {
+                type: 'object',
+                properties: {
+                  id: { type: 'string', format: 'uuid' },
+                  displayName: { type: 'string' },
+                  phone: { type: 'string', nullable: true },
+                  telegramUsername: { type: 'string', nullable: true },
+                },
+              },
+              assignee: {
+                type: 'object',
+                nullable: true,
+                properties: {
+                  id: { type: 'string', format: 'uuid' },
+                  displayName: { type: 'string' },
+                },
+              },
+              preview: {
+                type: 'object',
+                nullable: true,
+                description: 'Latest message, or null for an empty thread',
+                properties: {
+                  author: { type: 'string', enum: ['PLAYER', 'STAFF', 'BOT', 'SYSTEM'] },
+                  body: { type: 'string' },
+                  mediaAssetId: { type: 'string', format: 'uuid', nullable: true },
+                  createdAt: { type: 'string', format: 'date-time' },
+                },
+              },
+            },
+          },
+        ],
+      },
+      SupportMessage: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', format: 'uuid' },
+          ticketId: { type: 'string', format: 'uuid' },
+          author: { type: 'string', enum: ['PLAYER', 'STAFF', 'BOT', 'SYSTEM'] },
+          authorUserId: { type: 'string', format: 'uuid', nullable: true },
+          body: { type: 'string' },
+          mediaAssetId: { type: 'string', format: 'uuid', nullable: true },
+          deliveredAt: { type: 'string', format: 'date-time', nullable: true },
+          deliveryAttempts: { type: 'integer' },
+          deliveryError: { type: 'string', nullable: true },
+          createdAt: { type: 'string', format: 'date-time' },
+        },
+      },
+      SupportTicketDetail: {
+        type: 'object',
+        properties: {
+          ticket: { $ref: '#/components/schemas/SupportTicketRow' },
+          messages: { type: 'array', items: { $ref: '#/components/schemas/SupportMessage' } },
+          wallet: {
+            type: 'object',
+            nullable: true,
+            properties: {
+              available: money,
+              bonus: money,
+              escrow: money,
+              locked: money,
+            },
+          },
+          deposits: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                id: { type: 'string', format: 'uuid' },
+                code: { type: 'string' },
+                amount: money,
+                status: { type: 'string' },
+                method: { type: 'string' },
+                createdAt: { type: 'string', format: 'date-time' },
+              },
+            },
+          },
+          withdrawals: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                id: { type: 'string', format: 'uuid' },
+                amount: money,
+                netAmount: money,
+                status: { type: 'string' },
+                method: { type: 'string' },
+                createdAt: { type: 'string', format: 'date-time' },
+              },
+            },
+          },
+        },
+      },
+      SupportReply: {
+        type: 'object',
+        required: ['body'],
+        properties: {
+          body: { type: 'string', minLength: 1, maxLength: 4000 },
         },
       },
     },
@@ -1131,11 +1486,18 @@ export const openApiDocument = {
       post: {
         tags: ['Player wallet'],
         summary: 'Escrow credits and issue a payout code (phone verification required; any agent may settle)',
+        description:
+          'Non-CASH withdrawals resolve an active payout account of the same method (the default one unless ' +
+          '`payoutAccountId` is given). Only one open withdrawal is allowed per player. Any agent redeems the ' +
+          'code; the payout then stays PROCESSING until payment proof is verified or, for cash, the player ' +
+          'confirms receipt.',
         security: [{ bearerAuth: [] }, { idempotency: [] }],
         requestBody: { required: true, content: { 'application/json': { schema: { $ref: '#/components/schemas/WithdrawalCreate' } } } },
         responses: {
           '201': ok(dataRef('Withdrawal')),
+          '400': errorResponse('PAYOUT_ACCOUNT_REQUIRED / PAYOUT_METHOD_MISMATCH'),
           '403': errorResponse('PHONE_VERIFICATION_REQUIRED'),
+          '404': errorResponse('Payout account not found'),
           '409': errorResponse('WITHDRAWAL_OPEN / INSUFFICIENT_FUNDS'),
         },
       },
@@ -1146,6 +1508,88 @@ export const openApiDocument = {
         summary: 'Cancel a pending withdrawal and refund escrow',
         parameters: [idParam('id')],
         responses: { '200': ok(dataRef('Withdrawal')) },
+      },
+    },
+    '/wallet/withdrawals/{id}/proofs': {
+      get: {
+        tags: ['Player wallet'],
+        summary: 'Payment proofs submitted for one of my withdrawals',
+        parameters: [idParam('id')],
+        responses: { '200': ok(dataArrayRef('WithdrawalProof')), '404': errorResponse('Withdrawal not found') },
+      },
+    },
+    '/wallet/withdrawals/{id}/confirm-received': {
+      post: {
+        tags: ['Player wallet'],
+        summary: 'Confirm cash received (CASH payouts only)',
+        description:
+          'Releases the agent float and settles the withdrawal. Requires a PROCESSING cash payout whose latest ' +
+          'proof is PENDING or MANUAL.',
+        parameters: [idParam('id')],
+        responses: {
+          '200': ok({
+            type: 'object',
+            properties: {
+              withdrawal: { $ref: '#/components/schemas/Withdrawal' },
+              proof: { $ref: '#/components/schemas/WithdrawalProof' },
+            },
+          }),
+          '400': errorResponse('NOT_CASH_PAYOUT'),
+          '409': errorResponse('WITHDRAWAL_NOT_PROCESSING / PROOF_MISSING'),
+        },
+      },
+    },
+    '/wallet/payout-accounts': {
+      get: {
+        tags: ['Player wallet'],
+        summary: 'My payout accounts',
+        responses: { '200': ok(dataArrayRef('PayoutAccount')) },
+      },
+      post: {
+        tags: ['Player wallet'],
+        summary: 'Add a payout account',
+        requestBody: { required: true, content: { 'application/json': { schema: { $ref: '#/components/schemas/PayoutAccountCreate' } } } },
+        responses: { '201': ok(dataRef('PayoutAccount')), '409': errorResponse('PAYOUT_ACCOUNT_EXISTS') },
+      },
+    },
+    '/wallet/payout-accounts/{id}': {
+      patch: {
+        tags: ['Player wallet'],
+        summary: 'Edit a payout account',
+        parameters: [idParam('id')],
+        requestBody: { required: true, content: { 'application/json': { schema: { $ref: '#/components/schemas/PayoutAccountPatch' } } } },
+        responses: { '200': ok(dataRef('PayoutAccount')), '404': errorResponse('Not found') },
+      },
+      delete: {
+        tags: ['Player wallet'],
+        summary: 'Deactivate a payout account (soft delete)',
+        parameters: [idParam('id')],
+        responses: {
+          '200': ok(dataRef('PayoutAccount')),
+          '404': errorResponse('Not found'),
+          '409': errorResponse('PAYOUT_ACCOUNT_IN_USE'),
+        },
+      },
+    },
+    '/media/{assetId}': {
+      get: {
+        tags: ['Ops'],
+        summary: 'Fetch private evidence (payment screenshots)',
+        description:
+          'Bearer-authenticated and never publicly cached. The caller must own the asset, be the assigned agent, or be staff.',
+        parameters: [idParam('assetId')],
+        responses: {
+          '200': {
+            description: 'Raw image bytes',
+            content: {
+              'image/png': { schema: { type: 'string', format: 'binary' } },
+              'image/jpeg': { schema: { type: 'string', format: 'binary' } },
+              'image/webp': { schema: { type: 'string', format: 'binary' } },
+            },
+          },
+          '403': errorResponse('MEDIA_FORBIDDEN'),
+          '404': errorResponse('Media not found'),
+        },
       },
     },
     '/agents': {
@@ -1217,6 +1661,35 @@ export const openApiDocument = {
         responses: { '200': ok({ type: 'object' }) },
       },
     },
+    '/agent/availability': {
+      post: {
+        tags: ['Agent portal'],
+        summary: 'Start or pause accepting new tasks',
+        description: 'Pausing keeps the current assignment but stops new offers. One active task at a time.',
+        requestBody: { required: true, content: { 'application/json': { schema: { $ref: '#/components/schemas/Availability' } } } },
+        responses: { '200': ok(dataRef('Agent')) },
+      },
+    },
+    '/agent/tasks': {
+      get: {
+        tags: ['Agent portal'],
+        summary: 'My recent agent tasks (SLA state included)',
+        responses: { '200': ok(dataArrayRef('AgentTask')) },
+      },
+    },
+    '/agent/tasks/{id}/release': {
+      post: {
+        tags: ['Agent portal'],
+        summary: 'Release an unstarted task back to the pool',
+        parameters: [idParam('id')],
+        responses: {
+          '200': ok(dataRef('AgentTask')),
+          '403': errorResponse('AGENT_REQUIRED'),
+          '404': errorResponse('Task not found'),
+          '409': errorResponse('TASK_IN_FLIGHT / TASK_CLOSED'),
+        },
+      },
+    },
     '/agent/deposits': {
       get: {
         tags: ['Agent portal'],
@@ -1259,7 +1732,11 @@ export const openApiDocument = {
     '/agent/withdrawals/redeem': {
       post: {
         tags: ['Agent portal'],
-        summary: 'Redeem a payout code after paying cash',
+        summary: 'Redeem a payout code after paying the player (moves it to PROCESSING)',
+        description:
+          'Holds the agent float and returns the withdrawal in PROCESSING. Settlement happens only after proof ' +
+          'verification (or the player confirming cash). A non-CASH payout without a player account is rejected ' +
+          'with PAYOUT_ACCOUNT_REQUIRED. Claims one task at a time.',
         requestBody: {
           required: true,
           content: {
@@ -1272,7 +1749,36 @@ export const openApiDocument = {
             },
           },
         },
-        responses: { '200': ok(dataRef('Withdrawal')) },
+        responses: {
+          '200': ok(dataRef('Withdrawal')),
+          '409': errorResponse('AGENT_TASK_ACTIVE / PAYOUT_ACCOUNT_REQUIRED / WITHDRAWAL_SETTLED'),
+          '410': errorResponse('WITHDRAWAL_EXPIRED / WITHDRAWAL_NOT_OPEN'),
+        },
+      },
+    },
+    '/agent/withdrawals/{id}/proofs': {
+      get: {
+        tags: ['Agent portal'],
+        summary: 'Proofs already submitted for an assigned payout',
+        parameters: [idParam('id')],
+        responses: { '200': ok(dataArrayRef('WithdrawalProof')), '404': errorResponse('Withdrawal not found') },
+      },
+    },
+    '/agent/withdrawals/{id}/proof': {
+      post: {
+        tags: ['Agent portal'],
+        summary: 'Submit payment evidence for a PROCESSING payout',
+        description:
+          'A reference and/or screenshot (base64 or media asset) is required. The submission is cross-checked ' +
+          'against the player payout account and amount; mismatches are flagged for staff review.',
+        parameters: [idParam('id')],
+        requestBody: { required: true, content: { 'application/json': { schema: { $ref: '#/components/schemas/WithdrawalProofSubmit' } } } },
+        responses: {
+          '201': ok(dataRef('WithdrawalProof')),
+          '400': errorResponse('PROOF_REQUIRED'),
+          '403': errorResponse('WITHDRAWAL_ASSIGNED / MEDIA_FORBIDDEN'),
+          '409': errorResponse('WITHDRAWAL_NOT_PROCESSING / PROOF_REFERENCE_REUSED'),
+        },
       },
     },
     '/agent/commissions': {
@@ -1437,6 +1943,9 @@ export const openApiDocument = {
       get: {
         tags: ['Support'],
         summary: 'Withdrawal browser',
+        description:
+          'Paginated. Each row additionally carries `player`, `agentCode`, the chosen `payoutAccount`, the ' +
+          'latest three `proofs` and the current `task` (status and SLA deadline).',
         parameters: [
           { name: 'status', in: 'query', schema: { type: 'string' } },
           { name: 'userId', in: 'query', schema: { type: 'string', format: 'uuid' } },
@@ -1451,6 +1960,30 @@ export const openApiDocument = {
         summary: 'Release a stuck escrow and refund the player',
         parameters: [idParam('withdrawalId')],
         responses: { '200': ok(dataRef('Withdrawal')) },
+      },
+    },
+    '/support/withdrawals/{withdrawalId}/proofs': {
+      get: {
+        tags: ['Support'],
+        summary: 'Payment proofs for a withdrawal',
+        parameters: [idParam('withdrawalId')],
+        responses: { '200': ok(dataArrayRef('WithdrawalProof')) },
+      },
+    },
+    '/support/withdrawals/{withdrawalId}/proofs/{proofId}/review': {
+      post: {
+        tags: ['Support'],
+        summary: 'Verify or reject payment proof',
+        description:
+          'Verifying a PROCESSING payout releases the agent hold and settles the withdrawal; rejecting it keeps ' +
+          'the payout in PROCESSING so the agent can resubmit. Every decision is audited.',
+        parameters: [idParam('withdrawalId'), idParam('proofId')],
+        requestBody: { required: true, content: { 'application/json': { schema: { $ref: '#/components/schemas/WithdrawalProofReview' } } } },
+        responses: {
+          '200': ok(dataRef('WithdrawalProof')),
+          '404': errorResponse('Payment proof not found'),
+          '409': errorResponse('WITHDRAWAL_NOT_PROCESSING / PROOF_ALREADY_REVIEWED'),
+        },
       },
     },
     '/support/agents': {
@@ -1477,6 +2010,113 @@ export const openApiDocument = {
               page: { $ref: '#/components/schemas/Page' },
             },
           }),
+        },
+      },
+    },
+    '/support/tickets': {
+      get: {
+        tags: ['Support'],
+        summary: 'Support queue',
+        description:
+          'SUPPORT and SUPER_ADMIN. Ordered by most recent message. Each row carries the player, the assignee and ' +
+          'the latest message preview. `assignee` accepts `me`, `unassigned` or a staff user id.',
+        parameters: [
+          {
+            name: 'status',
+            in: 'query',
+            schema: { type: 'string', enum: ['OPEN', 'PENDING', 'RESOLVED', 'CLOSED'] },
+          },
+          { name: 'assignee', in: 'query', schema: { type: 'string' } },
+          { name: 'query', in: 'query', schema: { type: 'string' }, description: 'Ticket code, subject, player name/phone/username' },
+          pageParam,
+        ],
+        responses: {
+          '200': ok({
+            type: 'object',
+            properties: {
+              data: { type: 'array', items: { $ref: '#/components/schemas/SupportTicketRow' } },
+              page: { $ref: '#/components/schemas/Page' },
+            },
+          }),
+          '403': errorResponse('ROLE_FORBIDDEN'),
+        },
+      },
+    },
+    '/support/tickets/{ticketId}': {
+      get: {
+        tags: ['Support'],
+        summary: 'Conversation with player context',
+        description:
+          'Full message history (oldest first, max 300) plus the player wallet, the last five deposits and the last ' +
+          'five withdrawals so staff can answer without switching screens.',
+        parameters: [idParam('ticketId')],
+        responses: {
+          '200': ok(dataRef('SupportTicketDetail')),
+          '404': errorResponse('Ticket not found'),
+        },
+      },
+    },
+    '/support/tickets/{ticketId}/messages': {
+      post: {
+        tags: ['Support'],
+        summary: 'Reply as staff (delivered to the player by the support bot)',
+        description:
+          'Claims the ticket when unassigned and sets it to PENDING. The reply is written immediately; the ' +
+          'support-bot process pushes it to Telegram within a few seconds and records `deliveredAt`.',
+        parameters: [idParam('ticketId')],
+        requestBody: { required: true, content: { 'application/json': { schema: { $ref: '#/components/schemas/SupportReply' } } } },
+        responses: {
+          '201': ok({
+            type: 'object',
+            properties: {
+              data: {
+                type: 'object',
+                properties: {
+                  ticket: { $ref: '#/components/schemas/SupportTicket' },
+                  message: { $ref: '#/components/schemas/SupportMessage' },
+                },
+              },
+            },
+          }),
+          '400': errorResponse('MESSAGE_EMPTY'),
+          '404': errorResponse('Ticket not found'),
+          '409': errorResponse('TICKET_CLOSED / TICKET_ACTIVE'),
+        },
+      },
+    },
+    '/support/tickets/{ticketId}/claim': {
+      post: {
+        tags: ['Support'],
+        summary: 'Assign the conversation to me',
+        parameters: [idParam('ticketId')],
+        responses: {
+          '200': ok(dataRef('SupportTicket')),
+          '409': errorResponse('TICKET_ASSIGNED / TICKET_CLOSED'),
+        },
+      },
+    },
+    '/support/tickets/{ticketId}/resolve': {
+      post: {
+        tags: ['Support'],
+        summary: 'Resolve the conversation',
+        description:
+          'Adds a localized system message, marks the ticket RESOLVED and tells the player they can reopen it by ' +
+          'replying. Idempotent for already resolved/closed tickets.',
+        parameters: [idParam('ticketId')],
+        responses: {
+          '200': ok({
+            type: 'object',
+            properties: {
+              data: {
+                type: 'object',
+                properties: {
+                  ticket: { $ref: '#/components/schemas/SupportTicket' },
+                  message: { $ref: '#/components/schemas/SupportMessage' },
+                },
+              },
+            },
+          }),
+          '404': errorResponse('Ticket not found'),
         },
       },
     },
@@ -1909,17 +2549,41 @@ export const openApiDocument = {
     '/games/callback/{providerCode}': {
       post: {
         tags: ['Games'],
-        summary: 'Provider wallet callback (bet · win · rollback)',
+        summary: 'Provider wallet callback (bet · win · rollback · balance)',
         description:
           'Signed with HMAC-SHA256 over the raw body in `x-provider-signature`. Every txnId is applied at most ' +
-          'once; replays return `{ replayed: true }`. Callbacks are not session-authenticated.',
+          'once; replays return `{ replayed: true }`. Callbacks are not session-authenticated. Balance requests ' +
+          'return a signed snapshot `{ currency, balance, timestamp, nonce, signature }`; win requests above the ' +
+          'resolved cap (game → provider → platform) fail with WIN_LIMIT_EXCEEDED. Every attempt is logged.',
         security: [],
         parameters: [idParam('providerCode')],
         requestBody: { required: true, content: { 'application/json': { schema: { $ref: '#/components/schemas/ProviderCallback' } } } },
         responses: {
-          '201': ok({ type: 'object' }),
-          '200': ok({ type: 'object' }),
+          '201': ok({ type: 'object' }, 'Applied'),
+          '200': ok({ type: 'object' }, 'Replay or signed balance snapshot'),
+          '400': errorResponse('CALLBACK_MALFORMED / CURRENCY_MISMATCH'),
           '403': errorResponse('SIGNATURE_INVALID'),
+          '404': errorResponse('Provider or session not found'),
+          '409': errorResponse('SESSION_CLOSED / WIN_LIMIT_EXCEEDED'),
+        },
+      },
+    },
+    '/admin/game-providers/settings': {
+      get: {
+        tags: ['Admin'],
+        summary: 'Platform-wide provider win ceiling',
+        responses: { '200': ok(dataRef('ProviderSettings')) },
+      },
+      put: {
+        tags: ['Admin'],
+        summary: 'Update the platform-wide win ceiling (minor units)',
+        description: 'Used when neither the game nor the provider sets a narrower cap. Audited.',
+        requestBody: { required: true, content: { 'application/json': { schema: { $ref: '#/components/schemas/ProviderSettingsPatch' } } } },
+        responses: {
+          '200': ok({
+            type: 'object',
+            properties: { data: { type: 'object', properties: { maxWin: { type: 'string' } } } },
+          }),
         },
       },
     },
@@ -1943,6 +2607,44 @@ export const openApiDocument = {
         summary: 'Delete a provider and its games',
         parameters: [idParam('code')],
         responses: { '200': ok({ type: 'object' }) },
+      },
+    },
+    '/admin/game-providers/{code}/callbacks': {
+      get: {
+        tags: ['Admin'],
+        summary: 'Provider callback audit log (newest first)',
+        description: 'Includes invalid signatures and malformed bodies. 50 rows per page.',
+        parameters: [idParam('code'), pageParam],
+        responses: {
+          '200': ok({
+            type: 'object',
+            properties: {
+              data: { type: 'array', items: { $ref: '#/components/schemas/ProviderCallbackLog' } },
+              page: { $ref: '#/components/schemas/Page' },
+            },
+          }),
+        },
+      },
+    },
+    '/admin/game-providers/{code}/transactions': {
+      get: {
+        tags: ['Admin'],
+        summary: 'Applied provider transactions with optional type/status filters',
+        parameters: [
+          idParam('code'),
+          { name: 'type', in: 'query', schema: { type: 'string', enum: ['BET', 'WIN', 'ROLLBACK', 'BALANCE'] } },
+          { name: 'status', in: 'query', schema: { type: 'string', enum: ['APPLIED', 'REJECTED', 'ROLLED_BACK'] } },
+          pageParam,
+        ],
+        responses: {
+          '200': ok({
+            type: 'object',
+            properties: {
+              data: { type: 'array', items: { $ref: '#/components/schemas/ProviderTransaction' } },
+              page: { $ref: '#/components/schemas/Page' },
+            },
+          }),
+        },
       },
     },
     '/admin/game-providers/{code}/games': {

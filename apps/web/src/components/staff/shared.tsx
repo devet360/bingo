@@ -7,9 +7,12 @@ import type { PageMeta } from '@/lib/types';
 
 export const STATUS_TONE: Record<string, 'mint' | 'gold' | 'warn' | 'danger' | 'neutral' | 'blue'> = {
   ACTIVE: 'mint',
+  OPEN: 'gold',
   PENDING: 'warn',
   PROCESSING: 'gold',
   ESCROWED: 'gold',
+  RESOLVED: 'mint',
+  CLOSED: 'neutral',
   CREDITED: 'mint',
   PAID: 'mint',
   SETTLED: 'mint',
@@ -99,6 +102,9 @@ export const LEDGER_KINDS = [
   'DEPOSIT',
   'DEPOSIT_COMMISSION',
   'WITHDRAWAL_ESCROW',
+  'WITHDRAWAL_HOLD',
+  'WITHDRAWAL_HOLD_RELEASE',
+  'WITHDRAWAL_HOLD_REFUND',
   'WITHDRAWAL_SETTLEMENT',
   'WITHDRAWAL_COMMISSION',
   'WITHDRAWAL_REFUND',
@@ -117,4 +123,4 @@ export const LEDGER_KINDS = [
 ] as const;
 
 export const DEPOSIT_STATUSES = ['PENDING', 'PROCESSING', 'CREDITED', 'REJECTED', 'CANCELLED', 'EXPIRED', 'DISPUTED'] as const;
-export const WITHDRAWAL_STATUSES = ['ESCROWED', 'PROCESSING', 'PAID', 'SETTLED', 'CANCELLED', 'EXPIRED', 'DISPUTED'] as const;
+export const WITHDRAWAL_STATUSES = ['ESCROWED', 'PROCESSING', 'SETTLED', 'CANCELLED', 'EXPIRED', 'DISPUTED'] as const;

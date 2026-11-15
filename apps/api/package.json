@@ -13,6 +13,8 @@
     "worker:start": "node dist/worker.js",
     "bot": "tsx src/bot/index.ts",
     "bot:start": "node dist/bot/index.js",
+    "support-bot": "tsx src/support-bot/index.ts",
+    "support-bot:start": "node dist/support-bot/index.js",
     "admin:create": "tsx scripts/create-admin.ts",
     "db:seed": "tsx prisma/seed.ts"
   },

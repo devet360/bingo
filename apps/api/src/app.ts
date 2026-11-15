@@ -21,6 +21,7 @@ import { marketingRouter } from './routes/marketing';
 import { bonusesRouter } from './routes/bonuses';
 import { referralsRouter } from './routes/referrals';
 import { gamesRouter } from './routes/games';
+import { mediaRouter } from './routes/media';
 
 export function createApp() {
   const app = express();
@@ -43,6 +44,8 @@ export function createApp() {
   // Client-side receipt verification posts the bank's own response (PDFs from
   // M-Pesa) as base64, so this subtree needs more room than the rest of the API.
   app.use('/wallet/deposits', express.json({ limit: '8mb' }));
+  // Agents submit payment screenshots inline on the proof endpoint.
+  app.use('/agent/withdrawals', express.json({ limit: '8mb' }));
   // Keep the exact bytes of every JSON body: provider webhooks sign them.
   app.use(
     express.json({
@@ -87,6 +90,7 @@ export function createApp() {
   app.use('/bonuses', bonusesRouter);
   app.use('/referrals', referralsRouter);
   app.use('/games', gamesRouter);
+  app.use('/media', mediaRouter);
 
   app.get('/openapi.json', (_req, res) => {
     res.json(openApiDocument);

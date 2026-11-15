@@ -12,6 +12,7 @@ import { Errors } from '../lib/errors';
 import { isUniqueViolation, runTransaction, withTxRetry } from '../lib/tx';
 import { postLedger } from './ledger';
 import { assignAgentForPayment, getActiveAgentByUserId } from './agents';
+import { closeAgentTask, createAgentTask, isTaskLockViolation } from './agentTasks';
 import { getProvider } from './providers';
 import { normalizeInput } from './receipts/reference';
 import { ReferenceError as ReceiptReferenceError } from './receipts/types';
@@ -103,6 +104,9 @@ async function resolveProvider(input: CreateDepositInput): Promise<{
 export async function createDeposit(input: CreateDepositInput) {
   let agentProfileId = input.agentProfileId;
   let paymentAccountId = input.paymentAccountId;
+  // A player-chosen agent is honoured or rejected; the server never silently
+  // moves an explicitly chosen payment destination to someone else.
+  let assignedByServer = false;
 
   if (!agentProfileId && input.paymentAccountId) {
     const account = await prisma.agentPaymentAccount.findUnique({
@@ -117,11 +121,14 @@ export async function createDeposit(input: CreateDepositInput) {
   if (agentProfileId) {
     const agent = await prisma.agentProfile.findUnique({
       where: { id: agentProfileId },
-      select: { status: true },
+      select: { status: true, acceptingTasks: true },
     });
     if (!agent) throw Errors.notFound('Agent');
     if (agent.status !== 'ACTIVE') {
       throw Errors.conflict('Agent is not accepting deposits right now', 'AGENT_INACTIVE');
+    }
+    if (!agent.acceptingTasks) {
+      throw Errors.conflict('Agent is not accepting deposits right now', 'AGENT_UNAVAILABLE');
     }
     if (input.paymentAccountId) {
       const owned = await prisma.agentPaymentAccount.findFirst({
@@ -158,31 +165,38 @@ export async function createDeposit(input: CreateDepositInput) {
     }
     agentProfileId = assignment.agent.id;
     paymentAccountId = assignment.account.id;
+    assignedByServer = true;
   }
+
+  const excludedAgentIds = new Set<string>();
 
   for (let attempt = 0; attempt < 5; attempt += 1) {
     try {
-      const deposit = await prisma.depositRequest.create({
-        data: {
-          code: numericCode(6),
-          idempotencyKey: input.idempotencyKey,
-          playerId: input.playerId,
-          agentProfileId,
-          paymentAccountId,
-          method: input.method,
-          amount: input.amount,
-          providerCode: receipt.provider?.code,
-          receiptReference: receipt.receiptReference,
-          receiptAccount: receipt.receiptAccount,
-          receiptPhone: receipt.receiptPhone,
-          verificationStatus: receipt.provider?.supported
-            ? VerificationStatus.PENDING
-            : VerificationStatus.NOT_REQUIRED,
-          externalRef: input.externalRef,
-          receiptUrl: input.receiptUrl,
-          playerNote: input.playerNote,
-          expiresAt: new Date(Date.now() + DEPOSIT_TTL_MS),
-        },
+      const deposit = await runTransaction(async (tx) => {
+        const created = await tx.depositRequest.create({
+          data: {
+            code: numericCode(6),
+            idempotencyKey: input.idempotencyKey,
+            playerId: input.playerId,
+            agentProfileId,
+            paymentAccountId,
+            method: input.method,
+            amount: input.amount,
+            providerCode: receipt.provider?.code,
+            receiptReference: receipt.receiptReference,
+            receiptAccount: receipt.receiptAccount,
+            receiptPhone: receipt.receiptPhone,
+            verificationStatus: receipt.provider?.supported
+              ? VerificationStatus.PENDING
+              : VerificationStatus.NOT_REQUIRED,
+            externalRef: input.externalRef,
+            receiptUrl: input.receiptUrl,
+            playerNote: input.playerNote,
+            expiresAt: new Date(Date.now() + DEPOSIT_TTL_MS),
+          },
+        });
+        await createAgentTask(tx, { agentProfileId: agentProfileId!, depositId: created.id });
+        return created;
       });
       return { deposit, replayed: false, provider: receipt.provider };
     } catch (error) {
@@ -193,6 +207,31 @@ export async function createDeposit(input: CreateDepositInput) {
         if (duplicate) return { deposit: duplicate, replayed: true, provider: receipt.provider };
       }
       if (isUniqueViolation(error, 'code')) continue;
+      if (isTaskLockViolation(error) && agentProfileId) {
+        // The agent was picked up by a concurrent request between the query
+        // and the insert; try the next free agent.
+        if (!assignedByServer) {
+          throw Errors.conflict(
+            'That agent is finishing another request. Try again in a moment.',
+            'AGENT_BUSY',
+          );
+        }
+        excludedAgentIds.add(agentProfileId);
+        const next = await assignAgentForPayment({
+          method: input.method,
+          amount: input.amount,
+          excludeAgentIds: [...excludedAgentIds],
+        });
+        if (!next) {
+          throw Errors.conflict(
+            `No agent is accepting ${input.method.toLowerCase().replaceAll('_', ' ')} payments right now. Try another method.`,
+            'AGENT_UNAVAILABLE',
+          );
+        }
+        agentProfileId = next.agent.id;
+        paymentAccountId = next.account.id;
+        continue;
+      }
       throw error;
     }
   }
@@ -202,6 +241,9 @@ export async function createDeposit(input: CreateDepositInput) {
 
 export async function claimDeposit(agentUserId: string, code: string) {
   const agent = await getActiveAgentByUserId(agentUserId);
+  if (!agent.acceptingTasks) {
+    throw Errors.conflict('Turn on accepting tasks before claiming work', 'AGENT_UNAVAILABLE');
+  }
   return runTransaction(async (tx) => {
     const deposit = await tx.depositRequest.findFirst({
       where: { code, status: { in: ['PENDING', 'PROCESSING'] } },
@@ -216,6 +258,24 @@ export async function claimDeposit(agentUserId: string, code: string) {
     if (deposit.status === 'PROCESSING' && deposit.agentProfileId === agent.id) {
       return deposit;
     }
+
+    const task = await tx.agentTask.findFirst({
+      where: { depositId: deposit.id, status: { in: ['OFFERED', 'CLAIMED'] } },
+    });
+    if (!task) {
+      const busy = await tx.agentTask.findFirst({
+        where: { agentProfileId: agent.id, status: { in: ['OFFERED', 'CLAIMED'] } },
+        select: { id: true },
+      });
+      if (busy) {
+        throw Errors.conflict(
+          'Finish your current task before claiming another',
+          'AGENT_TASK_ACTIVE',
+        );
+      }
+      await createAgentTask(tx, { agentProfileId: agent.id, depositId: deposit.id });
+    }
+
     return tx.depositRequest.update({
       where: { id: deposit.id },
       data: {
@@ -270,6 +330,20 @@ export async function creditDeposit(params: {
           'Credited amount must be positive and cannot exceed the requested amount',
           'INVALID_CREDITED_AMOUNT',
         );
+      }
+
+      if (!open.agentProfileId) {
+        const busy = await tx.agentTask.findFirst({
+          where: { agentProfileId: agent.id, status: { in: ['OFFERED', 'CLAIMED'] } },
+          select: { id: true },
+        });
+        if (busy) {
+          throw Errors.conflict(
+            'Finish your current task before taking another',
+            'AGENT_TASK_ACTIVE',
+          );
+        }
+        await createAgentTask(tx, { agentProfileId: agent.id, depositId: open.id });
       }
 
       const commission = calculateBps(amount, agent.depositCommissionBps);
@@ -351,6 +425,8 @@ export async function creditDeposit(params: {
         },
       });
 
+      await closeAgentTask(tx, { depositId: open.id }, 'COMPLETED');
+
       return { deposit, replayed: false };
     }),
   );
@@ -358,21 +434,25 @@ export async function creditDeposit(params: {
 
 export async function rejectDeposit(agentUserId: string, code: string, note?: string) {
   const agent = await getActiveAgentByUserId(agentUserId);
-  const deposit = await prisma.depositRequest.findFirst({
-    where: { code, status: { in: ['PENDING', 'PROCESSING'] } },
-  });
-  if (!deposit) throw Errors.notFound('Open deposit request');
-  if (deposit.agentProfileId && deposit.agentProfileId !== agent.id) {
-    throw Errors.forbidden('This deposit is assigned to another agent', 'DEPOSIT_ASSIGNED');
-  }
-  return prisma.depositRequest.update({
-    where: { id: deposit.id },
-    data: {
-      status: DepositStatus.REJECTED,
-      agentProfileId: agent.id,
-      processedById: agent.userId,
-      agentNote: note,
-    },
+  return runTransaction(async (tx) => {
+    const deposit = await tx.depositRequest.findFirst({
+      where: { code, status: { in: ['PENDING', 'PROCESSING'] } },
+    });
+    if (!deposit) throw Errors.notFound('Open deposit request');
+    if (deposit.agentProfileId && deposit.agentProfileId !== agent.id) {
+      throw Errors.forbidden('This deposit is assigned to another agent', 'DEPOSIT_ASSIGNED');
+    }
+    const rejected = await tx.depositRequest.update({
+      where: { id: deposit.id },
+      data: {
+        status: DepositStatus.REJECTED,
+        agentProfileId: agent.id,
+        processedById: agent.userId,
+        agentNote: note,
+      },
+    });
+    await closeAgentTask(tx, { depositId: deposit.id }, 'CANCELLED');
+    return rejected;
   });
 }
 

@@ -6,9 +6,11 @@ import { asyncHandler } from '../lib/async';
 import { prisma } from '../lib/prisma';
 import {
   serializeAgent,
+  serializeAgentTask,
   serializeCommission,
   serializeDeposit,
   serializePaymentAccount,
+  serializeProof,
   serializeWallet,
   serializeWithdrawal,
 } from '../lib/serializers';
@@ -21,6 +23,7 @@ import {
 } from '../services/deposits';
 import {
   createPaymentAccount,
+  setAgentAvailability,
   setAgentPresence,
   updateAutoDepositSettings,
   updatePaymentAccount,
@@ -29,6 +32,8 @@ import {
   listAgentWithdrawals,
   redeemWithdrawal,
 } from '../services/withdrawals';
+import { releaseAgentTask } from '../services/agentTasks';
+import { listAgentProofs, submitWithdrawalProof } from '../services/withdrawalProofs';
 import { getPlayerWallet } from '../services/wallet';
 
 const CodeParams = z.object({ code: z.string().regex(/^\d{6}$/, 'Expected a 6-digit code') });
@@ -45,7 +50,22 @@ const RedeemSchema = z.object({
   note: z.string().max(500).optional(),
 });
 
+const ProofSchema = z.object({
+  reference: z.string().trim().max(128).optional(),
+  paidAmount: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
+  currency: z.string().trim().length(3).optional(),
+  senderAccount: z.string().trim().max(64).optional(),
+  receiverAccount: z.string().trim().max(64).optional(),
+  paidAt: z.coerce.date().optional(),
+  notes: z.string().trim().max(500).optional(),
+  mediaAssetId: z.string().uuid().optional(),
+  screenshotBase64: z.string().min(1).max(7_500_000).optional(),
+});
+
+const IdParams = z.object({ id: z.string().uuid() });
+
 const PresenceSchema = z.object({ isOnline: z.boolean() });
+const AvailabilitySchema = z.object({ acceptingTasks: z.boolean() });
 
 const AutoDepositSchema = z
   .object({
@@ -193,6 +213,36 @@ agentRouter.post(
   }),
 );
 
+agentRouter.post(
+  '/availability',
+  asyncHandler(async (req, res) => {
+    const body = parse(AvailabilitySchema, req.body);
+    const agent = await setAgentAvailability(req.auth!.userId, body.acceptingTasks);
+    res.json({ data: serializeAgent(agent, { includeBalances: true }) });
+  }),
+);
+
+agentRouter.get(
+  '/tasks',
+  asyncHandler(async (req, res) => {
+    const tasks = await prisma.agentTask.findMany({
+      where: { agentProfileId: req.agent!.id },
+      orderBy: { createdAt: 'desc' },
+      take: 50,
+    });
+    res.json({ data: tasks.map((task) => serializeAgentTask(task)) });
+  }),
+);
+
+agentRouter.post(
+  '/tasks/:id/release',
+  asyncHandler(async (req, res) => {
+    const params = parse(AccountParams, req.params);
+    const task = await releaseAgentTask(req.auth!.userId, params.id);
+    res.json({ data: serializeAgentTask(task) });
+  }),
+);
+
 agentRouter.get(
   '/deposits',
   asyncHandler(async (req, res) => {
@@ -255,6 +305,39 @@ agentRouter.post(
       note: body.note,
     });
     res.json({ data: serializeWithdrawal(withdrawal), replayed });
+  }),
+);
+
+agentRouter.get(
+  '/withdrawals/:id/proofs',
+  asyncHandler(async (req, res) => {
+    const params = parse(IdParams, req.params);
+    const proofs = await listAgentProofs(req.agent!.id, params.id);
+    res.json({ data: proofs.map(serializeProof) });
+  }),
+);
+
+agentRouter.post(
+  '/withdrawals/:id/proof',
+  asyncHandler(async (req, res) => {
+    const params = parse(IdParams, req.params);
+    const body = parse(ProofSchema, req.body);
+    const proof = await submitWithdrawalProof({
+      agentUserId: req.auth!.userId,
+      withdrawalId: params.id,
+      input: {
+        reference: body.reference,
+        paidAmount: body.paidAmount === undefined ? undefined : BigInt(body.paidAmount),
+        currency: body.currency,
+        senderAccount: body.senderAccount,
+        receiverAccount: body.receiverAccount,
+        paidAt: body.paidAt,
+        notes: body.notes,
+        mediaAssetId: body.mediaAssetId,
+        screenshotBase64: body.screenshotBase64,
+      },
+    });
+    res.status(201).json({ data: serializeProof(proof) });
   }),
 );
 

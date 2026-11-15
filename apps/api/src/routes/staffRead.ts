@@ -2,6 +2,7 @@ import { Router } from 'express';
 import {
   DepositStatus,
   LedgerKind,
+  SupportTicketStatus,
   UserRole,
   UserStatus,
   VerificationStatus,
@@ -12,11 +13,33 @@ import { z } from 'zod';
 import { parse } from '../lib/validate';
 import { asyncHandler } from '../lib/async';
 import { Errors } from '../lib/errors';
+import { minorToWire } from '../lib/money';
 import { prisma } from '../lib/prisma';
-import { serializeAgent, serializeDeposit, serializeLedger, serializeUser, serializeWallet, serializeWithdrawal } from '../lib/serializers';
+import {
+  serializeAgent,
+  serializeDeposit,
+  serializeLedger,
+  serializeProof,
+  serializeSupportMessage,
+  serializeSupportTicket,
+  serializeUser,
+  serializeWallet,
+  serializeWithdrawal,
+} from '../lib/serializers';
 import { authenticate, requireRole } from '../middleware/auth';
 import { writeAudit } from '../services/audit';
 import { cancelWithdrawalByStaff } from '../services/withdrawals';
+import { reviewWithdrawalProof } from '../services/withdrawalProofs';
+import { closeAgentTask } from '../services/agentTasks';
+import {
+  SUPPORT_PAGE_SIZE,
+  claimSupportTicket,
+  getSupportTicketDetail,
+  listSupportTickets,
+  replyToTicketAsStaff,
+  resolveSupportTicket,
+} from '../services/support';
+import { runTransaction } from '../lib/tx';
 
 const PAGE_SIZE = 25;
 
@@ -54,6 +77,29 @@ const ListReceiptsQuery = z.object({
 
 const UserStatusSchema = z.object({
   status: z.enum([UserStatus.ACTIVE, UserStatus.SUSPENDED]),
+});
+
+const ProofReviewSchema = z.object({
+  decision: z.enum(['VERIFIED', 'FAILED']),
+  note: z.string().trim().max(500).optional(),
+});
+
+const ProofReviewParams = z.object({
+  withdrawalId: z.string().uuid(),
+  proofId: z.string().uuid(),
+});
+
+const TicketParams = z.object({ ticketId: z.string().uuid() });
+
+const ListTicketsQuery = z.object({
+  status: z.nativeEnum(SupportTicketStatus).optional(),
+  assignee: z.string().trim().max(36).optional(),
+  query: z.string().trim().max(64).optional(),
+  page: z.coerce.number().int().min(0).max(2000).default(0),
+});
+
+const TicketReplySchema = z.object({
+  body: z.string().trim().min(1).max(4000),
 });
 
 function userSearchWhere(query: string | undefined): Prisma.UserWhereInput {
@@ -240,6 +286,9 @@ staffReadRouter.get(
         include: {
           player: { select: { displayName: true, phone: true } },
           agentProfile: { select: { agentCode: true } },
+          payoutAccount: { select: { accountName: true, accountNumber: true, provider: true } },
+          proofs: { orderBy: { createdAt: 'desc' }, take: 3 },
+          task: { select: { status: true, slaDeadline: true } },
         },
       }),
     ]);
@@ -248,6 +297,9 @@ staffReadRouter.get(
         ...serializeWithdrawal(withdrawal),
         player: withdrawal.player,
         agentCode: withdrawal.agentProfile?.agentCode ?? null,
+        payoutAccount: withdrawal.payoutAccount,
+        proofs: withdrawal.proofs.map(serializeProof),
+        task: withdrawal.task,
       })),
       page: { index: query.page, size: PAGE_SIZE, total },
     });
@@ -373,9 +425,51 @@ staffReadRouter.post(
   }),
 );
 
+staffReadRouter.get(
+  '/withdrawals/:withdrawalId/proofs',
+  asyncHandler(async (req, res) => {
+    const proofs = await prisma.withdrawalProof.findMany({
+      where: { withdrawalId: req.params.withdrawalId },
+      orderBy: { createdAt: 'desc' },
+    });
+    res.json({ data: proofs.map(serializeProof) });
+  }),
+);
+
+staffReadRouter.post(
+  '/withdrawals/:withdrawalId/proofs/:proofId/review',
+  asyncHandler(async (req, res) => {
+    const params = parse(ProofReviewParams, req.params);
+    const body = parse(ProofReviewSchema, req.body);
+    const proof = await reviewWithdrawalProof({
+      staffUserId: req.auth!.userId,
+      withdrawalId: params.withdrawalId,
+      proofId: params.proofId,
+      decision: body.decision,
+      note: body.note,
+    });
+    await writeAudit({
+      actorId: req.auth!.userId,
+      actorRole: req.auth!.role,
+      action: body.decision === 'VERIFIED' ? 'withdrawal.proof_approve' : 'withdrawal.proof_reject',
+      entityType: 'WithdrawalProof',
+      entityId: proof.id,
+      after: { withdrawalId: proof.withdrawalId, status: proof.status, note: body.note ?? null },
+      ip: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
+    res.json({ data: serializeProof(proof) });
+  }),
+);
+
 staffReadRouter.post(
   '/withdrawals/:withdrawalId/cancel',
   asyncHandler(async (req, res) => {
+    const before = await prisma.withdrawalRequest.findUnique({
+      where: { id: req.params.withdrawalId },
+      select: { status: true },
+    });
+    if (!before) throw Errors.notFound('Withdrawal');
     const withdrawal = await cancelWithdrawalByStaff(req.params.withdrawalId);
     await writeAudit({
       actorId: req.auth!.userId,
@@ -383,7 +477,7 @@ staffReadRouter.post(
       action: 'withdrawal.cancel',
       entityType: 'WithdrawalRequest',
       entityId: withdrawal.id,
-      before: { status: 'ESCROWED' },
+      before: { status: before.status },
       after: { status: withdrawal.status },
       ip: req.ip,
       userAgent: req.headers['user-agent'],
@@ -395,32 +489,174 @@ staffReadRouter.post(
 staffReadRouter.post(
   '/deposits/:depositId/cancel',
   asyncHandler(async (req, res) => {
-    const deposit = await prisma.depositRequest.findUnique({
-      where: { id: req.params.depositId },
-      select: { id: true, status: true },
-    });
-    if (!deposit) throw Errors.notFound('Deposit');
-    if (
-      deposit.status !== DepositStatus.PENDING &&
-      deposit.status !== DepositStatus.PROCESSING
-    ) {
-      throw Errors.conflict('Only open deposits can be cancelled', 'DEPOSIT_NOT_OPEN');
-    }
-    const updated = await prisma.depositRequest.update({
-      where: { id: deposit.id },
-      data: { status: DepositStatus.CANCELLED },
+    const updated = await runTransaction(async (tx) => {
+      const deposit = await tx.depositRequest.findUnique({
+        where: { id: req.params.depositId },
+        select: { id: true, status: true },
+      });
+      if (!deposit) throw Errors.notFound('Deposit');
+      if (
+        deposit.status !== DepositStatus.PENDING &&
+        deposit.status !== DepositStatus.PROCESSING
+      ) {
+        throw Errors.conflict('Only open deposits can be cancelled', 'DEPOSIT_NOT_OPEN');
+      }
+      await closeAgentTask(tx, { depositId: deposit.id }, 'CANCELLED');
+      return tx.depositRequest.update({
+        where: { id: deposit.id },
+        data: { status: DepositStatus.CANCELLED },
+      });
     });
     await writeAudit({
       actorId: req.auth!.userId,
       actorRole: req.auth!.role,
       action: 'deposit.cancel',
       entityType: 'DepositRequest',
-      entityId: deposit.id,
-      before: { status: deposit.status },
+      entityId: updated.id,
+      before: { status: 'PENDING/PROCESSING' },
       after: { status: updated.status },
       ip: req.ip,
       userAgent: req.headers['user-agent'],
     });
     res.json({ data: serializeDeposit(updated) });
+  }),
+);
+
+staffReadRouter.get(
+  '/tickets',
+  asyncHandler(async (req, res) => {
+    const query = parse(ListTicketsQuery, req.query);
+    const { total, tickets } = await listSupportTickets(
+      {
+        statuses: query.status ? [query.status] : undefined,
+        assignee: query.assignee,
+        query: query.query,
+        page: query.page,
+      },
+      req.auth!.userId,
+    );
+    res.json({
+      data: tickets.map((ticket) => ({
+        ...serializeSupportTicket(ticket),
+        player: ticket.player,
+        assignee: ticket.assignee,
+        preview: ticket.messages[0] ?? null,
+      })),
+      page: { index: query.page, size: SUPPORT_PAGE_SIZE, total },
+    });
+  }),
+);
+
+staffReadRouter.get(
+  '/tickets/:ticketId',
+  asyncHandler(async (req, res) => {
+    const params = parse(TicketParams, req.params);
+    const { ticket, wallet, deposits, withdrawals } = await getSupportTicketDetail(params.ticketId);
+    res.json({
+      data: {
+        ticket: {
+          ...serializeSupportTicket(ticket),
+          player: ticket.player,
+          assignee: ticket.assignee,
+        },
+        messages: ticket.messages.map(serializeSupportMessage),
+        wallet: wallet
+          ? {
+              available: minorToWire(wallet.available),
+              bonus: minorToWire(wallet.bonus),
+              escrow: minorToWire(wallet.escrow),
+              locked: minorToWire(wallet.locked),
+            }
+          : null,
+        deposits: deposits.map((deposit) => ({
+          id: deposit.id,
+          code: deposit.code,
+          amount: minorToWire(deposit.amount),
+          status: deposit.status,
+          method: deposit.method,
+          createdAt: deposit.createdAt,
+        })),
+        withdrawals: withdrawals.map((withdrawal) => ({
+          id: withdrawal.id,
+          amount: minorToWire(withdrawal.amount),
+          netAmount: minorToWire(withdrawal.netAmount),
+          status: withdrawal.status,
+          method: withdrawal.method,
+          createdAt: withdrawal.createdAt,
+        })),
+      },
+    });
+  }),
+);
+
+staffReadRouter.post(
+  '/tickets/:ticketId/messages',
+  asyncHandler(async (req, res) => {
+    const params = parse(TicketParams, req.params);
+    const body = parse(TicketReplySchema, req.body);
+    const { ticket, message } = await replyToTicketAsStaff({
+      ticketId: params.ticketId,
+      staffUserId: req.auth!.userId,
+      body: body.body,
+    });
+    await writeAudit({
+      actorId: req.auth!.userId,
+      actorRole: req.auth!.role,
+      action: 'support.reply',
+      entityType: 'SupportTicket',
+      entityId: ticket.id,
+      after: { code: ticket.code, messageId: message.id, status: ticket.status },
+      ip: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
+    res.status(201).json({
+      data: {
+        ticket: serializeSupportTicket(ticket),
+        message: serializeSupportMessage(message),
+      },
+    });
+  }),
+);
+
+staffReadRouter.post(
+  '/tickets/:ticketId/claim',
+  asyncHandler(async (req, res) => {
+    const params = parse(TicketParams, req.params);
+    const ticket = await claimSupportTicket(params.ticketId, req.auth!.userId);
+    await writeAudit({
+      actorId: req.auth!.userId,
+      actorRole: req.auth!.role,
+      action: 'support.claim',
+      entityType: 'SupportTicket',
+      entityId: ticket.id,
+      after: { code: ticket.code, assigneeId: ticket.assigneeId },
+      ip: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
+    res.json({ data: serializeSupportTicket(ticket) });
+  }),
+);
+
+staffReadRouter.post(
+  '/tickets/:ticketId/resolve',
+  asyncHandler(async (req, res) => {
+    const params = parse(TicketParams, req.params);
+    const { ticket, message } = await resolveSupportTicket(params.ticketId, req.auth!.userId);
+    await writeAudit({
+      actorId: req.auth!.userId,
+      actorRole: req.auth!.role,
+      action: 'support.resolve',
+      entityType: 'SupportTicket',
+      entityId: ticket.id,
+      after: { code: ticket.code, status: ticket.status, messageId: message?.id ?? null },
+      ip: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
+    res.json({
+      data: {
+        ticket: serializeSupportTicket(ticket),
+        message: message ? serializeSupportMessage(message) : null,
+      },
+    });
   }),
 );

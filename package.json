@@ -24,6 +24,7 @@
     "db:studio": "prisma studio --schema apps/api/prisma/schema.prisma",
     "api:worker": "npm run worker -w @bingo/api",
     "api:bot": "npm run bot -w @bingo/api",
+    "api:support-bot": "npm run support-bot -w @bingo/api",
     "admin:create": "npm run admin:create -w @bingo/api --",
     "db:seed": "npm run db:seed -w @bingo/api",
     "infra:up": "docker compose up -d",

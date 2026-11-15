@@ -2,46 +2,35 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { parse } from '../lib/validate';
 import { asyncHandler } from '../lib/async';
-import { Errors } from '../lib/errors';
-import { prisma } from '../lib/prisma';
 import { authenticate, requireVerifiedPhone } from '../middleware/auth';
 import {
-  applyWalletCallback,
   closeSession,
+  handleProviderCallback,
   launchGame,
   listPlayableGames,
   serializeSession,
-  verifyCallbackSignature,
 } from '../services/gameProviders';
 
 const LaunchSchema = z.object({ lang: z.enum(['en', 'am']).default('en') });
 
-const CallbackSchema = z.object({
-  sessionId: z.string().uuid(),
-  type: z.enum(['bet', 'win', 'rollback']),
-  txnId: z.string().min(1).max(128),
-  amount: z.union([z.string().regex(/^\d+$/), z.number().int().positive()]).transform(String),
-  currency: z.string().max(16).optional(),
-  roundId: z.string().max(128).optional(),
-});
-
 export const gamesRouter = Router();
 
-/** Providers sign the exact bytes they send; the shared secret is per provider. */
+/**
+ * Providers sign the exact bytes they send; the shared secret is per provider.
+ * Balances are signed back with a timestamp and nonce so the reply cannot be
+ * replayed by a third party.
+ */
 gamesRouter.post(
   '/callback/:providerCode',
   asyncHandler(async (req, res) => {
-    const provider = await prisma.gameProvider.findUnique({
-      where: { code: req.params.providerCode },
+    const result = await handleProviderCallback({
+      providerCode: req.params.providerCode,
+      rawBody: req.rawBody,
+      signature: req.header('x-provider-signature'),
+      body: req.body,
+      ip: req.ip,
     });
-    if (!provider) throw Errors.notFound('Provider');
-    const signature = req.header('x-provider-signature');
-    if (!verifyCallbackSignature(provider, req.rawBody, signature)) {
-      throw Errors.forbidden('Invalid provider signature', 'SIGNATURE_INVALID');
-    }
-    const payload = parse(CallbackSchema, req.body);
-    const result = await applyWalletCallback(provider.code, payload);
-    res.status(result.replayed ? 200 : 201).json({ data: { accepted: true, replayed: result.replayed } });
+    res.status(result.status).json({ data: result.data });
   }),
 );
 

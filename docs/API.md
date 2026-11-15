@@ -233,6 +233,34 @@ client opts into the full envelope for these.
 | POST | `/support/withdrawals/:withdrawalId/cancel` | — | Only `ESCROWED`; returns the locked funds to the player |
 | GET | `/support/agents` | `?status=` | Float, escrow and commission summary |
 | GET | `/support/receipts` | `?status=&providerCode=&page=` | Receipt verification audit: parsed amount, sender/receiver, attempts, source (`SERVER`/`CLIENT`/`RELAY`) |
+| GET | `/support/tickets` | `?status=&assignee=&query=&page=` | Support queue, newest message first. `assignee` accepts `me`, `unassigned` or a staff id |
+| GET | `/support/tickets/:ticketId` | — | Ticket, message history, player wallet and last five deposits/withdrawals. Opening it clears `unreadForStaff` |
+| POST | `/support/tickets/:ticketId/messages` | `{ body }` | Staff reply; claims an unassigned ticket and sets it `PENDING`. Delivery is asynchronous — see below |
+| POST | `/support/tickets/:ticketId/claim` | — | Sets `assigneeId` to the caller; `409 TICKET_ASSIGNED` when someone else owns it |
+| POST | `/support/tickets/:ticketId/resolve` | — | Adds a localized system message and marks the ticket `RESOLVED`; the player can reopen it by replying |
+
+### Support chat (Telegram bot + delivery queue)
+
+The support chat is a second BotFather bot (`SUPPORT_BOT_TOKEN`). It identifies the
+player by `User.telegramId`; only `PLAYER` accounts can open a conversation. The bot has
+FAQ/self-service screens (`Deposit`, `Withdrawal`, `My account` with wallet and open
+requests, `Help & FAQ`) and a "Talk to an agent" action that creates a `SupportTicket`.
+
+- A player has at most one `OPEN`/`PENDING` ticket. The partial unique index
+  `SupportTicket_one_active_per_player` enforces it; the service resumes the existing
+  thread instead of failing on double taps.
+- Player messages increment `unreadForStaff` and queue a `SUPPORT_MESSAGE` notification
+  for active SUPPORT/SUPER_ADMIN staff with a linked Telegram id. An assigned ticket
+  notifies only its assignee.
+- Staff replies are rows in `SupportMessage`; the support-bot process sweeps
+  undelivered `STAFF`/`SYSTEM` messages every 3 seconds, pushes them to the player's
+  Telegram chat, and records `deliveredAt` or increments `deliveryAttempts` (give-up at
+  5). The API never talks to the support bot directly.
+- `/end` (player) and `resolve` (staff) mark the thread `RESOLVED` with a system
+  message. A new player message reopens it. `CLOSED` is terminal.
+- Whitelisted values: tickets 5 per player per hour, body 4000 chars, 25 rows per page,
+  bot rate limit 15 messages/minute per chat. Staff replies are audited
+  (`support.reply`, `support.claim`, `support.resolve`).
 
 ## SuperAdmin (`SUPER_ADMIN`)
 

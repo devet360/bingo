@@ -14,6 +14,7 @@ apps/api/src/engine             RoundEngine: per-room clock and transitions
 apps/api/src/realtime           Socket.io gateway + in-process event bus
 apps/api/src/jobs               BullMQ maintenance queue + worker entrypoint
 apps/api/src/bot                grammY bot: phone verification + Mini App entry
+apps/api/src/support-bot        grammY customer-support bot: FAQ, chat, staff reply delivery
 apps/api/scripts                create-admin: bootstraps the first super admin
 apps/api/tests                  Unit tests (node:test)
 apps/web                        Next.js 15 Mini App + staff dashboards (/admin, /support)
@@ -48,6 +49,7 @@ npm run db:seed           # 8 rooms: US75 / UK90 at 10, 50, 100, 500 credits
 npm run api:dev           # tsx watch on http://localhost:4000 (REST + Socket.io)
 npm run api:worker        # BullMQ maintenance worker (needs REDIS_URL)
 npm run api:bot           # Telegram bot long-polling (needs BOT_TOKEN)
+npm run api:support-bot   # customer-support bot long-polling (needs SUPPORT_BOT_TOKEN)
 npm run admin:create -- --name "Owner" --email owner@example.com   # first super admin
 npm run api:build
 npm run api:start         # node dist/index.js

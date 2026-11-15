@@ -154,6 +154,36 @@ BEGIN
     ALTER TABLE "OtpCode" ADD CONSTRAINT "OtpCode_attempts_range"
       CHECK ("attempts" >= 0 AND "maxAttempts" BETWEEN 1 AND 10);
   END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'AgentTask_exactly_one_request') THEN
+    ALTER TABLE "AgentTask" ADD CONSTRAINT "AgentTask_exactly_one_request"
+      CHECK (("depositId" IS NOT NULL) <> ("withdrawalId" IS NOT NULL));
+  END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'AgentTask_reassign_count_range') THEN
+    ALTER TABLE "AgentTask" ADD CONSTRAINT "AgentTask_reassign_count_range"
+      CHECK ("reassignCount" >= 0);
+  END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'WithdrawalProof_amount_positive') THEN
+    ALTER TABLE "WithdrawalProof" ADD CONSTRAINT "WithdrawalProof_amount_positive"
+      CHECK ("paidAmount" IS NULL OR "paidAmount" > 0);
+  END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'MediaAsset_byte_size_positive') THEN
+    ALTER TABLE "MediaAsset" ADD CONSTRAINT "MediaAsset_byte_size_positive"
+      CHECK ("byteSize" > 0);
+  END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'GameProvider_max_win_positive') THEN
+    ALTER TABLE "GameProvider" ADD CONSTRAINT "GameProvider_max_win_positive"
+      CHECK ("maxWin" IS NULL OR "maxWin" > 0);
+  END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ProviderGame_max_win_positive') THEN
+    ALTER TABLE "ProviderGame" ADD CONSTRAINT "ProviderGame_max_win_positive"
+      CHECK ("maxWin" IS NULL OR "maxWin" > 0);
+  END IF;
 END $$;
 
 -- ─────────────── 4. One journal per business event, per ledger kind ───────────
@@ -170,10 +200,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS "BingoRound_one_active_per_room"
   ON "BingoRound" ("roomId")
   WHERE "status" IN ('WAITING', 'LOCKED', 'PLAYING', 'CLAIM_VERIFICATION');
 
--- A player cannot hold two live withdrawal requests at once.
+-- A player cannot hold two live withdrawal requests at once. PROCESSING is
+-- still live: the agent has the money but the proof has not cleared.
+DROP INDEX IF EXISTS "WithdrawalRequest_one_open_per_player";
 CREATE UNIQUE INDEX IF NOT EXISTS "WithdrawalRequest_one_open_per_player"
   ON "WithdrawalRequest" ("playerId")
-  WHERE "status" = 'ESCROWED';
+  WHERE "status" IN ('ESCROWED', 'PROCESSING');
 
 -- 6-digit namespaces are recycled: uniqueness is required only among open requests.
 CREATE UNIQUE INDEX IF NOT EXISTS "DepositRequest_open_code_unique"
@@ -188,9 +220,27 @@ CREATE UNIQUE INDEX IF NOT EXISTS "DepositRequest_credited_receipt_unique"
 
 CREATE UNIQUE INDEX IF NOT EXISTS "WithdrawalRequest_open_payout_code_unique"
   ON "WithdrawalRequest" ("payoutCode")
-  WHERE "status" = 'ESCROWED';
+  WHERE "status" IN ('ESCROWED', 'PROCESSING');
 
--- ───────────────────────── 5. Reconciliation helpers ─────────────────────────
+-- ─────────────── 5. Agent routing, proofs and provider caps ──────────────────
+-- Single-task lock: an agent may hold at most one live task (deposit or
+-- withdrawal) at a time, regardless of which lane it came from.
+CREATE UNIQUE INDEX IF NOT EXISTS "AgentTask_one_active_per_agent"
+  ON "AgentTask" ("agentProfileId")
+  WHERE "status" IN ('OFFERED', 'CLAIMED');
+
+-- A player has at most one default payout account.
+CREATE UNIQUE INDEX IF NOT EXISTS "PlayerPayoutAccount_one_default_per_player"
+  ON "PlayerPayoutAccount" ("playerId")
+  WHERE "isDefault" AND "isActive";
+
+-- One transfer can prove at most one withdrawal. Rejected proofs release the
+-- reference again so the agent can correct a typo.
+CREATE UNIQUE INDEX IF NOT EXISTS "WithdrawalProof_reference_unique"
+  ON "WithdrawalProof" ("method", lower("reference"))
+  WHERE "reference" IS NOT NULL AND "status" <> 'FAILED';
+
+-- ───────────────────────── 6. Reconciliation helpers ─────────────────────────
 CREATE OR REPLACE VIEW "v_account_balances" AS
 SELECT
   a."id",

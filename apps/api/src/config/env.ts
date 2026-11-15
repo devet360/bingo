@@ -28,6 +28,13 @@ const EnvSchema = z.object({
   // Shown to players who must open the bot to verify their number.
   TELEGRAM_BOT_USERNAME: z.string().min(2).optional(),
 
+  // Dedicated customer-support bot. Optional for the API itself; the
+  // `support-bot` process refuses to start without it.
+  SUPPORT_BOT_TOKEN: z.string().min(10).optional(),
+  SUPPORT_HOURS_START: z.coerce.number().int().min(0).max(23).default(8),
+  SUPPORT_HOURS_END: z.coerce.number().int().min(0).max(24).default(22),
+  SUPPORT_TIMEZONE: z.string().min(1).default('Africa/Addis_Ababa'),
+
   DEFAULT_DEPOSIT_COMMISSION_BPS: z.coerce.number().int().min(0).max(10_000).default(300),
   DEFAULT_WITHDRAWAL_COMMISSION_BPS: z.coerce.number().int().min(0).max(10_000).default(200),
   WITHDRAWAL_FEE_BPS: z.coerce.number().int().min(0).max(10_000).default(0),
@@ -41,6 +48,12 @@ const EnvSchema = z.object({
     .transform((value) => value === 'true'),
   MAINTENANCE_INTERVAL_MS: z.coerce.number().int().min(5_000).default(30_000),
   WORKER_CONCURRENCY: z.coerce.number().int().min(1).max(20).default(2),
+  // How long an agent has to finish a routed deposit/withdrawal before the
+  // task shows as overdue (and, while still pre-money, is released).
+  AGENT_TASK_SLA_MINUTES: z.coerce.number().int().min(1).max(24 * 60).default(30),
+  // Payment screenshots live on the mounted media volume, never in Postgres.
+  MEDIA_DIR: z.string().default('.data/media'),
+  MEDIA_MAX_BYTES: z.coerce.number().int().min(64_000).max(20_000_000).default(5_000_000),
 });
 
 const parsed = EnvSchema.safeParse(process.env);
@@ -57,4 +70,5 @@ export const env = {
   corsOrigins: parsed.data.CORS_ORIGINS.split(',')
     .map((origin) => origin.trim())
     .filter(Boolean),
+  mediaDir: resolve(process.cwd(), parsed.data.MEDIA_DIR),
 };

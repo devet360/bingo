@@ -11,9 +11,17 @@ import { MarketingTab } from './marketing';
 import { ProvidersTab } from './providers';
 import { AgentsTab, DepositsTab, TransactionsTab, WithdrawalsTab } from './queues';
 import { ReceiptsTab } from './receipts';
+import { TicketsTab } from './tickets';
 import { UsersTab } from './users';
 
-type SupportTab = 'users' | 'transactions' | 'deposits' | 'withdrawals' | 'agents' | 'receipts';
+type SupportTab =
+  | 'tickets'
+  | 'users'
+  | 'transactions'
+  | 'deposits'
+  | 'withdrawals'
+  | 'agents'
+  | 'receipts';
 type AdminTab =
   | 'overview'
   | SupportTab
@@ -27,7 +35,7 @@ type AdminTab =
 export function StaffConsole({ mode }: { mode: 'support' | 'admin' }) {
   const { user } = useSession();
   const { t } = useI18n();
-  const [supportTab, setSupportTab] = useState<SupportTab>('users');
+  const [supportTab, setSupportTab] = useState<SupportTab>('tickets');
   const [adminTab, setAdminTab] = useState<AdminTab>('overview');
 
   const allowed =
@@ -59,6 +67,7 @@ export function StaffConsole({ mode }: { mode: 'support' | 'admin' }) {
           value={supportTab}
           onChange={setSupportTab}
           tabs={[
+            { value: 'tickets', label: t('staff.tab.tickets') },
             { value: 'users', label: t('staff.tab.users') },
             { value: 'transactions', label: t('staff.tab.transactions') },
             { value: 'deposits', label: t('staff.tab.deposits') },
@@ -68,7 +77,7 @@ export function StaffConsole({ mode }: { mode: 'support' | 'admin' }) {
           ]}
         />
 
-        {supportTab === 'users' ? <UsersTab canModerate /> : null}
+        {supportTab === 'tickets' ? <TicketsTab /> : null}
         {supportTab === 'transactions' ? <TransactionsTab /> : null}
         {supportTab === 'deposits' ? <DepositsTab /> : null}
         {supportTab === 'withdrawals' ? <WithdrawalsTab /> : null}
@@ -102,6 +111,7 @@ export function StaffConsole({ mode }: { mode: 'support' | 'admin' }) {
           onChange={setAdminTab}
           tabs={[
             { value: 'overview', label: t('staff.tab.overview') },
+            { value: 'tickets', label: t('staff.tab.tickets') },
             { value: 'users', label: t('staff.tab.users') },
             { value: 'transactions', label: t('staff.tab.transactions') },
             { value: 'deposits', label: t('staff.tab.deposits') },
@@ -119,6 +129,7 @@ export function StaffConsole({ mode }: { mode: 'support' | 'admin' }) {
       </div>
 
       {adminTab === 'overview' ? <OverviewTab /> : null}
+      {adminTab === 'tickets' ? <TicketsTab /> : null}
       {adminTab === 'users' ? <UsersTab canModerate /> : null}
       {adminTab === 'transactions' ? <TransactionsTab /> : null}
       {adminTab === 'deposits' ? <DepositsTab /> : null}

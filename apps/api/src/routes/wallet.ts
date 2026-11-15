@@ -5,7 +5,13 @@ import { parse } from '../lib/validate';
 import { asyncHandler } from '../lib/async';
 import { Errors } from '../lib/errors';
 import { prisma } from '../lib/prisma';
-import { serializeDeposit, serializeWallet, serializeWithdrawal } from '../lib/serializers';
+import {
+  serializeDeposit,
+  serializePayoutAccount,
+  serializeProof,
+  serializeWallet,
+  serializeWithdrawal,
+} from '../lib/serializers';
 import { authenticate, requireVerifiedPhone } from '../middleware/auth';
 import { moneyLimiter, receiptLimiter } from '../middleware/rateLimit';
 import { findAgentByCode } from '../services/agents';
@@ -24,6 +30,16 @@ import {
   createWithdrawal,
   listPlayerWithdrawals,
 } from '../services/withdrawals';
+import {
+  confirmCashReceived,
+  listWithdrawalProofs,
+} from '../services/withdrawalProofs';
+import {
+  createPayoutAccount,
+  deactivatePayoutAccount,
+  listPayoutAccounts,
+  updatePayoutAccount,
+} from '../services/payoutAccounts';
 import { getPlayerWallet, scopedIdempotencyKey } from '../services/wallet';
 
 const minorAmount = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
@@ -81,8 +97,24 @@ const CreateWithdrawalSchema = z.object({
   method: z.nativeEnum(PaymentMethod),
   agentProfileId: z.string().uuid().optional(),
   paymentAccountId: z.string().uuid().optional(),
+  payoutAccountId: z.string().uuid().optional(),
   playerNote: z.string().max(500).optional(),
 });
+
+const PayoutAccountSchema = z.object({
+  method: z.nativeEnum(PaymentMethod),
+  provider: z.string().trim().max(64).nullable().optional(),
+  accountName: z.string().trim().min(1).max(128),
+  accountNumber: z.string().trim().min(1).max(64),
+  isDefault: z.boolean().optional(),
+});
+
+const PayoutAccountPatchSchema = PayoutAccountSchema.partial().extend({
+  isDefault: z.boolean().optional(),
+});
+
+const PayoutAccountParams = z.object({ id: z.string().uuid() });
+const WithdrawalParams = z.object({ id: z.string().uuid() });
 
 const StatusQuery = z.object({
   status: z.nativeEnum(DepositStatus).optional(),
@@ -255,6 +287,42 @@ walletRouter.get(
   }),
 );
 
+walletRouter.get(
+  '/payout-accounts',
+  asyncHandler(async (req, res) => {
+    const accounts = await listPayoutAccounts(req.auth!.userId);
+    res.json({ data: accounts.map(serializePayoutAccount) });
+  }),
+);
+
+walletRouter.post(
+  '/payout-accounts',
+  asyncHandler(async (req, res) => {
+    const body = parse(PayoutAccountSchema, req.body);
+    const account = await createPayoutAccount(req.auth!.userId, body);
+    res.status(201).json({ data: serializePayoutAccount(account) });
+  }),
+);
+
+walletRouter.patch(
+  '/payout-accounts/:id',
+  asyncHandler(async (req, res) => {
+    const params = parse(PayoutAccountParams, req.params);
+    const body = parse(PayoutAccountPatchSchema, req.body);
+    const account = await updatePayoutAccount(req.auth!.userId, params.id, body);
+    res.json({ data: serializePayoutAccount(account) });
+  }),
+);
+
+walletRouter.delete(
+  '/payout-accounts/:id',
+  asyncHandler(async (req, res) => {
+    const params = parse(PayoutAccountParams, req.params);
+    const account = await deactivatePayoutAccount(req.auth!.userId, params.id);
+    res.json({ data: serializePayoutAccount(account) });
+  }),
+);
+
 walletRouter.post(
   '/withdrawals',
   requireVerifiedPhone,
@@ -265,6 +333,7 @@ walletRouter.post(
       playerId: req.auth!.userId,
       agentProfileId: body.agentProfileId,
       paymentAccountId: body.paymentAccountId,
+      payoutAccountId: body.payoutAccountId,
       method: body.method,
       amount: BigInt(body.amount),
       playerNote: body.playerNote,
@@ -288,5 +357,24 @@ walletRouter.post(
   asyncHandler(async (req, res) => {
     const withdrawal = await cancelWithdrawal(req.auth!.userId, req.params.id);
     res.json({ data: serializeWithdrawal(withdrawal) });
+  }),
+);
+
+walletRouter.get(
+  '/withdrawals/:id/proofs',
+  asyncHandler(async (req, res) => {
+    const params = parse(WithdrawalParams, req.params);
+    const proofs = await listWithdrawalProofs(req.auth!.userId, params.id);
+    res.json({ data: proofs.map(serializeProof) });
+  }),
+);
+
+walletRouter.post(
+  '/withdrawals/:id/confirm-received',
+  asyncHandler(async (req, res) => {
+    const params = parse(WithdrawalParams, req.params);
+    const proof = await confirmCashReceived(req.auth!.userId, params.id);
+    const withdrawal = await prisma.withdrawalRequest.findUnique({ where: { id: params.id } });
+    res.json({ data: { withdrawal: serializeWithdrawal(withdrawal!), proof: serializeProof(proof) } });
   }),
 );

@@ -4,7 +4,7 @@ Two apps share one repository and one build context:
 
 | Dokku app | Image | Processes | Serves | Port |
 | --- | --- | --- | --- | --- |
-| `bingo-api` | `Dockerfile.api` | `web`, `worker`, `bot` (from `Procfile`) | REST + Socket.io + Swagger, BullMQ worker, Telegram bot | 4000 |
+| `bingo-api` | `Dockerfile.api` | `web`, `worker`, `bot`, `support-bot` (from `Procfile`) | REST + Socket.io + Swagger, BullMQ worker, Telegram bots | 4000 |
 | `bingo-web` | `Dockerfile.web` | `web` | Next.js Mini App + staff dashboards | 3000 |
 
 Postgres and Redis come from Dokku plugins. Linking the services injects
@@ -66,6 +66,27 @@ The bot process configures itself on boot: localized command lists (`en`, `am`) 
 Web App menu button pointing at `TELEGRAM_WEBAPP_URL`. You can still set the menu
 button manually with `/setmenubutton` if you prefer.
 
+### Customer-support bot
+
+The support chat is a **second** BotFather bot (a separate token keeps the support
+graceful-shutdown sweep and player onboarding on independent Telegram long polls):
+
+1. `@BotFather` → `/newbot` → name it e.g. “Bingo 251 Support”, keep the token.
+2. `/setdescription` with the support hours, and `/setuserpic` so players recognise it.
+3. Do **not** add it as a Mini App / payments bot; it only chats.
+4. Put the token in `SUPPORT_BOT_TOKEN` on `bingo-api` (section 5). If it is missing the
+   `support-bot` process exits immediately, and the rest of the API is unaffected.
+
+Player commands: `/start`, `/menu`, `/ticket` (talk to an agent), `/help` (FAQ) and
+`/end`. Tickets created here appear in **Support → Tickets** and **Admin → Tickets**;
+staff replies are pushed back to the player by the support-bot process, which sweeps
+undelivered `SupportMessage` rows every three seconds. Run **exactly one**
+`support-bot` process — it owns the Telegram long poll for that token.
+
+Operating hours are `SUPPORT_HOURS_START`–`SUPPORT_HOURS_END` in `SUPPORT_TIMEZONE`
+(defaults 08–22 `Africa/Addis_Ababa`; `start == end` means 24/7). Outside the window the
+bot still takes messages and queue length grows; players see the offline notice.
+
 ## 4. Domains and TLS
 
 ```bash
@@ -90,6 +111,7 @@ dokku config:set bingo-api \
   JWT_REFRESH_SECRET="<64 hex chars>" \
   OTP_HASH_PEPPER="<32+ chars>" \
   BOT_TOKEN="<telegram bot token>" \
+  SUPPORT_BOT_TOKEN="<second telegram bot token>" \
   TELEGRAM_WEBAPP_URL="https://app.example.com" \
   TELEGRAM_BOT_USERNAME="<bot username without @>" \
   CORS_ORIGINS="https://app.example.com" \
@@ -121,10 +143,10 @@ git push dokku-api main
 git push dokku-web main
 ```
 
-`Procfile` defines three processes. After the first deploy scale all of them:
+`Procfile` defines four processes. After the first deploy scale all of them:
 
 ```bash
-dokku ps:scale bingo-api web=1 worker=1 bot=1
+dokku ps:scale bingo-api web=1 worker=1 bot=1 support-bot=1
 ```
 
 - `web` runs the API and Socket.io gateway — keep it at exactly one container.
@@ -134,6 +156,9 @@ dokku ps:scale bingo-api web=1 worker=1 bot=1
   more than one, but one is enough.
 - `bot` long-polls Telegram. Run **exactly one** instance; two pollers hit
   `409 Conflict` and Telegram aborts the newer one (`dokku logs bingo-api -t bot`).
+- `support-bot` long-polls the second Telegram bot and delivers staff replies. Also
+  **exactly one** instance. It exits at boot when `SUPPORT_BOT_TOKEN` is unset, so scale
+  it only after the token is configured (`dokku logs bingo-api -t support-bot`).
 - `bingo-web` runs only its default `web` process from `Procfile.web`; leave it at
   `web=1` and do not add worker/bot processes there.
 
@@ -180,6 +205,32 @@ the bonus wallet bucket). It is applied by the same `prisma migrate deploy` abov
 manual SQL is needed. Sign in as a super admin afterwards to set the referral commission
 and the default wagering multiplier in **Admin → Bonuses**.
 
+The payment-routing release adds
+`20261115120000_phase1_agent_tasks_proofs_providers` (agent tasks and availability,
+player payout accounts, withdrawal proofs and media assets, provider callback logs and
+per-type provider transactions, and the `PROCESSING` withdrawal status). Re-run both
+commands from section 7. `constraints.sql` also rebuilds the open-withdrawal indexes so
+`PROCESSING` still counts as an open payout, and adds the one-live-task-per-agent index.
+
+Payment screenshots are files on disk, not database rows. Mount a persistent Dokku
+storage directory before taking real proofs, otherwise redeploys erase evidence:
+
+```bash
+dokku storage:ensure-directory bingo-api media
+dokku storage:mount bingo-api /var/lib/dokku/data/storage/bingo-api/media:/app/.data/media
+dokku ps:restart bingo-api
+```
+
+The customer-support release adds `20261115140000_support_desk` (support tickets,
+messages and the one-active-ticket index) followed by `20261115141000_support_delivery`
+(delivery retry bookkeeping). Both are applied by the same `prisma migrate deploy`
+above. Scale `support-bot=1` after `SUPPORT_BOT_TOKEN` is set; no extra SQL is needed.
+
+New optional tuning knobs (defaults are fine): `AGENT_TASK_SLA_MINUTES` (30) sets when a
+routed deposit/withdrawal shows as overdue, and `MEDIA_DIR` / `MEDIA_MAX_BYTES` control
+where screenshots are stored and the upload ceiling. The platform win ceiling lives in
+**Admin → Providers** and defaults to 30,000 ETB per single win.
+
 ## 8. Access model
 
 - **Players — Telegram only.** There is no web registration. A player opens the bot,
@@ -205,6 +256,11 @@ and the default wagering multiplier in **Admin → Bonuses**.
 - Support gets read-only views of users, ledger transactions, deposits, withdrawals
   and agents (plus cancel-open-deposit/withdrawal actions). The full console lives at
   `/admin`; support staff land on `/support`.
+- **Support tickets.** Players reach the support bot (second BotFather bot), browse the
+  FAQ or open a chat; each player has at most one open ticket. SUPPORT and SUPER_ADMIN
+  see the queue in **Tickets**, claim a conversation, reply with text, and resolve it.
+  Replies and photos sent from the dashboard are delivered to the player's Telegram
+  chat by the `support-bot` process.
 
 ## 9. Smoke test
 
@@ -247,6 +303,7 @@ Common failures:
 | Rounds never start | `BINGO_ENGINE_ENABLED` false, or API replicas scaled beyond one. |
 | CORS error in browser | Add the page origin to `CORS_ORIGINS` and restart the API. |
 | Bot exits with `409` / `TelegramError: Conflict` | More than one `bot` process is polling; scale `bot=1`. |
+| Support bot exits immediately | `SUPPORT_BOT_TOKEN` is missing or rejected; set it with `dokku config:set bingo-api SUPPORT_BOT_TOKEN=...`, then restart the process. |
 | Player sign-in shows no bot link | `TELEGRAM_BOT_USERNAME` missing on `bingo-web`; set it and restart. |
 | Buy/withdraw says phone required | Player has not shared contact with the bot yet; send them `https://t.me/<bot>?start=verify`. |
 | Staff sees the player view in Telegram | The staff account has no Telegram id; link it from **Admin → Staff** (or send the one-time bot link). |
