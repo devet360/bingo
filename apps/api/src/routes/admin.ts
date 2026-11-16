@@ -332,17 +332,94 @@ adminRouter.get(
   asyncHandler(async (_req, res) => {
     const startOfDay = new Date();
     startOfDay.setHours(0, 0, 0, 0);
+    const seriesStart = new Date(startOfDay);
+    seriesStart.setDate(seriesStart.getDate() - 6);
 
-    const [users, players, activeAgents, pendingDeposits, openWithdrawals, liabilities, todayLedgers] =
-      await Promise.all([
-        prisma.user.count(),
-        prisma.user.count({ where: { role: UserRole.PLAYER } }),
-        prisma.agentProfile.count({ where: { status: AgentStatus.ACTIVE } }),
-        prisma.depositRequest.count({ where: { status: 'PENDING' } }),
-        prisma.withdrawalRequest.count({ where: { status: 'ESCROWED' } }),
-        prisma.wallet.aggregate({ _sum: { available: true, escrow: true, locked: true } }),
-        prisma.transactionLedger.count({ where: { createdAt: { gte: startOfDay } } }),
-      ]);
+    const [
+      users,
+      players,
+      activeAgents,
+      pendingDeposits,
+      openWithdrawals,
+      liabilities,
+      todayLedgers,
+      openTickets,
+      manualReceipts,
+      newPlayers,
+      cardsToday,
+      roundsToday,
+      openRooms,
+      liveRounds,
+      creditedToday,
+      settledToday,
+      recentDeposits,
+      recentWithdrawals,
+    ] = await Promise.all([
+      prisma.user.count(),
+      prisma.user.count({ where: { role: UserRole.PLAYER } }),
+      prisma.agentProfile.count({ where: { status: AgentStatus.ACTIVE } }),
+      prisma.depositRequest.count({ where: { status: 'PENDING' } }),
+      prisma.withdrawalRequest.count({ where: { status: 'ESCROWED' } }),
+      prisma.wallet.aggregate({ _sum: { available: true, escrow: true, locked: true } }),
+      prisma.transactionLedger.count({ where: { createdAt: { gte: startOfDay } } }),
+      prisma.supportTicket.count({ where: { status: { in: ['OPEN', 'PENDING'] } } }),
+      prisma.depositRequest.count({
+        where: { verificationStatus: 'MANUAL', status: { in: ['PENDING', 'PROCESSING'] } },
+      }),
+      prisma.user.count({ where: { role: UserRole.PLAYER, createdAt: { gte: startOfDay } } }),
+      prisma.bingoCard.aggregate({
+        where: { purchasedAt: { gte: startOfDay }, isBonus: false },
+        _count: { _all: true },
+        _sum: { stake: true },
+      }),
+      prisma.bingoRound.aggregate({
+        where: { completedAt: { gte: startOfDay } },
+        _count: { _all: true },
+        _sum: { rakeAmount: true },
+      }),
+      prisma.bingoRoom.count({ where: { status: 'OPEN' } }),
+      prisma.bingoRound.count({
+        where: { status: { in: ['WAITING', 'LOCKED', 'PLAYING', 'CLAIM_VERIFICATION', 'RUNNER_UP'] } },
+      }),
+      prisma.depositRequest.aggregate({
+        where: { status: 'CREDITED', settledAt: { gte: startOfDay } },
+        _count: { _all: true },
+        _sum: { creditedAmount: true },
+      }),
+      prisma.withdrawalRequest.aggregate({
+        where: { status: 'SETTLED', settledAt: { gte: startOfDay } },
+        _count: { _all: true },
+        _sum: { amount: true },
+      }),
+      prisma.depositRequest.findMany({
+        where: { status: 'CREDITED', settledAt: { gte: seriesStart } },
+        select: { settledAt: true, creditedAmount: true },
+      }),
+      prisma.withdrawalRequest.findMany({
+        where: { status: 'SETTLED', settledAt: { gte: seriesStart } },
+        select: { settledAt: true, amount: true },
+      }),
+    ]);
+
+    const dayKey = (date: Date) => {
+      const pad = (value: number) => String(value).padStart(2, '0');
+      return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+    };
+    const series = Array.from({ length: 7 }, (_, index) => {
+      const day = new Date(seriesStart);
+      day.setDate(day.getDate() + index);
+      return { date: dayKey(day), deposits: 0n, withdrawals: 0n };
+    });
+    for (const deposit of recentDeposits) {
+      if (!deposit.settledAt) continue;
+      const bucket = series.find((point) => point.date === dayKey(deposit.settledAt!));
+      if (bucket) bucket.deposits += deposit.creditedAmount ?? 0n;
+    }
+    for (const withdrawal of recentWithdrawals) {
+      if (!withdrawal.settledAt) continue;
+      const bucket = series.find((point) => point.date === dayKey(withdrawal.settledAt!));
+      if (bucket) bucket.withdrawals += withdrawal.amount;
+    }
 
     res.json({
       data: {
@@ -356,6 +433,36 @@ adminRouter.get(
           available: (liabilities._sum.available ?? 0n).toString(),
           escrow: (liabilities._sum.escrow ?? 0n).toString(),
           locked: (liabilities._sum.locked ?? 0n).toString(),
+        },
+        today: {
+          deposits: {
+            count: creditedToday._count._all,
+            amount: (creditedToday._sum.creditedAmount ?? 0n).toString(),
+          },
+          withdrawals: {
+            count: settledToday._count._all,
+            amount: (settledToday._sum.amount ?? 0n).toString(),
+          },
+          newPlayers,
+          cardsSold: cardsToday._count._all,
+          cardsStaked: (cardsToday._sum.stake ?? 0n).toString(),
+          rounds: roundsToday._count._all,
+          rake: (roundsToday._sum.rakeAmount ?? 0n).toString(),
+        },
+        queues: {
+          openTickets,
+          manualReceipts,
+          pendingDeposits,
+          openWithdrawals,
+        },
+        series: series.map((point) => ({
+          date: point.date,
+          deposits: point.deposits.toString(),
+          withdrawals: point.withdrawals.toString(),
+        })),
+        bingo: {
+          openRooms,
+          liveRounds,
         },
       },
     });

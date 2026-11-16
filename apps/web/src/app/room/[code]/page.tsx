@@ -399,15 +399,15 @@ function CardTile({
       round.status === 'RUNNER_UP');
 
   return (
-    <Panel className={cn('p-3', card.status === 'WON' && 'border-gold/50')}>
-      <div className="mb-2 flex items-center justify-between gap-2">
-        <p className="text-xs font-semibold text-text">
+    <Panel className={cn('min-w-0 p-2.5', card.status === 'WON' && 'border-gold/50')}>
+      <div className="mb-1.5 flex items-center justify-between gap-2">
+        <p className="text-[11px] font-semibold text-text">
           {t('room.card', { number: card.cardIndex + 1 })}
           <span className="ml-1.5 font-normal text-muted">
             {card.isBonus ? t('room.freeCard') : `${formatStake(card.stake)} ${t('common.credits')}`}
           </span>
         </p>
-        <div className="flex flex-wrap items-center justify-end gap-1.5">
+        <div className="flex flex-wrap items-center justify-end gap-1">
           {card.status === 'PENDING' ? (
             <Pill tone="neutral">{t('room.notRegistered')}</Pill>
           ) : null}
@@ -835,6 +835,7 @@ export default function RoomPage() {
   }
 
   const recent = round ? [...round.drawnBalls].slice(-12).reverse() : [];
+  const ballMax = room.variant === 'US_75' ? 75 : 90;
   const myCards = cards;
   const pendingCards = cards.filter((card) => card.status === 'PENDING');
 
@@ -948,9 +949,17 @@ export default function RoomPage() {
               <p className="font-display text-xl font-bold">
                 {round.currentBall ?? '—'}
                 <span className="ml-2 text-xs font-normal text-muted">
-                  {t('room.drawn', { count: round.drawnBalls.length })}
+                  {t('room.ballProgress', {
+                    count: round.drawnBalls.length,
+                    total: round.ballOrder?.length ?? ballMax,
+                  })}
                 </span>
               </p>
+              {round.status === 'COMPLETED' && round.drawnBalls.length > 0 ? (
+                <p className="mt-1 text-[10px] text-muted">
+                  {t('room.endedOn', { count: round.drawnBalls.length })}
+                </p>
+              ) : null}
               <div className="mt-2 flex flex-wrap gap-1">
                 {recent.map((ball, index) => (
                   <Ball key={`${ball}-${index}`} value={ball} size="sm" />
@@ -1071,7 +1080,14 @@ export default function RoomPage() {
               {t('common.credits')}
             </span>
           </div>
-          <div className="grid gap-3 sm:grid-cols-2">
+          <div
+            className={cn(
+              'grid gap-2.5 sm:gap-3',
+              myCards.length === 1
+                ? 'mx-auto w-full max-w-[17rem]'
+                : 'grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4',
+            )}
+          >
             {myCards.map((card) => {
               const daubMode = mainMode ? (daubModes[card.id] ?? 'manual') : 'auto';
               const daubed =

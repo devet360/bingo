@@ -439,8 +439,10 @@ export function fetchWithdrawals(status?: WithdrawalStatus): Promise<Withdrawal[
 export function createWithdrawal(input: {
   amount: number;
   method: PaymentMethod;
+  providerCode?: string;
   agentProfileId?: string;
   payoutAccountId?: string;
+  payoutAccount?: { accountName: string; accountNumber: string; provider?: string | null };
   playerNote?: string;
   idempotencyKey: string;
 }): Promise<Withdrawal> {

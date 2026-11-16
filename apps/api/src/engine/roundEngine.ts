@@ -24,10 +24,6 @@ const ACTIVE_STATUSES = [
 const MIN_DELAY_MS = 20;
 const MAX_DELAY_MS = 5_000;
 const DISCOVERY_INTERVAL_MS = 30_000;
-// Rooms with no sold cards run a short preview draw so spectators see balls
-// moving; its faster cadence keeps the wait before the next sales window short.
-const EMPTY_DRAW_INTERVAL_MS = 800;
-const EMPTY_PREVIEW_BALLS = 20;
 
 function clampDelay(ms: number): number {
   return Math.min(MAX_DELAY_MS, Math.max(MIN_DELAY_MS, Math.round(ms)));
@@ -141,16 +137,18 @@ export class RoundEngine {
       case 'LOCKED': {
         const deadline = (round.startedAt?.getTime() ?? now) + round.room.lockWindowSecs * 1_000;
         if (now < deadline) return deadline - now;
+        // Nobody bought in: the round ends without drawing so the room returns
+        // to a fresh sales window instead of faking a short, fast ball run.
+        if (round.cardsSold === 0) {
+          await this.finishEmpty(round.id);
+          return 300;
+        }
         await drawBall(round.id);
         return 20;
       }
 
       case 'PLAYING': {
-        const interval = round.cardsSold === 0 ? EMPTY_DRAW_INTERVAL_MS : round.room.drawIntervalMs;
-        if (round.cardsSold === 0 && round.drawnBalls.length >= EMPTY_PREVIEW_BALLS) {
-          await this.finishEmpty(round.id);
-          return 300;
-        }
+        const interval = round.room.drawIntervalMs;
         const deadline = (round.lastDrawAt?.getTime() ?? now) + interval;
         if (now < deadline) return deadline - now;
         const outcome = await drawBall(round.id);
@@ -190,7 +188,7 @@ export class RoundEngine {
     }
   }
 
-  /** Ends a preview round; cancellation is only a fallback for a lost race. */
+  /** Ends a cardless round; cancellation is only a fallback for a lost race. */
   private async finishEmpty(roundId: string): Promise<void> {
     const finished = await completeEmptyRound(roundId);
     if (!finished) await cancelRound(roundId, 'preview_finished');

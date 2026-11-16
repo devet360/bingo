@@ -259,19 +259,21 @@ export function Shell({ children }: { children: ReactNode }) {
   // Game rooms trade the app chrome for board space; Telegram already draws
   // its own title bar, so the in-app header shrinks there too.
   const inRoom = pathname.startsWith('/room/');
-  const wide = pathname.startsWith('/admin') || pathname.startsWith('/support') || inRoom;
+  const adminArea = pathname.startsWith('/admin');
+  const wide = adminArea || pathname.startsWith('/support') || inRoom;
+  const widthClass = adminArea ? 'max-w-[1440px]' : wide ? 'max-w-6xl' : 'max-w-3xl';
   const chromeHeight = isTelegram ? 'h-11' : 'h-14';
   const homeHref = isAdmin ? '/admin' : isSupport ? '/support' : agent ? '/agent' : '/';
 
   return (
-    <div className={cn('min-h-dvh', inRoom ? 'pb-2' : 'pb-20')}>
+    <div className={cn('min-h-dvh', inRoom ? 'pb-2' : adminArea ? 'pb-6' : 'pb-20')}>
       {inRoom ? null : (
       <header className="sticky top-0 z-30 border-b border-line/60 bg-ink/85 backdrop-blur">
         <div
           className={cn(
             'mx-auto flex w-full items-center justify-between gap-3 px-4',
             chromeHeight,
-            wide ? 'max-w-6xl' : 'max-w-3xl',
+            widthClass,
           )}
         >
           <Logo href={homeHref} compact={isTelegram} />
@@ -387,7 +389,7 @@ export function Shell({ children }: { children: ReactNode }) {
         className={cn(
           'mx-auto w-full',
           inRoom ? 'px-2 pt-2 pb-[env(safe-area-inset-bottom)]' : 'px-3 pt-3 sm:px-4',
-          wide ? 'max-w-6xl' : 'max-w-3xl',
+          widthClass,
         )}
       >
         {canPlay && user && !user.phoneVerified ? <VerifyPhoneBanner /> : null}
@@ -397,7 +399,7 @@ export function Shell({ children }: { children: ReactNode }) {
 
       <CampaignPopup />
 
-      {nav.length > 0 && !inRoom ? (
+      {nav.length > 0 && !inRoom && !adminArea ? (
         <nav className="fixed inset-x-0 bottom-0 z-30 border-t border-line/70 bg-ink/95 pb-[env(safe-area-inset-bottom)] backdrop-blur">
           <div className="mx-auto flex w-full max-w-3xl items-stretch">
             {nav.map((item) => {

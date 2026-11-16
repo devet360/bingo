@@ -18,6 +18,8 @@ const config: Config = {
         danger: 'rgb(var(--c-danger) / <alpha-value>)',
         warn: 'rgb(var(--c-warn) / <alpha-value>)',
         blue: 'rgb(var(--c-blue) / <alpha-value>)',
+        violet: 'rgb(var(--c-violet) / <alpha-value>)',
+        rose: 'rgb(var(--c-rose) / <alpha-value>)',
       },
       fontFamily: {
         display: ['"Trebuchet MS"', '"Segoe UI"', 'system-ui', 'sans-serif'],

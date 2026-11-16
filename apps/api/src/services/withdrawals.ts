@@ -9,12 +9,27 @@ import { prisma } from '../lib/prisma';
 import { calculateBps, splitWithdrawalFee } from '../lib/money';
 import { numericCode } from '../lib/ids';
 import { Errors } from '../lib/errors';
+import { serializeWithdrawal } from '../lib/serializers';
 import { isUniqueViolation, runTransaction, withTxRetry } from '../lib/tx';
 import { postLedger } from './ledger';
 import { assignAgentForPayment, getActiveAgentByUserId } from './agents';
 import { closeAgentTask, createAgentTask, isTaskLockViolation } from './agentTasks';
+import { getProvider } from './providers';
 
 const WITHDRAWAL_TTL_MS = 60 * 60_000;
+
+function noAgentForRail(rail: string) {
+  return Errors.conflict(
+    `No active agent is available for ${rail} right now. Choose another payment method.`,
+    'NO_AGENT_FOR_METHOD',
+  );
+}
+
+export interface InlinePayoutAccount {
+  accountName: string;
+  accountNumber: string;
+  provider?: string | null;
+}
 
 export interface CreateWithdrawalInput {
   playerId: string;
@@ -22,7 +37,11 @@ export interface CreateWithdrawalInput {
   agentProfileId?: string;
   paymentAccountId?: string;
   payoutAccountId?: string;
+  /** Destination typed on the withdraw screen; saved/reused automatically. */
+  payoutAccount?: InlinePayoutAccount;
   method: PaymentMethod;
+  /** Enabled provider code, e.g. telebirr or cbe. */
+  providerCode?: string;
   amount: bigint;
   playerNote?: string;
   idempotencyKey: string;
@@ -62,7 +81,69 @@ async function resolvePayoutAccount(
   return account;
 }
 
+/** Player-facing payload: the assigned agent and the destination they typed. */
+const playerWithdrawalInclude = {
+  agentProfile: {
+    include: {
+      user: {
+        select: {
+          displayName: true,
+          avatarUrl: true,
+          phone: true,
+          telegramUsername: true,
+        },
+      },
+    },
+  },
+  payoutAccount: true,
+} satisfies Prisma.WithdrawalRequestInclude;
+
+export type PlayerWithdrawal = Prisma.WithdrawalRequestGetPayload<{
+  include: typeof playerWithdrawalInclude;
+}>;
+
+export function serializePlayerWithdrawal(withdrawal: PlayerWithdrawal) {
+  const agent = withdrawal.agentProfile;
+  return {
+    ...serializeWithdrawal(withdrawal),
+    providerCode: withdrawal.payoutAccount?.provider ?? null,
+    agent: agent
+      ? {
+          id: agent.id,
+          agentCode: agent.agentCode,
+          displayName: agent.user.displayName,
+          avatarUrl: agent.user.avatarUrl,
+          phone: agent.user.phone,
+          telegramUsername: agent.user.telegramUsername,
+          isOnline: agent.isOnline,
+        }
+      : null,
+    payoutAccount: withdrawal.payoutAccount
+      ? {
+          id: withdrawal.payoutAccount.id,
+          method: withdrawal.payoutAccount.method,
+          provider: withdrawal.payoutAccount.provider,
+          accountName: withdrawal.payoutAccount.accountName,
+          accountNumber: withdrawal.payoutAccount.accountNumber,
+        }
+      : null,
+  };
+}
+
+export { playerWithdrawalInclude };
+
 export async function createWithdrawal(input: CreateWithdrawalInput) {
+  const provider = input.providerCode
+    ? await getProvider(input.providerCode, { requireEnabled: true })
+    : null;
+  if (provider && provider.method !== input.method) {
+    throw Errors.badRequest(
+      'The payment provider does not match the withdrawal method',
+      'PROVIDER_METHOD_MISMATCH',
+    );
+  }
+  const rail = provider?.name ?? input.method.toLowerCase().replaceAll('_', ' ');
+
   const agent = input.agentProfileId
     ? await prisma.agentProfile.findUnique({
         where: { id: input.agentProfileId },
@@ -88,6 +169,7 @@ export async function createWithdrawal(input: CreateWithdrawalInput) {
 
   const existing = await prisma.withdrawalRequest.findUnique({
     where: { idempotencyKey: input.idempotencyKey },
+    include: playerWithdrawalInclude,
   });
   if (existing) return { withdrawal: existing, replayed: true };
 
@@ -102,11 +184,21 @@ export async function createWithdrawal(input: CreateWithdrawalInput) {
     );
   }
 
-  const payoutAccount = await resolvePayoutAccount(
-    input.playerId,
-    input.method,
-    input.payoutAccountId,
-  );
+  // The destination typed on the withdraw screen is saved and reused, so the
+  // player never has to manage a separate account book.
+  const inlineAccount = input.method === 'CASH' ? null : (input.payoutAccount ?? null);
+  let payoutAccountId: string | null = null;
+  if (input.payoutAccountId) {
+    const account = await resolvePayoutAccount(
+      input.playerId,
+      input.method,
+      input.payoutAccountId,
+    );
+    payoutAccountId = account?.id ?? null;
+  } else if (!inlineAccount) {
+    const account = await resolvePayoutAccount(input.playerId, input.method);
+    payoutAccountId = account?.id ?? null;
+  }
 
   const { fee, net } = splitWithdrawalFee(input.amount, env.WITHDRAWAL_FEE_BPS);
   if (net <= 0n) {
@@ -121,11 +213,11 @@ export async function createWithdrawal(input: CreateWithdrawalInput) {
     const assignment = await assignAgentForPayment({
       method: input.method,
       amount: input.amount,
+      providerCode: provider?.code,
     });
-    if (assignment) {
-      agentProfileId = assignment.agent.id;
-      paymentAccountId = assignment.account.id;
-    }
+    if (!assignment) throw noAgentForRail(rail);
+    agentProfileId = assignment.agent.id;
+    paymentAccountId = assignment.account.id;
   }
 
   const excludedAgentIds = new Set<string>();
@@ -134,6 +226,37 @@ export async function createWithdrawal(input: CreateWithdrawalInput) {
     try {
       return await withTxRetry(() =>
         runTransaction(async (tx) => {
+          if (inlineAccount && !payoutAccountId) {
+            const count = await tx.playerPayoutAccount.count({
+              where: { playerId: input.playerId, isActive: true },
+            });
+            const saved = await tx.playerPayoutAccount.upsert({
+              where: {
+                playerId_method_accountNumber: {
+                  playerId: input.playerId,
+                  method: input.method,
+                  accountNumber: inlineAccount.accountNumber,
+                },
+              },
+              create: {
+                playerId: input.playerId,
+                method: input.method,
+                provider: inlineAccount.provider ?? provider?.code ?? null,
+                accountName: inlineAccount.accountName,
+                accountNumber: inlineAccount.accountNumber,
+                isDefault: count === 0,
+                lastUsedAt: new Date(),
+              },
+              update: {
+                provider: inlineAccount.provider ?? provider?.code ?? null,
+                accountName: inlineAccount.accountName,
+                isActive: true,
+                lastUsedAt: new Date(),
+              },
+            });
+            payoutAccountId = saved.id;
+          }
+
           const withdrawal = await tx.withdrawalRequest.create({
             data: {
               payoutCode: numericCode(6),
@@ -141,7 +264,7 @@ export async function createWithdrawal(input: CreateWithdrawalInput) {
               playerId: input.playerId,
               agentProfileId,
               paymentAccountId,
-              payoutAccountId: payoutAccount?.id ?? null,
+              payoutAccountId,
               method: input.method,
               amount: input.amount,
               fee,
@@ -149,6 +272,7 @@ export async function createWithdrawal(input: CreateWithdrawalInput) {
               playerNote: input.playerNote,
               expiresAt: new Date(Date.now() + WITHDRAWAL_TTL_MS),
             },
+            include: playerWithdrawalInclude,
           });
 
           if (agentProfileId) {
@@ -160,9 +284,7 @@ export async function createWithdrawal(input: CreateWithdrawalInput) {
             kind: 'WITHDRAWAL_ESCROW',
             refType: 'WithdrawalRequest',
             refId: withdrawal.id,
-            memo: agentProfileId
-              ? 'Withdrawal escrow (agent routed)'
-              : 'Withdrawal escrow (agent assigned at payout)',
+            memo: `Withdrawal escrow (agent ${agentProfileId ?? 'unassigned'})`,
             instructions: [
               { ownerKind: 'USER', ownerId: input.playerId, code: 'AVAILABLE', delta: -input.amount },
               { ownerKind: 'USER', ownerId: input.playerId, code: 'ESCROW', delta: input.amount },
@@ -176,6 +298,7 @@ export async function createWithdrawal(input: CreateWithdrawalInput) {
       if (isUniqueViolation(error, 'idempotencyKey')) {
         const duplicate = await prisma.withdrawalRequest.findUnique({
           where: { idempotencyKey: input.idempotencyKey },
+          include: playerWithdrawalInclude,
         });
         if (duplicate) return { withdrawal: duplicate, replayed: true };
       }
@@ -199,15 +322,12 @@ export async function createWithdrawal(input: CreateWithdrawalInput) {
         const next = await assignAgentForPayment({
           method: input.method,
           amount: input.amount,
+          providerCode: provider?.code,
           excludeAgentIds: [...excludedAgentIds],
         });
-        if (next) {
-          agentProfileId = next.agent.id;
-          paymentAccountId = next.account.id;
-        } else {
-          agentProfileId = null;
-          paymentAccountId = undefined;
-        }
+        if (!next) throw noAgentForRail(rail);
+        agentProfileId = next.agent.id;
+        paymentAccountId = next.account.id;
         continue;
       }
       throw error;
@@ -295,7 +415,10 @@ export async function cancelWithdrawal(playerId: string, withdrawalId: string) {
     throw Errors.conflict('Only pending withdrawals can be cancelled', 'WITHDRAWAL_NOT_OPEN');
   }
   await refundWithdrawal(withdrawal.id, 'CANCELLED');
-  const updated = await prisma.withdrawalRequest.findUnique({ where: { id: withdrawal.id } });
+  const updated = await prisma.withdrawalRequest.findUnique({
+    where: { id: withdrawal.id },
+    include: playerWithdrawalInclude,
+  });
   return updated!;
 }
 
@@ -533,8 +656,10 @@ export async function releaseWithdrawalHold(
   return updated;
 }
 
-export async function listPlayerWithdrawals(playerId: string, status?: WithdrawalStatus) {  return prisma.withdrawalRequest.findMany({
+export async function listPlayerWithdrawals(playerId: string, status?: WithdrawalStatus) {
+  return prisma.withdrawalRequest.findMany({
     where: { playerId, ...(status ? { status } : {}) },
+    include: playerWithdrawalInclude,
     orderBy: { createdAt: 'desc' },
     take: 50,
   });

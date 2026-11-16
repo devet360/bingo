@@ -29,7 +29,7 @@ import { isUniqueViolation } from '../../lib/tx';
 import { creditDeposit } from '../deposits';
 import { verifyClientPayload, verifyReceipt } from './verify';
 import { createParser } from './parsers';
-import { normalizeInput } from './reference';
+import { deriveReceiptAccount, normalizeInput } from './reference';
 import { ReferenceError, type ReceiptProvider, type VerifyOutcome } from './types';
 
 type DepositWithProvider = DepositRequest & { provider: DepositProvider | null };
@@ -119,6 +119,23 @@ export function receiverAccountMatches(
   return agent.endsWith(visible.slice(-len));
 }
 
+/**
+ * The receiving-account suffix for a deposit: what was stored with it, or the
+ * tail of the account the server assigned. The player never types the agent's
+ * number.
+ */
+async function resolveReceiptAccount(deposit: DepositWithProvider): Promise<string | undefined> {
+  const digits = deposit.provider?.accountDigits;
+  if (deposit.receiptAccount || !digits || !deposit.paymentAccountId) {
+    return deposit.receiptAccount ?? undefined;
+  }
+  const account = await prisma.agentPaymentAccount.findUnique({
+    where: { id: deposit.paymentAccountId },
+    select: { accountNumber: true },
+  });
+  return deriveReceiptAccount(undefined, account?.accountNumber, digits);
+}
+
 /** The bank URL the Mini App can fetch from an Ethiopian IP, when the provider is client-side. */
 export async function buildClientReceiptUrl(deposit: DepositWithProvider): Promise<string | undefined> {
   if (!deposit.provider?.clientSide || !deposit.provider.enabled || !deposit.receiptReference) return undefined;
@@ -127,7 +144,7 @@ export async function buildClientReceiptUrl(deposit: DepositWithProvider): Promi
   try {
     const input = normalizeInput(deposit.provider, {
       reference: deposit.receiptReference,
-      accountNumber: deposit.receiptAccount ?? undefined,
+      accountNumber: await resolveReceiptAccount(deposit),
       phoneNumber: deposit.receiptPhone ?? undefined,
     });
     return parser.buildUrl(input);
@@ -179,7 +196,7 @@ export async function verifyDepositReceipt(params: {
   const source = params.source ?? (params.payload ? VerificationSource.CLIENT : VerificationSource.SERVER);
 
   let receiptReference = deposit.receiptReference;
-  let receiptAccount = deposit.receiptAccount;
+  let receiptAccount = deposit.receiptAccount ?? (await resolveReceiptAccount(deposit)) ?? null;
   let receiptPhone = deposit.receiptPhone;
 
   if (params.receipt) {
@@ -187,7 +204,7 @@ export async function verifyDepositReceipt(params: {
       try {
         const normalized = normalizeInput(provider, {
           reference: params.receipt.reference ?? deposit.receiptReference ?? undefined,
-          accountNumber: params.receipt.accountNumber ?? deposit.receiptAccount ?? undefined,
+          accountNumber: params.receipt.accountNumber ?? receiptAccount ?? undefined,
           phoneNumber: params.receipt.phoneNumber ?? deposit.receiptPhone ?? undefined,
         });
         receiptReference = normalized.reference;

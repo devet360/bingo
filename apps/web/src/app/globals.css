@@ -21,6 +21,10 @@
   --c-danger: 255 107 107;
   --c-warn: 255 179 71;
   --c-blue: 125 200 255;
+  --c-violet: 179 156 255;
+  --c-rose: 255 138 168;
+  /* Dark digits on the bright accents used for daubed card cells. */
+  --c-on-accent: 5 13 11;
   --glow-mint: 0.12;
   --glow-gold: 0.07;
   --scroll-thumb: #1d3a30;
@@ -41,6 +45,10 @@
   --c-danger: 190 40 40;
   --c-warn: 158 94 6;
   --c-blue: 20 100 190;
+  --c-violet: 109 40 217;
+  --c-rose: 190 24 93;
+  /* White digits on the deep accents used for daubed card cells. */
+  --c-on-accent: 255 255 255;
   --glow-mint: 0.16;
   --glow-gold: 0.14;
   --scroll-thumb: #c3d6c9;
@@ -105,6 +113,39 @@ input[type='number']::-webkit-inner-spin-button {
 
 .ball-enter {
   animation: ball-in 0.4s ease-out;
+}
+
+/*
+ * Daub fills per board column. Backgrounds switch per theme while the digit
+ * colour follows --c-on-accent, so a marked cell stays legible in both.
+ */
+.cell-b {
+  background-color: rgb(var(--c-blue));
+  color: rgb(var(--c-on-accent));
+}
+.cell-i {
+  background-color: rgb(var(--c-mint));
+  color: rgb(var(--c-on-accent));
+}
+.cell-n {
+  background-color: rgb(var(--c-gold));
+  color: rgb(var(--c-on-accent));
+}
+.cell-g {
+  background-color: rgb(var(--c-rose));
+  color: rgb(var(--c-on-accent));
+}
+.cell-o {
+  background-color: rgb(var(--c-violet));
+  color: rgb(var(--c-on-accent));
+}
+/* Winning lines sit above the per-column fill so the bingo is unmistakable. */
+.cell-win {
+  background-color: rgb(var(--c-gold));
+  color: rgb(var(--c-on-accent));
+  box-shadow:
+    0 0 0 2px rgb(var(--c-gold) / 0.5),
+    0 0 18px rgb(var(--c-gold) / 0.35);
 }
 
 /* The Telegram WebApp paints its own chrome; keep it in step with the theme. */

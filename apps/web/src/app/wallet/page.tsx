@@ -6,7 +6,6 @@ import {
   cancelWithdrawal,
   confirmCashReceived,
   createDeposit,
-  createPayoutAccount,
   createWithdrawal,
   fetchDeposit,
   fetchDepositLimits,
@@ -20,7 +19,6 @@ import {
   verifyDepositReceipt,
 } from '@/lib/api';
 import {
-  PAYMENT_METHODS,
   creditsToMinor,
   formatCredits,
   formatDateTime,
@@ -161,6 +159,7 @@ function AmountField({
   onChange,
   placeholder,
   hint,
+  error,
   action,
   disabled,
 }: {
@@ -169,6 +168,7 @@ function AmountField({
   onChange: (value: string) => void;
   placeholder: string;
   hint?: string;
+  error?: string;
   action?: ReactNode;
   disabled?: boolean;
 }) {
@@ -191,7 +191,11 @@ function AmountField({
           ETB
         </span>
       </div>
-      {hint ? <p className="mt-1 text-[10px] text-muted">{hint}</p> : null}
+      {error ? (
+        <p className="mt-1 text-[10px] text-danger">{error}</p>
+      ) : hint ? (
+        <p className="mt-1 text-[10px] text-muted">{hint}</p>
+      ) : null}
     </div>
   );
 }
@@ -493,7 +497,6 @@ function DepositPanel({
   const { t } = useI18n();
   const [amount, setAmount] = useState('');
   const [reference, setReference] = useState('');
-  const [receiptAccount, setReceiptAccount] = useState('');
   const [receiptPhone, setReceiptPhone] = useState('');
   const [selectedCode, setSelectedCode] = useState<string | null>(null);
   const [proof, setProof] = useState<{ contentType: string; base64: string; name: string } | null>(null);
@@ -589,14 +592,6 @@ function DepositPanel({
       setError(t('wallet.proofOrReferenceRequired'));
       return;
     }
-    if (
-      reference.trim() &&
-      createdProvider?.accountDigits &&
-      receiptAccount.replace(/\D/g, '').length < createdProvider.accountDigits
-    ) {
-      setError(t('wallet.receiptAccount', { count: createdProvider.accountDigits }));
-      return;
-    }
     if (reference.trim() && createdProvider?.requiresPhone && !receiptPhone.trim()) {
       setError(t('wallet.receiptPhone'));
       return;
@@ -606,7 +601,6 @@ function DepositPanel({
     setNotice(null);
     const body = {
       receiptReference: reference.trim(),
-      receiptAccount: receiptAccount.trim() || undefined,
       receiptPhone: receiptPhone.trim() || undefined,
     };
     const proofBody = proof
@@ -730,7 +724,6 @@ function DepositPanel({
       setSubmitted(false);
       setAmount('');
       setReference('');
-      setReceiptAccount('');
       setReceiptPhone('');
       setProof(null);
       await Promise.all([loadPending(), onChanged()]);
@@ -750,7 +743,6 @@ function DepositPanel({
     setCreated(null);
     setSubmitted(false);
     setReference('');
-    setReceiptAccount('');
     setReceiptPhone('');
     setProof(null);
     setAmount('');
@@ -930,26 +922,14 @@ function DepositPanel({
                   onChange={(event) => setReference(event.target.value)}
                   hint={createdProvider.refHint ?? t('wallet.referenceOrLinkHint')}
                 />
-                {createdProvider.accountDigits || createdProvider.requiresPhone ? (
-                  <div className="grid gap-3 sm:grid-cols-2">
-                    {createdProvider.accountDigits ? (
-                      <Input
-                        label={t('wallet.receiptAccount', { count: createdProvider.accountDigits })}
-                        inputMode="numeric"
-                        value={receiptAccount}
-                        onChange={(event) => setReceiptAccount(event.target.value)}
-                      />
-                    ) : null}
-                    {createdProvider.requiresPhone ? (
-                      <Input
-                        label={t('wallet.receiptPhone')}
-                        inputMode="tel"
-                        placeholder="+2519…"
-                        value={receiptPhone}
-                        onChange={(event) => setReceiptPhone(event.target.value)}
-                      />
-                    ) : null}
-                  </div>
+                {createdProvider.requiresPhone ? (
+                  <Input
+                    label={t('wallet.receiptPhone')}
+                    inputMode="tel"
+                    placeholder="+2519…"
+                    value={receiptPhone}
+                    onChange={(event) => setReceiptPhone(event.target.value)}
+                  />
                 ) : null}
                 <Button className="w-full" size="lg" loading={verifying} onClick={() => void markPaid()}>
                   {verifying ? t('wallet.verifying') : t('wallet.verifyPayment')}
@@ -1104,14 +1084,12 @@ function DepositPanel({
 function WithdrawPanel({ onChanged }: { onChanged: () => void }) {
   const { wallet, refreshWallet } = useSession();
   const { t } = useI18n();
+  const [providers, setProviders] = useState<DepositProvider[] | null>(null);
+  const [selectedCode, setSelectedCode] = useState<string | null>(null);
   const [amount, setAmount] = useState('');
-  const [method, setMethod] = useState<PaymentMethod>('MOBILE_MONEY');
-  const [accountId, setAccountId] = useState('');
-  const [accounts, setAccounts] = useState<PayoutAccount[] | null>(null);
-  const [addingAccount, setAddingAccount] = useState(false);
   const [accountName, setAccountName] = useState('');
   const [accountNumber, setAccountNumber] = useState('');
-  const [savingAccount, setSavingAccount] = useState(false);
+  const [accounts, setAccounts] = useState<PayoutAccount[] | null>(null);
   const [note, setNote] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -1122,18 +1100,16 @@ function WithdrawPanel({ onChanged }: { onChanged: () => void }) {
   const [confirming, setConfirming] = useState<string | null>(null);
   const idempotency = useRef(newIdempotencyKey('wd'));
 
-  const methodAccounts = (accounts ?? []).filter(
-    (account) => account.isActive && account.method === method,
-  );
+  const selectedProvider = providers?.find((item) => item.code === selectedCode) ?? null;
 
   const loadOpen = useCallback(async () => {
     try {
-      const [withdrawals, accountList] = await Promise.all([fetchWithdrawals(), fetchPayoutAccounts()]);
-      setAccounts(accountList);
+      const withdrawals = await fetchWithdrawals();
       const live = withdrawals.filter(
         (item) => item.status === 'ESCROWED' || item.status === 'PROCESSING',
       );
       setOpen(live);
+      setCreated((current) => (current ? withdrawals.find((item) => item.id === current.id) ?? current : current));
       const proofsByWithdrawal = await Promise.all(
         live
           .filter((item) => item.status === 'PROCESSING')
@@ -1150,64 +1126,83 @@ function WithdrawPanel({ onChanged }: { onChanged: () => void }) {
 
   useEffect(() => {
     void loadOpen();
+    fetchDepositProviders()
+      .then(setProviders)
+      .catch(() => setProviders([]));
+    fetchPayoutAccounts()
+      .then(setAccounts)
+      .catch(() => setAccounts([]));
     const timer = setInterval(() => {
       if (document.visibilityState === 'visible') void loadOpen();
     }, 15_000);
     return () => clearInterval(timer);
   }, [loadOpen]);
 
+  // Default to the first rail, then reuse the saved destination for that rail
+  // so a returning player only has to confirm the amount.
   useEffect(() => {
-    const current = accounts?.find(
-      (account) => account.id === accountId && account.isActive && account.method === method,
-    );
-    if (current) return;
-    const fallback = accounts?.find((account) => account.isActive && account.method === method);
-    setAccountId(fallback?.id ?? '');
-  }, [accounts, method, accountId]);
-
-  const saveAccount = async () => {
-    if (!accountName.trim() || !accountNumber.trim()) {
-      setError(t('wallet.payoutAccountFields'));
+    if (!providers || providers.length === 0) return;
+    if (!selectedCode) {
+      setSelectedCode(providers[0]!.code);
       return;
     }
-    setSavingAccount(true);
-    setError(null);
-    try {
-      const account = await createPayoutAccount({
-        method,
-        accountName: accountName.trim(),
-        accountNumber: accountNumber.trim(),
-        isDefault: methodAccounts.length === 0,
-      });
-      setAccounts((current) => [...(current ?? []), account]);
-      setAccountId(account.id);
-      setAddingAccount(false);
-      setAccountName('');
-      setAccountNumber('');
-    } catch (cause) {
-      setError(cause instanceof ApiError ? cause.message : t('wallet.payoutAccountFailed'));
-    } finally {
-      setSavingAccount(false);
+    if (accounts === null || accountName.trim() || accountNumber.trim()) return;
+    const provider = providers.find((item) => item.code === selectedCode);
+    if (!provider) return;
+    const saved =
+      accounts.find((item) => item.isActive && item.provider === selectedCode) ??
+      accounts.find((item) => item.isActive && item.method === provider.method);
+    if (saved) {
+      setAccountName(saved.accountName);
+      setAccountNumber(saved.accountNumber);
     }
+  }, [providers, accounts, selectedCode, accountName, accountNumber]);
+
+  const chooseProvider = (item: DepositProvider) => {
+    setSelectedCode(item.code);
+    setError(null);
+    const saved =
+      accounts?.find((account) => account.isActive && account.provider === item.code) ??
+      accounts?.find((account) => account.isActive && account.method === item.method);
+    setAccountName(saved?.accountName ?? '');
+    setAccountNumber(saved?.accountNumber ?? '');
   };
 
+  const availableMinor = wallet ? Number(wallet.available) : null;
+  const requestedMinor = creditsToMinor(amount);
+  const exceedsBalance =
+    requestedMinor !== null && availableMinor !== null && requestedMinor > availableMinor;
+  const max = wallet ? minorToCreditsInput(wallet.available) : '';
+
   const submit = async () => {
-    const minor = creditsToMinor(amount);
-    if (minor === null) {
+    if (!selectedProvider) {
+      setError(t('wallet.selectMethodRequired'));
+      return;
+    }
+    if (requestedMinor === null) {
       setError(t('wallet.invalidAmount'));
       return;
     }
-    if (method !== 'CASH' && !accountId) {
-      setError(t('wallet.payoutAccountRequired'));
+    if (exceedsBalance) {
+      setError(t('wallet.exceedsBalance', { amount: formatCredits(wallet?.available ?? '0') }));
+      return;
+    }
+    if (!accountName.trim() || !accountNumber.trim()) {
+      setError(t('wallet.payoutAccountFields'));
       return;
     }
     setBusy(true);
     setError(null);
     try {
       const withdrawal = await createWithdrawal({
-        amount: minor,
-        method,
-        payoutAccountId: method === 'CASH' ? undefined : accountId,
+        amount: requestedMinor,
+        method: selectedProvider.method,
+        providerCode: selectedProvider.code,
+        payoutAccount: {
+          accountName: accountName.trim(),
+          accountNumber: accountNumber.trim(),
+          provider: selectedProvider.code,
+        },
         playerNote: note.trim() || undefined,
         idempotencyKey: idempotency.current,
       });
@@ -1215,6 +1210,8 @@ function WithdrawPanel({ onChanged }: { onChanged: () => void }) {
       setCreated(withdrawal);
       setAmount('');
       setNote('');
+      setAccountName('');
+      setAccountNumber('');
       await Promise.all([loadOpen(), onChanged()]);
       void refreshWallet();
     } catch (cause) {
@@ -1252,219 +1249,292 @@ function WithdrawPanel({ onChanged }: { onChanged: () => void }) {
     }
   };
 
-  const max = wallet ? minorToCreditsInput(wallet.available) : '';
+  const createdProvider =
+    providers?.find((item) => item.code === created?.providerCode)?.name ??
+    created?.providerCode ??
+    (created ? t(`method.${created.method}`) : '');
+  const createdAgent = created?.agent ?? null;
+  const agentName = createdAgent?.displayName ?? createdAgent?.agentCode ?? null;
+  const agentHandle = createdAgent?.telegramUsername?.replace(/^@/, '') ?? null;
+  const agentTel = createdAgent?.phone ? createdAgent.phone.replace(/[^+\d]/g, '') : null;
 
   return (
     <div className="space-y-3">
       {created ? (
-        <Panel className="p-4">
+        <Panel className="p-5">
           <div className="flex items-start justify-between gap-2">
-            <div>
-              <h2 className="font-display text-base font-bold">{t('wallet.payoutReserved')}</h2>
-              <p className="text-[11px] text-muted">
-                {t('wallet.heldEscrowNet', {
-                  amount: formatCredits(created.amount),
-                  net: formatCredits(created.netAmount),
-                })}
-              </p>
+            <div className="flex items-start gap-3">
+              <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-gold/15 text-gold">
+                <CheckIcon />
+              </span>
+              <div>
+                <h2 className="font-display text-base font-bold">{t('wallet.withdrawalRequestedTitle')}</h2>
+                <p className="mt-0.5 text-[11px] leading-relaxed text-muted">
+                  {agentName
+                    ? t('wallet.withdrawalRequestedBody', {
+                        amount: formatCredits(created.amount),
+                        agent: agentName,
+                        net: formatCredits(created.netAmount),
+                        method: createdProvider,
+                      })
+                    : t('wallet.withdrawalRequestedBodyNoAgent', {
+                        amount: formatCredits(created.amount),
+                      })}
+                </p>
+              </div>
             </div>
             <StatusPill status={created.status} />
           </div>
+
+          <dl className="mt-4 space-y-1.5 rounded-xl border border-line/70 bg-ink/40 p-3 text-[11px]">
+            <div className="flex items-center justify-between gap-2">
+              <dt className="text-muted">{t('wallet.withdrawAmount')}</dt>
+              <dd className="font-semibold tabular-nums">{formatCredits(created.amount)} ETB</dd>
+            </div>
+            <div className="flex items-center justify-between gap-2">
+              <dt className="text-muted">{t('wallet.fee')}</dt>
+              <dd className="tabular-nums">{formatCredits(created.fee)} ETB</dd>
+            </div>
+            <div className="flex items-center justify-between gap-2">
+              <dt className="text-muted">{t('wallet.youReceive')}</dt>
+              <dd className="font-display text-sm font-bold text-mint tabular-nums">
+                {formatCredits(created.netAmount)} ETB
+              </dd>
+            </div>
+            <div className="flex items-center justify-between gap-2">
+              <dt className="text-muted">{t('wallet.paymentMethod')}</dt>
+              <dd className="font-semibold">{createdProvider}</dd>
+            </div>
+          </dl>
+
+          {created.payoutAccount ? (
+            <div className="mt-3 rounded-xl border border-line/70 bg-ink/40 p-3">
+              <p className="text-[10px] font-semibold uppercase tracking-widest text-muted">
+                {t('wallet.payingTo')}
+              </p>
+              <p className="mt-0.5 text-xs font-semibold text-text">{created.payoutAccount.accountName}</p>
+              <p className="text-[11px] text-muted">{created.payoutAccount.accountNumber}</p>
+            </div>
+          ) : null}
+
+          {agentName ? (
+            <div className="mt-3 rounded-xl border border-line/70 bg-ink/40 p-3">
+              <p className="text-[10px] font-semibold uppercase tracking-widest text-muted">
+                {t('wallet.agentAssigned')}
+              </p>
+              <p className="mt-0.5 flex items-center gap-1.5 text-xs font-semibold text-text">
+                {agentName}
+                <span
+                  className={cn(
+                    'h-1.5 w-1.5 rounded-full',
+                    createdAgent?.isOnline ? 'bg-mint' : 'bg-muted',
+                  )}
+                  aria-hidden
+                />
+                <span className="text-[10px] font-normal text-muted">
+                  {createdAgent?.isOnline ? t('wallet.online') : createdAgent?.agentCode ?? ''}
+                </span>
+              </p>
+              <div className="mt-2 grid grid-cols-2 gap-2">
+                {agentHandle ? (
+                  <a
+                    href={`https://t.me/${agentHandle}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="flex h-10 items-center justify-center gap-1.5 rounded-xl border border-mint/40 bg-mint/10 text-xs font-semibold text-mint transition hover:bg-mint/15"
+                  >
+                    <TelegramIcon />
+                    {t('wallet.talkOnTelegram')}
+                  </a>
+                ) : null}
+                {agentTel ? (
+                  <a
+                    href={`tel:${agentTel}`}
+                    className="flex h-10 items-center justify-center gap-1.5 rounded-xl border border-line/70 bg-raised/50 text-xs font-semibold text-text transition hover:border-mint/40"
+                  >
+                    <PhoneIcon />
+                    {t('wallet.callAgent')}
+                  </a>
+                ) : null}
+              </div>
+              {!createdAgent?.isOnline ? (
+                <p className="mt-1.5 text-[10px] text-muted">{t('wallet.agentOfflineHint')}</p>
+              ) : null}
+            </div>
+          ) : null}
+
           <div className="mt-3">
             <CodeBlock
               label={t('wallet.payoutCode')}
               code={created.payoutCode}
-              hint={t('wallet.payoutCodeHint')}
+              hint={t('wallet.agentPayoutHint')}
+            />
+          </div>
+
+          <p className="mt-2 text-[10px] text-muted">
+            {t('wallet.expiresAt', { when: formatDateTime(created.expiresAt) })}
+          </p>
+
+          <div className="mt-4 grid grid-cols-2 gap-2">
+            {created.status === 'ESCROWED' ? (
+              <Button
+                variant="danger"
+                loading={cancelling === created.id}
+                onClick={() => void cancel(created.id)}
+              >
+                {t('common.cancel')}
+              </Button>
+            ) : null}
+            <Button
+              variant="outline"
+              className={created.status === 'ESCROWED' ? '' : 'col-span-2'}
+              onClick={() => {
+                setCreated(null);
+                setError(null);
+              }}
+            >
+              {t('wallet.newWithdrawal')}
+            </Button>
+          </div>
+        </Panel>
+      ) : (
+        <Panel className="p-4">
+          <p className="text-[10px] font-semibold uppercase tracking-widest text-gold">
+            {t('wallet.stepChoosePayout')}
+          </p>
+          <h2 className="mt-0.5 font-display text-base font-bold">{t('wallet.withdraw')}</h2>
+          <p className="mt-0.5 text-[11px] text-muted">{t('wallet.withdrawBlurb')}</p>
+
+          <div className="mt-3">
+            <AmountField
+              label={t('wallet.withdrawAmount')}
+              value={amount}
+              onChange={setAmount}
+              placeholder={t('wallet.withdrawPlaceholder')}
+              hint={`${t('wallet.available')} ${wallet ? formatCredits(wallet.available) : '—'} ETB`}
+              error={exceedsBalance ? t('wallet.exceedsBalance', { amount: formatCredits(wallet?.available ?? '0') }) : undefined}
+              action={
+                <button
+                  type="button"
+                  onClick={() => setAmount(max)}
+                  className="rounded-md bg-raised px-2 py-0.5 text-[10px] font-bold uppercase text-mint"
+                >
+                  {t('wallet.max')}
+                </button>
+              }
+            />
+          </div>
+
+          <div className="mt-4">
+            <p className="text-[10px] font-semibold uppercase tracking-widest text-muted">
+              {t('wallet.selectPaymentMethod')}
+            </p>
+            {providers === null ? (
+              <div className="mt-2 flex justify-center py-2">
+                <Spinner className="h-4 w-4 text-mint" />
+              </div>
+            ) : providers.length === 0 ? (
+              <p className="mt-1 text-[11px] text-warn">{t('wallet.noWithdrawMethods')}</p>
+            ) : (
+              <div className="mt-1.5 grid grid-cols-1 gap-2 sm:grid-cols-2">
+                {providers.map((item) => {
+                  const selected = item.code === selectedCode;
+                  return (
+                    <button
+                      key={item.code}
+                      type="button"
+                      aria-pressed={selected}
+                      disabled={busy}
+                      onClick={() => chooseProvider(item)}
+                      className={cn(
+                        'flex items-center justify-between gap-2 rounded-xl border p-3 text-left transition disabled:opacity-50',
+                        selected
+                          ? 'border-gold/60 bg-gold/10'
+                          : 'border-line/70 bg-raised/50 hover:border-gold/50 hover:bg-gold/5',
+                      )}
+                    >
+                      <span className="min-w-0">
+                        <span className="block truncate text-sm font-semibold text-text">{item.name}</span>
+                        <span className="block text-[10px] text-muted">{t(`method.${item.method}`)}</span>
+                      </span>
+                      <span
+                        className={cn(
+                          'flex h-5 w-5 shrink-0 items-center justify-center rounded-full border',
+                          selected ? 'border-gold bg-gold text-ink' : 'border-line/80 text-transparent',
+                        )}
+                        aria-hidden
+                      >
+                        <svg viewBox="0 0 24 24" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="3">
+                          <path d="M20 6L9 17l-5-5" strokeLinecap="round" strokeLinejoin="round" />
+                        </svg>
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          <div className="mt-4 space-y-2">
+            <Input
+              label={t('wallet.withdrawFullName')}
+              value={accountName}
+              onChange={(event) => setAccountName(event.target.value)}
+              autoComplete="name"
+            />
+            <Input
+              label={t('wallet.withdrawAccountNumber')}
+              value={accountNumber}
+              onChange={(event) => setAccountNumber(event.target.value)}
+              inputMode="numeric"
+            />
+            <p className="text-[10px] text-muted">{t('wallet.withdrawAccountHint')}</p>
+          </div>
+
+          <div className="mt-3">
+            <Input
+              label={t('wallet.payoutDetails')}
+              placeholder={t('wallet.payoutDetailsPlaceholder')}
+              value={note}
+              onChange={(event) => setNote(event.target.value)}
+            />
+          </div>
+          {error ? (
+            <div className="mt-3">
+              <ErrorNote>{error}</ErrorNote>
+            </div>
+          ) : null}
+          <Button
+            className="mt-3 w-full"
+            size="lg"
+            variant="gold"
+            loading={busy}
+            disabled={
+              !selectedProvider ||
+              requestedMinor === null ||
+              exceedsBalance ||
+              !accountName.trim() ||
+              !accountNumber.trim()
+            }
+            onClick={() => void submit()}
+          >
+            {t('wallet.requestWithdrawal')}
+          </Button>
+          <div className="mt-3">
+            <HelpSteps
+              title={t('wallet.helpHowToWithdraw')}
+              steps={[
+                t('wallet.withdrawStep1'),
+                t('wallet.withdrawStep2'),
+                t('wallet.withdrawStep3'),
+                t('wallet.withdrawStep4'),
+                t('wallet.withdrawStep5'),
+                t('wallet.withdrawStep6'),
+              ]}
             />
           </div>
         </Panel>
-      ) : null}
-
-      <Panel className="p-4">
-        <h2 className="font-display text-base font-bold">{t('wallet.withdraw')}</h2>
-        <p className="mt-0.5 text-[11px] text-muted">{t('wallet.cashOutBlurb')}</p>
-
-        <div className="mt-3">
-          <AmountField
-            label={t('wallet.withdrawAmount')}
-            value={amount}
-            onChange={setAmount}
-            placeholder={t('wallet.withdrawPlaceholder')}
-            hint={`${t('wallet.available')} ${wallet ? formatCredits(wallet.available) : '—'} ETB`}
-            action={
-              <button
-                type="button"
-                onClick={() => setAmount(max)}
-                className="rounded-md bg-raised px-2 py-0.5 text-[10px] font-bold uppercase text-mint"
-              >
-                {t('wallet.max')}
-              </button>
-            }
-          />
-        </div>
-
-        <div className="mt-4">
-          <p className="text-[10px] font-semibold uppercase tracking-widest text-muted">
-            {t('wallet.selectPaymentMethod')}
-          </p>
-          <div className="mt-1.5 grid grid-cols-2 gap-2 sm:grid-cols-3">
-            {PAYMENT_METHODS.map((option) => {
-              const active = option.value === method;
-              return (
-                <button
-                  key={option.value}
-                  type="button"
-                  onClick={() => {
-                    setMethod(option.value);
-                    setAccountId('');
-                    setAddingAccount(false);
-                  }}
-                  aria-pressed={active}
-                  className={cn(
-                    'h-10 rounded-xl border text-xs font-semibold transition',
-                    active
-                      ? 'border-mint/60 bg-mint/10 text-mint'
-                      : 'border-line/70 bg-raised/50 text-muted hover:border-mint/40 hover:text-text',
-                  )}
-                >
-                  {t(`method.${option.value}`)}
-                </button>
-              );
-            })}
-          </div>
-        </div>
-
-        <div className="mt-4">
-          <p className="text-[10px] font-semibold uppercase tracking-widest text-muted">
-            {t('wallet.payoutAccount')}
-          </p>
-          {method === 'CASH' ? (
-            <p className="mt-1 text-[11px] text-muted">{t('wallet.cashNoAccount')}</p>
-          ) : accounts === null ? (
-            <div className="mt-1 flex justify-center py-2">
-              <Spinner className="h-4 w-4 text-mint" />
-            </div>
-          ) : (
-            <>
-              {methodAccounts.length === 0 ? (
-                <p className="mt-1 text-[11px] text-warn">{t('wallet.noPayoutAccounts')}</p>
-              ) : (
-                <div className="mt-1.5 space-y-1.5">
-                  {methodAccounts.map((account) => {
-                    const active = account.id === accountId;
-                    return (
-                      <button
-                        key={account.id}
-                        type="button"
-                        aria-pressed={active}
-                        onClick={() => setAccountId(account.id)}
-                        className={cn(
-                          'flex w-full items-center justify-between gap-2 rounded-xl border px-3 py-2 text-left transition',
-                          active
-                            ? 'border-mint/60 bg-mint/10'
-                            : 'border-line/70 bg-raised/50 hover:border-mint/40',
-                        )}
-                      >
-                        <span className="min-w-0">
-                          <span
-                            className={cn(
-                              'block truncate text-xs font-semibold',
-                              active ? 'text-mint' : 'text-text',
-                            )}
-                          >
-                            {account.accountName}
-                          </span>
-                          <span className="block truncate text-[10px] text-muted">
-                            {account.accountNumber}
-                            {account.provider ? ` · ${account.provider}` : ''}
-                          </span>
-                        </span>
-                        {account.isDefault ? <Pill tone="mint">{t('wallet.defaultAccount')}</Pill> : null}
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
-
-              {addingAccount ? (
-                <div className="mt-2 space-y-2 rounded-xl border border-line/70 bg-ink/40 p-3">
-                  <Input
-                    label={t('wallet.accountHolder')}
-                    value={accountName}
-                    onChange={(event) => setAccountName(event.target.value)}
-                  />
-                  <Input
-                    label={t('wallet.accountNumber')}
-                    value={accountNumber}
-                    onChange={(event) => setAccountNumber(event.target.value)}
-                  />
-                  <div className="flex gap-2">
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      disabled={savingAccount}
-                      onClick={() => setAddingAccount(false)}
-                    >
-                      {t('common.cancel')}
-                    </Button>
-                    <Button size="sm" loading={savingAccount} onClick={() => void saveAccount()}>
-                      {t('wallet.savePayoutAccount')}
-                    </Button>
-                  </div>
-                </div>
-              ) : (
-                <button
-                  type="button"
-                  onClick={() => setAddingAccount(true)}
-                  className="mt-2 text-[11px] font-semibold text-mint"
-                >
-                  + {t('wallet.addPayoutAccount')}
-                </button>
-              )}
-            </>
-          )}
-        </div>
-
-        <div className="mt-3">
-          <Input
-            label={t('wallet.payoutDetails')}
-            placeholder={t('wallet.payoutDetailsPlaceholder')}
-            value={note}
-            onChange={(event) => setNote(event.target.value)}
-          />
-        </div>
-        <p className="mt-3 rounded-xl border border-line/70 bg-ink/40 px-3 py-2 text-[11px] text-muted">
-          {t('wallet.anyAgentPays')}
-        </p>
-        {error ? (
-          <div className="mt-3">
-            <ErrorNote>{error}</ErrorNote>
-          </div>
-        ) : null}
-        <Button
-          className="mt-3 w-full"
-          size="lg"
-          variant="gold"
-          loading={busy}
-          disabled={method !== 'CASH' && methodAccounts.length === 0}
-          onClick={() => void submit()}
-        >
-          {t('wallet.requestWithdrawal')}
-        </Button>
-        <div className="mt-3">
-          <HelpSteps
-            title={t('wallet.helpHowToWithdraw')}
-            steps={[
-              t('wallet.withdrawStep1'),
-              t('wallet.withdrawStep2'),
-              t('wallet.withdrawStep3'),
-              t('wallet.withdrawStep4'),
-              t('wallet.withdrawStep5'),
-              t('wallet.withdrawStep6'),
-            ]}
-          />
-        </div>
-      </Panel>
+      )}
 
       {open.length > 0 ? (
         <Panel className="p-4">
@@ -1490,6 +1560,34 @@ function WithdrawPanel({ onChanged }: { onChanged: () => void }) {
                   <p className="mt-1 text-[11px] text-muted">
                     {formatCredits(withdrawal.amount)} ETB · {formatDateTime(withdrawal.createdAt)}
                   </p>
+                  {withdrawal.agent ? (
+                    <p className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[10px] text-muted">
+                      <span>
+                        {t('wallet.payingAgent')}:{' '}
+                        <span className="font-semibold text-text">
+                          {withdrawal.agent.displayName ?? withdrawal.agent.agentCode}
+                        </span>
+                      </span>
+                      {withdrawal.agent.telegramUsername ? (
+                        <a
+                          href={`https://t.me/${withdrawal.agent.telegramUsername.replace(/^@/, '')}`}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="font-semibold text-mint underline-offset-2 hover:underline"
+                        >
+                          {t('wallet.talkOnTelegram')}
+                        </a>
+                      ) : null}
+                      {withdrawal.agent.phone ? (
+                        <a
+                          href={`tel:${withdrawal.agent.phone.replace(/[^+\d]/g, '')}`}
+                          className="font-semibold text-mint underline-offset-2 hover:underline"
+                        >
+                          {t('wallet.callAgent')}
+                        </a>
+                      ) : null}
+                    </p>
+                  ) : null}
                   {withdrawal.status === 'PROCESSING' ? (
                     <p className="mt-1 text-[11px] text-muted">{t('wallet.processingHint')}</p>
                   ) : null}

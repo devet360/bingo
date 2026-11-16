@@ -405,6 +405,7 @@ export interface Withdrawal {
   agentProfileId: string | null;
   paymentAccountId: string | null;
   payoutAccountId: string | null;
+  providerCode: string | null;
   proofRequired: boolean;
   playerNote: string | null;
   agentNote: string | null;
@@ -413,6 +414,22 @@ export interface Withdrawal {
   settledAt: string | null;
   cancelledAt: string | null;
   createdAt: string;
+  agent?: {
+    id: string;
+    agentCode: string;
+    displayName: string | null;
+    avatarUrl: string | null;
+    phone: string | null;
+    telegramUsername: string | null;
+    isOnline: boolean;
+  } | null;
+  payoutAccount?: {
+    id?: string;
+    method?: PaymentMethod;
+    provider: string | null;
+    accountName: string;
+    accountNumber: string;
+  } | null;
 }
 
 export interface TransactionLine {
@@ -548,6 +565,23 @@ export interface AdminOverview {
   openWithdrawals: number;
   todayLedgers: number;
   liabilities: { available: string; escrow: string; locked: string };
+  today: {
+    deposits: { count: number; amount: string };
+    withdrawals: { count: number; amount: string };
+    newPlayers: number;
+    cardsSold: number;
+    cardsStaked: string;
+    rounds: number;
+    rake: string;
+  };
+  queues: {
+    openTickets: number;
+    manualReceipts: number;
+    pendingDeposits: number;
+    openWithdrawals: number;
+  };
+  series: Array<{ date: string; deposits: string; withdrawals: string }>;
+  bingo: { openRooms: number; liveRounds: number };
 }
 
 export interface StaffMember extends User {

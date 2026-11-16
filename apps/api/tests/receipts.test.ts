@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { PaymentMethod } from '@prisma/client';
-import { normalizeInput, normalizeOptionalReceipt, referenceFromUrl } from '../src/services/receipts/reference';
+import { deriveReceiptAccount, normalizeInput, normalizeOptionalReceipt, referenceFromUrl } from '../src/services/receipts/reference';
 import { verificationGate, gateFailureMessage } from '../src/services/receipts/gate';
 import { classifyStatus } from '../src/services/receipts/status';
 import { parseMoney, birrAmountIn, htmlToLines } from '../src/services/receipts/text';
@@ -78,6 +78,21 @@ test('account suffix and phone inputs are normalised', () => {
     normalizeInput(cbebirr, { reference: 'ABC1234567', phoneNumber: '0912345678' }).phoneNumber,
     '251912345678',
   );
+});
+
+test('the account suffix is taken from the assigned payment account', () => {
+  assert.equal(deriveReceiptAccount(undefined, '100012345678', 5), '45678');
+  assert.equal(deriveReceiptAccount(undefined, '1000 1234 5678', 5), '45678');
+  assert.equal(deriveReceiptAccount('99999', '100012345678', 5), '99999');
+  assert.equal(deriveReceiptAccount(undefined, '123', 5), undefined);
+  assert.equal(deriveReceiptAccount(undefined, null, 5), undefined);
+  assert.equal(deriveReceiptAccount(undefined, '100012345678', null), undefined);
+
+  // Creation runs before an account exists, so the suffix is deferred instead
+  // of demanded from the player.
+  const boa = provider('boa', { accountDigits: 5 });
+  assert.equal(normalizeOptionalReceipt(boa, { reference: 'FT25ABCDE' }).accountNumber, undefined);
+  assert.throws(() => normalizeInput(boa, { reference: 'FT25ABCDE' }), /last 5 digits/);
 });
 
 test('a deposit may be created before the player has paid', () => {

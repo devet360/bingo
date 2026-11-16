@@ -142,6 +142,22 @@ export function checkAccountSuffix(input: string, digits: number): string {
   return cleaned.slice(-digits);
 }
 
+/**
+ * The receiving-account suffix belongs to the payment account the server
+ * assigned, not to the player. A stored value still wins so legacy deposits
+ * keep verifying against what was submitted with them.
+ */
+export function deriveReceiptAccount(
+  stored: string | null | undefined,
+  paymentAccountNumber: string | null | undefined,
+  digits: number | null | undefined,
+): string | undefined {
+  if (stored?.trim()) return stored.trim();
+  if (!digits) return undefined;
+  const cleaned = (paymentAccountNumber ?? '').replace(/\D/g, '');
+  return cleaned.length >= digits ? cleaned.slice(-digits) : undefined;
+}
+
 /** CBE Birr wants the payer phone as 2519XXXXXXXX (or 2517XXXXXXXX). */
 export function normalizeCbeBirrPhone(input: string): string {
   const digits = input.replace(/[\s()+-]/g, '');
@@ -187,18 +203,28 @@ export function normalizeOptionalReceipt(
       phoneNumber: input.phoneNumber?.trim() || undefined,
     };
   }
-  return normalizeInput(provider, {
-    reference,
-    accountNumber: input.accountNumber,
-    phoneNumber: input.phoneNumber,
-  });
+  return normalizeInput(
+    provider,
+    {
+      reference,
+      accountNumber: input.accountNumber,
+      phoneNumber: input.phoneNumber,
+    },
+    // Step 1 runs before the server picks the receiving account, so the
+    // suffix is derived later instead of demanded from the player.
+    { requireAccount: false },
+  );
 }
 
 /**
  * Validate a provider's reference (and the extra inputs it needs) before any
  * request is made. Rejects traversal/attribute tricks, not just bad shapes.
  */
-export function normalizeInput(provider: ReceiptProvider, input: { reference?: string; accountNumber?: string; phoneNumber?: string }): NormalizedInput {
+export function normalizeInput(
+  provider: ReceiptProvider,
+  input: { reference?: string; accountNumber?: string; phoneNumber?: string },
+  opts: { requireAccount?: boolean } = {},
+): NormalizedInput {
   const raw = (input.reference ?? '').trim();
   if (!raw) throw new ReferenceError('Receipt reference is required.');
   if (raw.length > MAX_REF_LENGTH) throw new ReferenceError('That reference is too long to be a receipt number.');
@@ -248,9 +274,14 @@ export function normalizeInput(provider: ReceiptProvider, input: { reference?: s
     }
   }
 
-  const accountNumber = provider.accountDigits
-    ? checkAccountSuffix(input.accountNumber ?? '', provider.accountDigits)
-    : undefined;
+  let accountNumber: string | undefined;
+  if (provider.accountDigits) {
+    const accountInput = input.accountNumber?.trim();
+    if (accountInput) accountNumber = checkAccountSuffix(accountInput, provider.accountDigits);
+    else if (opts.requireAccount !== false) {
+      throw new ReferenceError(`Enter at least the last ${provider.accountDigits} digits of the receiving account.`);
+    }
+  }
 
   let phoneNumber: string | undefined;
   if (provider.requiresPhone) {

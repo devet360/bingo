@@ -10,7 +10,6 @@ import {
   serializePayoutAccount,
   serializeProof,
   serializeWallet,
-  serializeWithdrawal,
 } from '../lib/serializers';
 import { authenticate, requireVerifiedPhone } from '../middleware/auth';
 import { moneyLimiter, receiptLimiter } from '../middleware/rateLimit';
@@ -29,6 +28,8 @@ import {
   cancelWithdrawal,
   createWithdrawal,
   listPlayerWithdrawals,
+  playerWithdrawalInclude,
+  serializePlayerWithdrawal,
 } from '../services/withdrawals';
 import {
   confirmCashReceived,
@@ -96,9 +97,17 @@ const ProviderQuery = z.object({ method: z.nativeEnum(PaymentMethod).optional() 
 const CreateWithdrawalSchema = z.object({
   amount: minorAmount,
   method: z.nativeEnum(PaymentMethod),
+  providerCode: z.string().trim().min(1).max(32).optional(),
   agentProfileId: z.string().uuid().optional(),
   paymentAccountId: z.string().uuid().optional(),
   payoutAccountId: z.string().uuid().optional(),
+  payoutAccount: z
+    .object({
+      accountName: z.string().trim().min(1).max(128),
+      accountNumber: z.string().trim().min(1).max(64),
+      provider: z.string().trim().max(64).nullable().optional(),
+    })
+    .optional(),
   playerNote: z.string().max(500).optional(),
 });
 
@@ -348,12 +357,16 @@ walletRouter.post(
       agentProfileId: body.agentProfileId,
       paymentAccountId: body.paymentAccountId,
       payoutAccountId: body.payoutAccountId,
+      payoutAccount: body.payoutAccount,
+      providerCode: body.providerCode,
       method: body.method,
       amount: BigInt(body.amount),
       playerNote: body.playerNote,
       idempotencyKey: scopedIdempotencyKey(req),
     });
-    res.status(replayed ? 200 : 201).json({ data: serializeWithdrawal(withdrawal), replayed });
+    res
+      .status(replayed ? 200 : 201)
+      .json({ data: serializePlayerWithdrawal(withdrawal), replayed });
   }),
 );
 
@@ -362,7 +375,7 @@ walletRouter.get(
   asyncHandler(async (req, res) => {
     const query = parse(WithdrawalStatusQuery, req.query);
     const withdrawals = await listPlayerWithdrawals(req.auth!.userId, query.status);
-    res.json({ data: withdrawals.map(serializeWithdrawal) });
+    res.json({ data: withdrawals.map(serializePlayerWithdrawal) });
   }),
 );
 
@@ -370,7 +383,7 @@ walletRouter.post(
   '/withdrawals/:id/cancel',
   asyncHandler(async (req, res) => {
     const withdrawal = await cancelWithdrawal(req.auth!.userId, req.params.id);
-    res.json({ data: serializeWithdrawal(withdrawal) });
+    res.json({ data: serializePlayerWithdrawal(withdrawal) });
   }),
 );
 
@@ -388,7 +401,15 @@ walletRouter.post(
   asyncHandler(async (req, res) => {
     const params = parse(WithdrawalParams, req.params);
     const proof = await confirmCashReceived(req.auth!.userId, params.id);
-    const withdrawal = await prisma.withdrawalRequest.findUnique({ where: { id: params.id } });
-    res.json({ data: { withdrawal: serializeWithdrawal(withdrawal!), proof: serializeProof(proof) } });
+    const withdrawal = await prisma.withdrawalRequest.findUnique({
+      where: { id: params.id },
+      include: playerWithdrawalInclude,
+    });
+    res.json({
+      data: {
+        withdrawal: serializePlayerWithdrawal(withdrawal!),
+        proof: serializeProof(proof),
+      },
+    });
   }),
 );

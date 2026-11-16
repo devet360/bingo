@@ -5,6 +5,19 @@ import type { Card, WinPattern } from '@/lib/types';
 
 const LETTERS = ['B', 'I', 'N', 'G', 'O'] as const;
 
+/** One colour family per board column, with a themed solid fill when daubed. */
+const COLUMN_ACCENTS = [
+  { text: 'text-blue', tint: 'bg-blue/15', ring: 'ring-blue/60', border: 'border-blue/70', fill: 'cell-b' },
+  { text: 'text-mint', tint: 'bg-mint/15', ring: 'ring-mint/60', border: 'border-mint/70', fill: 'cell-i' },
+  { text: 'text-gold', tint: 'bg-gold/15', ring: 'ring-gold/60', border: 'border-gold/70', fill: 'cell-n' },
+  { text: 'text-rose', tint: 'bg-rose/15', ring: 'ring-rose/60', border: 'border-rose/70', fill: 'cell-g' },
+  { text: 'text-violet', tint: 'bg-violet/15', ring: 'ring-violet/60', border: 'border-violet/70', fill: 'cell-o' },
+] as const;
+
+function columnAccent(c: number) {
+  return COLUMN_ACCENTS[c % COLUMN_ACCENTS.length]!;
+}
+
 function winningCells(
   card: Card,
   pattern: WinPattern | null,
@@ -99,10 +112,14 @@ export function CardBoard({
     >
       {isUs ? (
         <div className="grid grid-cols-5 border-b border-line/70 bg-raised/60">
-          {LETTERS.map((letter) => (
+          {LETTERS.map((letter, index) => (
             <span
               key={letter}
-              className="py-1 text-center text-[10px] font-black tracking-widest text-gold"
+              className={cn(
+                'border-b-2 py-1 text-center text-[10px] font-black tracking-widest',
+                columnAccent(index).text,
+                columnAccent(index).border,
+              )}
             >
               {letter}
             </span>
@@ -121,6 +138,7 @@ export function CardBoard({
             const inWin = win.has(`${r}:${c}`) && marked;
             const isCurrent = value !== null && value === currentBall && marked;
             const waitingTap = value !== null && called.has(value) && !marked;
+            const accent = columnAccent(c);
             return (
               <button
                 key={`${r}:${c}`}
@@ -128,15 +146,19 @@ export function CardBoard({
                 disabled={!onToggle || value === null}
                 onClick={() => value !== null && onToggle?.(value)}
                 className={cn(
-                  'flex items-center justify-center rounded-md font-display font-semibold tabular-nums transition',
-                  compact ? 'h-6 text-[11px]' : 'aspect-square text-sm',
+                  'flex min-w-0 items-center justify-center rounded-md font-display font-semibold tabular-nums transition',
+                  compact
+                    ? 'h-6 text-[11px]'
+                    : card.cells.cols > 5
+                      ? 'aspect-square text-[9px] sm:text-[10px]'
+                      : 'aspect-square text-[13px] sm:text-sm',
                   value === null && !free && 'bg-transparent',
-                  value === null && free && 'bg-gold/20 text-[9px] font-black text-gold',
-                  value !== null && !marked && 'bg-raised/80 text-text/80',
-                  waitingTap && 'text-mint ring-1 ring-inset ring-mint/50',
-                  marked && 'bg-mint text-[#04120c]',
-                  isCurrent && 'ring-2 ring-gold',
-                  inWin && 'bg-gold text-[#1a1204]',
+                  value === null && free && 'bg-gold/25 text-[8px] font-black text-gold',
+                  value !== null && !marked && !waitingTap && cn('bg-raised/80', accent.text),
+                  waitingTap && cn('font-bold ring-2 ring-inset', accent.tint, accent.text, accent.ring),
+                  marked && cn(accent.fill, 'font-black shadow-sm'),
+                  inWin && 'cell-win',
+                  isCurrent && 'ring-2 ring-text',
                 )}
               >
                 {free ? 'FREE' : value ?? ''}

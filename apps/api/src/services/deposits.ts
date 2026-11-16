@@ -16,7 +16,7 @@ import { closeAgentTask, createAgentTask, isTaskLockViolation } from './agentTas
 import { getProvider } from './providers';
 import { getDepositLimits } from './config';
 import { formatEtb } from '../lib/money';
-import { normalizeOptionalReceipt } from './receipts/reference';
+import { deriveReceiptAccount, normalizeOptionalReceipt } from './receipts/reference';
 import { ReferenceError as ReceiptReferenceError } from './receipts/types';
 
 const DEPOSIT_TTL_MS = 30 * 60_000;
@@ -183,6 +183,20 @@ export async function createDeposit(input: CreateDepositInput) {
     agentProfileId = assignment.agent.id;
     paymentAccountId = assignment.account.id;
     assignedByServer = true;
+  }
+
+  // The receiving-account suffix comes from the account the server assigned;
+  // the player is never asked to retype the agent's number.
+  if (receipt.provider?.accountDigits && paymentAccountId && !receipt.receiptAccount) {
+    const account = await prisma.agentPaymentAccount.findUnique({
+      where: { id: paymentAccountId },
+      select: { accountNumber: true },
+    });
+    receipt.receiptAccount = deriveReceiptAccount(
+      undefined,
+      account?.accountNumber,
+      receipt.provider.accountDigits,
+    );
   }
 
   const excludedAgentIds = new Set<string>();

@@ -579,8 +579,8 @@ export async function lockRound(roundId: string): Promise<LockRoundOutcome> {
       if (!round) throw Errors.notFound('Round');
       if (round.status !== 'WAITING') return { action: 'skipped' as const, round };
 
-      // A round with no cards still locks and draws: spectators watch a real,
-      // verifiable draw instead of an endless "cancelled, sales closed" loop.
+      // A round with no cards still locks so the engine can close it cleanly;
+      // the next sales window opens immediately after.
       if (round.cardsSold > 0 && round.uniquePlayers < round.room.minPlayersToStart) {
         const waited = Date.now() - round.createdAt.getTime();
         if (waited >= MAX_UNDERFILLED_WAIT_MS) {
@@ -1406,9 +1406,9 @@ export async function settleRunnerUp(roundId: string): Promise<SettleOutcome> {
 }
 
 /**
- * Closes a preview round that never sold a card. There is no pot, so nothing is
- * paid out or refunded; the draw is finished and its seed revealed like any
- * other round, which lets the room move straight into the next sales window.
+ * Closes a round that never sold a card. There is no pot, so nothing is paid
+ * out or refunded; the round is finished and its seed revealed like any other,
+ * which lets the room move straight into the next sales window.
  */
 export async function completeEmptyRound(roundId: string): Promise<boolean> {
   const round = await withTxRetry(() =>
