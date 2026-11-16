@@ -361,19 +361,118 @@ export async function getPlayerSupportSnapshot(playerId: string): Promise<Player
       select: { available: true, bonus: true, escrow: true, locked: true },
     }),
     prisma.depositRequest.findMany({
-      where: { playerId, status: { in: ['PENDING', 'PROCESSING'] } },
+      where: { playerId },
       orderBy: { createdAt: 'desc' },
       take: 3,
       select: { code: true, amount: true, method: true, status: true, createdAt: true },
     }),
     prisma.withdrawalRequest.findMany({
-      where: { playerId, status: { in: ['ESCROWED', 'PROCESSING'] } },
+      where: { playerId },
       orderBy: { createdAt: 'desc' },
       take: 3,
       select: { amount: true, netAmount: true, method: true, status: true, createdAt: true },
     }),
   ]);
   return { wallet, deposits, withdrawals };
+}
+
+const SUPPORT_TX_LIMIT = 5;
+
+export interface PlayerDepositRecord {
+  id: string;
+  code: string;
+  amount: bigint;
+  method: string;
+  status: string;
+  createdAt: Date;
+  expiresAt: Date;
+}
+
+export interface PlayerWithdrawalRecord {
+  id: string;
+  amount: bigint;
+  netAmount: bigint;
+  method: string;
+  status: string;
+  createdAt: Date;
+  expiresAt: Date;
+}
+
+/** Every deposit the player ever made, newest first (bot transaction list). */
+export async function listPlayerDeposits(
+  playerId: string,
+  take = SUPPORT_TX_LIMIT,
+): Promise<PlayerDepositRecord[]> {
+  return prisma.depositRequest.findMany({
+    where: { playerId },
+    orderBy: { createdAt: 'desc' },
+    take,
+    select: {
+      id: true,
+      code: true,
+      amount: true,
+      method: true,
+      status: true,
+      createdAt: true,
+      expiresAt: true,
+    },
+  });
+}
+
+export async function listPlayerWithdrawals(
+  playerId: string,
+  take = SUPPORT_TX_LIMIT,
+): Promise<PlayerWithdrawalRecord[]> {
+  return prisma.withdrawalRequest.findMany({
+    where: { playerId },
+    orderBy: { createdAt: 'desc' },
+    take,
+    select: {
+      id: true,
+      amount: true,
+      netAmount: true,
+      method: true,
+      status: true,
+      createdAt: true,
+      expiresAt: true,
+    },
+  });
+}
+
+export async function getPlayerDeposit(
+  playerId: string,
+  depositId: string,
+): Promise<PlayerDepositRecord | null> {
+  return prisma.depositRequest.findFirst({
+    where: { id: depositId, playerId },
+    select: {
+      id: true,
+      code: true,
+      amount: true,
+      method: true,
+      status: true,
+      createdAt: true,
+      expiresAt: true,
+    },
+  });
+}
+
+export async function getPlayerWithdrawal(
+  playerId: string,
+  withdrawalId: string,
+): Promise<PlayerWithdrawalRecord | null> {
+  return prisma.withdrawalRequest.findFirst({
+    where: { id: withdrawalId, playerId },
+    select: {
+      id: true,
+      amount: true,
+      netAmount: true,
+      method: true,
+      status: true,
+      createdAt: true,
+      expiresAt: true,
+    },
+  });
 }
 
 // ─────────────────────────────── staff side ───────────────────────────────

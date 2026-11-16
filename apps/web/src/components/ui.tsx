@@ -2,6 +2,7 @@
 
 import { useEffect, useState, type ButtonHTMLAttributes, type InputHTMLAttributes, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
+import { haptic } from '@/lib/telegram';
 
 export function cn(...values: Array<string | false | null | undefined>): string {
   return values.filter(Boolean).join(' ');
@@ -262,6 +263,7 @@ export function CopyButton({ value, label = 'Copy' }: { value: string; label?: s
       onClick={async () => {
         try {
           await navigator.clipboard.writeText(value);
+          haptic('tap');
           setCopied(true);
         } catch {
           setCopied(false);

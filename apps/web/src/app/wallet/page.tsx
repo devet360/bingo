@@ -28,6 +28,7 @@ import {
   timeAgo,
 } from '@/lib/format';
 import { useI18n } from '@/lib/i18n';
+import { confirmAction, haptic } from '@/lib/telegram';
 import { useSession } from '@/components/session';
 import {
   Button,
@@ -626,9 +627,11 @@ function DepositPanel({
       setCreated(result.data);
       setSubmitted(result.data.verificationStatus !== 'FAILED');
       setNotice(result.autoCredited ? t('wallet.depositCredited') : result.verification.message);
+      haptic(result.autoCredited ? 'success' : 'tap');
       await Promise.all([loadPending(), onChanged()]);
       void refreshWallet();
     } catch (cause) {
+      haptic('error');
       if (cause instanceof ApiError) setError(cause.message);
       else if (cause instanceof Error && cause.message === 'BANK_FETCH_FAILED') {
         setError(t('wallet.bankFetchFailed'));
@@ -726,9 +729,11 @@ function DepositPanel({
       setReference('');
       setReceiptPhone('');
       setProof(null);
+      haptic('success');
       await Promise.all([loadPending(), onChanged()]);
       void refreshWallet();
     } catch (cause) {
+      haptic('error');
       if (cause instanceof ApiError && cause.code === 'NO_AGENT_FOR_METHOD') {
         setError(t('wallet.noAgentForMethod', { method: item.name }));
       } else {
@@ -1191,6 +1196,17 @@ function WithdrawPanel({ onChanged }: { onChanged: () => void }) {
       setError(t('wallet.payoutAccountFields'));
       return;
     }
+    const confirmed = await confirmAction({
+      title: t('wallet.confirmWithdrawTitle'),
+      message: t('wallet.confirmWithdrawBody', {
+        amount: formatCredits(String(requestedMinor)),
+        name: accountName.trim(),
+        method: selectedProvider.name,
+      }),
+      confirmText: t('wallet.withdraw'),
+      cancelText: t('common.cancel'),
+    });
+    if (!confirmed) return;
     setBusy(true);
     setError(null);
     try {
@@ -1212,9 +1228,11 @@ function WithdrawPanel({ onChanged }: { onChanged: () => void }) {
       setNote('');
       setAccountName('');
       setAccountNumber('');
+      haptic('success');
       await Promise.all([loadOpen(), onChanged()]);
       void refreshWallet();
     } catch (cause) {
+      haptic('error');
       setError(cause instanceof ApiError ? cause.message : t('wallet.couldNotWithdraw'));
     } finally {
       setBusy(false);
@@ -1222,13 +1240,23 @@ function WithdrawPanel({ onChanged }: { onChanged: () => void }) {
   };
 
   const cancel = async (id: string) => {
+    const confirmed = await confirmAction({
+      title: t('wallet.confirmCancelTitle'),
+      message: t('wallet.confirmCancelBody'),
+      confirmText: t('wallet.confirmCancelTitle'),
+      cancelText: t('wallet.keepWithdrawal'),
+      destructive: true,
+    });
+    if (!confirmed) return;
     setCancelling(id);
     try {
       await cancelWithdrawal(id);
       setCreated((current) => (current?.id === id ? null : current));
+      haptic('success');
       await Promise.all([loadOpen(), onChanged()]);
       void refreshWallet();
     } catch (cause) {
+      haptic('error');
       setError(cause instanceof ApiError ? cause.message : t('wallet.couldNotCancel'));
     } finally {
       setCancelling(null);
@@ -1236,13 +1264,22 @@ function WithdrawPanel({ onChanged }: { onChanged: () => void }) {
   };
 
   const confirmCash = async (withdrawal: Withdrawal) => {
+    const confirmed = await confirmAction({
+      title: t('wallet.confirmCashTitle'),
+      message: t('wallet.confirmCashBody', { amount: formatCredits(withdrawal.netAmount) }),
+      confirmText: t('wallet.confirmCashReceived'),
+      cancelText: t('common.cancel'),
+    });
+    if (!confirmed) return;
     setConfirming(withdrawal.id);
     setError(null);
     try {
       await confirmCashReceived(withdrawal.id);
+      haptic('success');
       await Promise.all([loadOpen(), onChanged()]);
       void refreshWallet();
     } catch (cause) {
+      haptic('error');
       setError(cause instanceof ApiError ? cause.message : t('wallet.couldNotConfirm'));
     } finally {
       setConfirming(null);

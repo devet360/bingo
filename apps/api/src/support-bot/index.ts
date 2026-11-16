@@ -11,8 +11,13 @@ import {
   closeTicketByPlayer,
   createSupportTicket,
   findActiveSupportTicket,
+  getPlayerDeposit,
   getPlayerSupportSnapshot,
+  getPlayerWithdrawal,
+  getSupportHours,
   isSupportOnline,
+  listPlayerDeposits,
+  listPlayerWithdrawals,
   markSupportDeliveryFailed,
   markSupportDeliverySent,
   pendingSupportDeliveries,
@@ -92,14 +97,53 @@ function backKeyboard(locale: SupportLocale, extra?: InlineKeyboard): InlineKeyb
   return keyboard.text(supportCopy[locale].buttons.back, 'su:menu');
 }
 
-function topicKeyboard(locale: SupportLocale, topic: 'DEPOSIT' | 'WITHDRAWAL'): InlineKeyboard {
+type TxKind = 'DEP' | 'WD';
+
+function txReference(kind: TxKind, record: { code?: string; id: string }): string {
+  if (kind === 'DEP') return record.code ?? record.id;
+  const compact = record.id.replace(/[^a-z0-9]/gi, '').slice(-6).toUpperCase();
+  return `#${compact}`;
+}
+
+function whenLabel(locale: SupportLocale, date: Date): string {
+  try {
+    return new Intl.DateTimeFormat(locale === 'am' ? 'am-ET' : 'en-GB', {
+      timeZone: getSupportHours().timezone,
+      dateStyle: 'medium',
+      timeStyle: 'short',
+    }).format(date);
+  } catch {
+    return date.toISOString();
+  }
+}
+
+function methodLabel(method: string): string {
+  return method.replaceAll('_', ' ').toLowerCase();
+}
+
+const DEPOSIT_OPEN = new Set(['PENDING', 'PROCESSING']);
+const WITHDRAWAL_OPEN = new Set(['ESCROWED', 'PROCESSING']);
+
+function transactionGuidance(
+  locale: SupportLocale,
+  kind: TxKind,
+  record: { status: string; expiresAt: Date },
+  now = new Date(),
+): string {
   const copy = supportCopy[locale];
-  const keyboard = new InlineKeyboard();
-  const url = walletUrl();
-  if (url) keyboard.webApp(copy.buttons.wallet, url).row();
-  keyboard.text(copy.buttons.agent, `su:chat:${topic}`).row();
-  keyboard.text(copy.buttons.back, 'su:menu');
-  return keyboard;
+  if (record.status === 'DISPUTED') return copy.txUnderReview;
+  if (record.status === 'CREDITED') return copy.txDepositCredited;
+  if (record.status === 'SETTLED') return copy.txWithdrawalSettled;
+  if (record.status === 'REJECTED') return copy.txDeclined;
+  if (record.status === 'CANCELLED') return copy.txCancelled;
+  if (record.status === 'EXPIRED') return copy.txExpired;
+  const open = kind === 'DEP' ? DEPOSIT_OPEN.has(record.status) : WITHDRAWAL_OPEN.has(record.status);
+  if (!open) return '';
+  const when = whenLabel(locale, record.expiresAt);
+  if (record.expiresAt.getTime() > now.getTime()) {
+    return kind === 'DEP' ? copy.txDepositProcessing(when) : copy.txWithdrawalProcessing(when);
+  }
+  return kind === 'DEP' ? copy.txDepositOverdue(when) : copy.txWithdrawalOverdue(when);
 }
 
 function faqKeyboard(locale: SupportLocale): InlineKeyboard {
@@ -234,12 +278,119 @@ async function openMenu(ctx: Context, locale: SupportLocale): Promise<void> {
 async function openTopic(
   ctx: Context,
   locale: SupportLocale,
+  player: PlayerUser,
   topic: 'DEPOSIT' | 'WITHDRAWAL',
 ): Promise<void> {
   const copy = supportCopy[locale];
   const text = topic === 'DEPOSIT' ? copy.depositBody : copy.withdrawalBody;
   const title = topic === 'DEPOSIT' ? copy.depositTitle : copy.withdrawalTitle;
-  await sendScreen(ctx, `${title}\n\n${text}`, topicKeyboard(locale, topic));
+  const keyboard = new InlineKeyboard();
+  let list: string;
+
+  if (topic === 'DEPOSIT') {
+    const deposits = await listPlayerDeposits(player.id);
+    if (deposits.length === 0) {
+      list = copy.depositRecentEmpty;
+    } else {
+      for (const deposit of deposits) {
+        keyboard
+          .text(
+            `${deposit.code} · ${etb(deposit.amount)} · ${statusLabel(locale, deposit.status)}`.slice(
+              0,
+              60,
+            ),
+            `su:tx:DEP:${deposit.id}`,
+          )
+          .row();
+      }
+      list = [
+        copy.depositRecentTitle,
+        ...deposits.map(
+          (deposit) =>
+            `• ${deposit.code} · ${etb(deposit.amount)} ETB · ${statusLabel(locale, deposit.status)}`,
+        ),
+        '',
+        copy.txListHint,
+      ].join('\n');
+    }
+  } else {
+    const withdrawals = await listPlayerWithdrawals(player.id);
+    if (withdrawals.length === 0) {
+      list = copy.withdrawalRecentEmpty;
+    } else {
+      for (const withdrawal of withdrawals) {
+        keyboard
+          .text(
+            `${txReference('WD', withdrawal)} · ${etb(withdrawal.netAmount)} · ${statusLabel(
+              locale,
+              withdrawal.status,
+            )}`.slice(0, 60),
+            `su:tx:WD:${withdrawal.id}`,
+          )
+          .row();
+      }
+      list = [
+        copy.withdrawalRecentTitle,
+        ...withdrawals.map(
+          (withdrawal) =>
+            `• ${txReference('WD', withdrawal)} · ${etb(withdrawal.netAmount)} ETB · ${statusLabel(
+              locale,
+              withdrawal.status,
+            )}`,
+        ),
+        '',
+        copy.txListHint,
+      ].join('\n');
+    }
+  }
+
+  const url = walletUrl();
+  if (url) keyboard.webApp(copy.buttons.wallet, url).row();
+  keyboard.text(copy.buttons.agent, `su:chat:${topic}`).row();
+  keyboard.text(copy.buttons.back, 'su:menu');
+  await sendScreen(ctx, `${title}\n\n${text}\n\n${list}`, keyboard);
+}
+
+async function openTransaction(
+  ctx: Context,
+  locale: SupportLocale,
+  player: PlayerUser,
+  kind: TxKind,
+  id: string,
+): Promise<void> {
+  const copy = supportCopy[locale];
+  const topic = kind === 'DEP' ? 'DEPOSIT' : 'WITHDRAWAL';
+  const record =
+    kind === 'DEP' ? await getPlayerDeposit(player.id, id) : await getPlayerWithdrawal(player.id, id);
+  if (!record) {
+    await openTopic(ctx, locale, player, topic);
+    return;
+  }
+  const reference = txReference(kind, record);
+  const net = 'netAmount' in record ? record.netAmount : null;
+  const guidance = transactionGuidance(locale, kind, record);
+  const body = copy.txDetailBody({
+    amount: etb(record.amount),
+    method: methodLabel(record.method),
+    created: whenLabel(locale, record.createdAt),
+    status: statusLabel(locale, record.status),
+    closes: whenLabel(locale, record.expiresAt),
+    ...(net !== null ? { net: etb(net) } : {}),
+  });
+  const text = `${copy.txDetailTitle(
+    kind === 'DEP' ? 'deposit' : 'withdrawal',
+    reference,
+  )}\n\n${body}${guidance ? `\n\n${guidance}` : ''}`;
+
+  const keyboard = new InlineKeyboard()
+    .text(copy.buttons.refresh, `su:tx:${kind}:${id}`)
+    .text(copy.buttons.report, `su:report:${kind}:${id}`)
+    .row();
+  const url = walletUrl();
+  if (url) keyboard.webApp(copy.buttons.wallet, url).row();
+  keyboard.text(copy.buttons.agent, `su:chat:${topic}`).row();
+  keyboard.text(copy.buttons.back, `su:topic:${topic}`);
+  await sendScreen(ctx, text, keyboard);
 }
 
 async function openFaq(ctx: Context, locale: SupportLocale): Promise<void> {
@@ -252,6 +403,12 @@ function statusLabel(locale: SupportLocale, status: string): string {
     PENDING: { en: 'waiting for an agent', am: 'ወኪል በመጠበቅ ላይ' },
     PROCESSING: { en: 'agent is processing', am: 'ወኪሉ በሂደት ላይ' },
     ESCROWED: { en: 'waiting for an agent', am: 'ወኪል በመጠበቅ ላይ' },
+    CREDITED: { en: 'credited', am: 'ገቢ ሆኗል' },
+    SETTLED: { en: 'paid', am: 'ተከፍሏል' },
+    REJECTED: { en: 'declined', am: 'ተቀባይነት አላገኘም' },
+    CANCELLED: { en: 'cancelled', am: 'ተሰርዟል' },
+    EXPIRED: { en: 'expired', am: 'ጊዜው አልፏል' },
+    DISPUTED: { en: 'under review', am: 'በግምገማ ላይ' },
   };
   return labels[status]?.[locale] ?? status.toLowerCase().replaceAll('_', ' ');
 }
@@ -275,7 +432,10 @@ async function openAccount(ctx: Context, locale: SupportLocale, player: PlayerUs
         `${etb(withdrawal.netAmount)} ETB · ${statusLabel(locale, withdrawal.status)}`,
     ),
   })}`;
-  const keyboard = new InlineKeyboard();
+  const keyboard = new InlineKeyboard()
+    .text(copy.buttons.deposit, 'su:topic:DEPOSIT')
+    .text(copy.buttons.withdrawal, 'su:topic:WITHDRAWAL')
+    .row();
   const url = walletUrl();
   if (url) keyboard.webApp(copy.buttons.wallet, url).row();
   keyboard.text(copy.buttons.agent, 'su:chat:OTHER').row();
@@ -288,16 +448,24 @@ async function startChat(
   player: PlayerUser,
   locale: SupportLocale,
   topic: 'DEPOSIT' | 'WITHDRAWAL' | 'ACCOUNT' | 'PAYMENTS' | 'OTHER',
+  body?: string,
 ): Promise<void> {
   const copy = supportCopy[locale];
   if (!ctx.chat) return;
   try {
-    const { ticket, created } = await createSupportTicket({
+    const { ticket, created, message } = await createSupportTicket({
       playerId: player.id,
       telegramChatId: BigInt(ctx.chat.id),
       topic,
       locale,
+      body,
     });
+    // A resumed thread already exists, so the seeded context is appended here.
+    if (body && !message) {
+      await appendPlayerMessage({ ticketId: ticket.id, playerId: player.id, body }).catch(
+        (error) => logger.warn({ err: error }, 'support seed message failed'),
+      );
+    }
     const text = created
       ? isSupportOnline()
         ? copy.agentOnline(ticket.code)
@@ -317,6 +485,35 @@ async function startChat(
   }
 }
 
+async function reportTransaction(
+  ctx: Context,
+  player: PlayerUser,
+  locale: SupportLocale,
+  kind: TxKind,
+  id: string,
+): Promise<void> {
+  const record =
+    kind === 'DEP' ? await getPlayerDeposit(player.id, id) : await getPlayerWithdrawal(player.id, id);
+  if (!record) {
+    await openTopic(ctx, locale, player, kind === 'DEP' ? 'DEPOSIT' : 'WITHDRAWAL');
+    return;
+  }
+  const reference = txReference(kind, record);
+  const label = kind === 'DEP' ? 'deposit' : 'withdrawal';
+  const body =
+    locale === 'am'
+      ? `ችግር ማሳወቂያ፦ የ${kind === 'DEP' ? 'ተቀማጭ' : 'ወጪ'} ${reference} (${etb(
+          record.amount,
+        )} ብር) ሁኔታ “${statusLabel(locale, record.status)}” ነው። እባክዎ ይመርምሩ።`
+      : `Problem report: ${label} ${reference} (${etb(record.amount)} ETB, ${methodLabel(
+          record.method,
+        )}) is “${statusLabel(locale, record.status)}”. Created ${whenLabel(
+          locale,
+          record.createdAt,
+        )}. Please check it.`;
+  await startChat(ctx, player, locale, kind === 'DEP' ? 'DEPOSIT' : 'WITHDRAWAL', body);
+}
+
 // ─────────────────────────────── handlers ───────────────────────────────
 
 bot.command(['start', 'menu'], async (ctx) => {
@@ -324,11 +521,11 @@ bot.command(['start', 'menu'], async (ctx) => {
   if (!identity) return;
   const payload = (ctx.match ?? '').trim().toLowerCase();
   if (payload.includes('deposit')) {
-    await openTopic(ctx, identity.locale, 'DEPOSIT');
+    await openTopic(ctx, identity.locale, identity.player, 'DEPOSIT');
     return;
   }
   if (payload.includes('withdraw')) {
-    await openTopic(ctx, identity.locale, 'WITHDRAWAL');
+    await openTopic(ctx, identity.locale, identity.player, 'WITHDRAWAL');
     return;
   }
   await ctx.reply(supportCopy[identity.locale].welcome(identity.player.displayName));
@@ -402,17 +599,32 @@ bot.on('callback_query:data', async (ctx) => {
     const key = data.slice('su:faq:'.length) as 'deposit' | 'withdrawal' | 'fees' | 'account';
     const body = copy.faq[key];
     if (!body) return;
-    const keyboard = new InlineKeyboard()
-      .text(copy.buttons.agent, 'su:chat:OTHER')
-      .row()
-      .text(copy.buttons.back, 'su:faq');
+    const keyboard = new InlineKeyboard();
+    if (key === 'deposit') keyboard.text(copy.buttons.deposit, 'su:topic:DEPOSIT').row();
+    if (key === 'withdrawal') keyboard.text(copy.buttons.withdrawal, 'su:topic:WITHDRAWAL').row();
+    keyboard.text(copy.buttons.agent, 'su:chat:OTHER').row();
+    keyboard.text(copy.buttons.back, 'su:faq');
     await sendScreen(ctx, body, keyboard);
     return;
   }
   if (data.startsWith('su:topic:')) {
     const topic = data.slice('su:topic:'.length);
     if (topic === 'DEPOSIT' || topic === 'WITHDRAWAL') {
-      await openTopic(ctx, locale, topic);
+      await openTopic(ctx, locale, player, topic);
+    }
+    return;
+  }
+  if (data.startsWith('su:tx:')) {
+    const [kind, id] = data.slice('su:tx:'.length).split(':');
+    if ((kind === 'DEP' || kind === 'WD') && id) {
+      await openTransaction(ctx, locale, player, kind, id);
+    }
+    return;
+  }
+  if (data.startsWith('su:report:')) {
+    const [kind, id] = data.slice('su:report:'.length).split(':');
+    if ((kind === 'DEP' || kind === 'WD') && id) {
+      await reportTransaction(ctx, player, locale, kind, id);
     }
     return;
   }
@@ -461,6 +673,14 @@ bot.on('message:text', async (ctx) => {
 
   const ticket = await findActiveSupportTicket(player.id);
   if (!ticket) {
+    if (/(deposit|ተቀማጭ|አስገባ)/i.test(text)) {
+      await openTopic(ctx, locale, player, 'DEPOSIT');
+      return;
+    }
+    if (/(withdraw|ወጪ|አውጣ|ማውጣት)/i.test(text)) {
+      await openTopic(ctx, locale, player, 'WITHDRAWAL');
+      return;
+    }
     await ctx.reply(supportCopy[locale].waitingHint);
     await openMenu(ctx, locale);
     return;

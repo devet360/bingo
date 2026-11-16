@@ -4,7 +4,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { fetchReferralOverview } from '@/lib/api';
 import { formatCredits, formatDateTime } from '@/lib/format';
 import { useI18n } from '@/lib/i18n';
-import { getTelegramWebApp } from '@/lib/telegram';
+import { haptic, shareLink } from '@/lib/telegram';
 import {
   Button,
   CopyButton,
@@ -45,10 +45,8 @@ export default function ReferralsPage() {
   const shareText = t('referrals.shareText', { code: overview.code });
   const share = () => {
     if (!overview.inviteLink) return;
-    const url = `https://t.me/share/url?url=${encodeURIComponent(overview.inviteLink)}&text=${encodeURIComponent(shareText)}`;
-    const app = getTelegramWebApp();
-    if (app?.openTelegramLink) app.openTelegramLink(url);
-    else window.open(url, '_blank', 'noreferrer');
+    haptic('tap');
+    shareLink(overview.inviteLink, shareText);
   };
 
   return (

@@ -170,3 +170,25 @@ Subline: `Prize pool {{AMOUNT}} credits`
    updated without regenerating art.
 4. Export WebP for the app (`public/`), PNG for print, and keep the seed + prompt in this
    file so the set can be regenerated consistently.
+
+---
+
+## 6. Generated set
+
+Masters live in `vibe_images/`; delivery-ready files in `marketing/`:
+
+| File | Size | Placement |
+| --- | --- | --- |
+| `bingo251-app-icon-1024.png` / `-512.png` | 1024², 512² | BotFather bot avatar, Mini App icon |
+| `bingo251-hero-poster-1024x1536.png` / `-1080x1620.png` | 2:3 | Feed post / channel post |
+| `bingo251-referral-poster-1024x1536.png` | 2:3 | Referral campaign feed post |
+| `bingo251-mini-app-preview-1792x1024.png` / `-640x360.png` | 16:9 | BotFather Mini App preview |
+| `bingo251-announcement-banner-1500x500.png` | 3:1 | Admin → Marketing banner (copy goes in the empty left half) |
+| `bingo251-popup-art-1200x675.png` | 16:9 | In-app popup artwork |
+
+Vector brand assets shipped with the web app:
+
+- `apps/web/public/brand/bingo251-logo.svg` — 512×512 rounded-square lockup, all
+  numerals outlined (no font dependency).
+- `apps/web/public/brand/tg-splash.svg` — Telegram splash logo: 512×512, exactly one
+  `<path>`, mint ring with solid “251”, nothing clipped.

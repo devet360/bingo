@@ -41,6 +41,12 @@ function systemTheme(): Theme {
   return window.matchMedia?.('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
 }
 
+function telegramTheme(): Theme | null {
+  const app = getTelegramWebApp();
+  if (!app?.colorScheme) return null;
+  return app.colorScheme === 'light' ? 'light' : 'dark';
+}
+
 function apply(theme: Theme): void {
   if (typeof document === 'undefined') return;
   document.documentElement.dataset.theme = theme;
@@ -49,6 +55,7 @@ function apply(theme: Theme): void {
   try {
     app?.setHeaderColor?.(CHROME[theme]);
     app?.setBackgroundColor?.(CHROME[theme]);
+    app?.setBottomBarColor?.(CHROME[theme]);
   } catch {
     // Older Telegram clients ignore unknown chrome colours.
   }
@@ -59,9 +66,34 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     const stored = readStored();
-    const initial = stored ?? systemTheme();
+    const initial = stored ?? telegramTheme() ?? systemTheme();
     setThemeState(initial);
     apply(initial);
+  }, []);
+
+  // Until the player picks a theme themselves, keep following the Telegram
+  // client so system dark/light switches do not leave the Mini App mismatched.
+  useEffect(() => {
+    const app = getTelegramWebApp();
+    if (!app) return;
+    const sync = () => {
+      if (readStored()) return;
+      const next = telegramTheme() ?? systemTheme();
+      setThemeState(next);
+      apply(next);
+    };
+    try {
+      app.onEvent?.('themeChanged', sync);
+    } catch {
+      // Older clients do not emit themeChanged.
+    }
+    return () => {
+      try {
+        app.offEvent?.('themeChanged', sync);
+      } catch {
+        // Nothing to unsubscribe from.
+      }
+    };
   }, []);
 
   const setTheme = useCallback((next: Theme) => {

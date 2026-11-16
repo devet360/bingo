@@ -1,13 +1,14 @@
 'use client';
 
 import Link from 'next/link';
-import { usePathname } from 'next/navigation';
+import { usePathname, useRouter } from 'next/navigation';
 import { useState, type FormEvent, type ReactNode } from 'react';
 import { changePassword, ApiError } from '@/lib/api';
 import { formatStake, initials } from '@/lib/format';
 import { useI18n } from '@/lib/i18n';
 import { getRuntimeConfig } from '@/lib/runtime-config';
-import { getTelegramWebApp } from '@/lib/telegram';
+import { haptic, hapticSelection, openExternalLink } from '@/lib/telegram';
+import { useTelegramBackButton } from '@/lib/telegram-hooks';
 import { useTheme } from '@/lib/theme';
 import { CampaignBanners, CampaignPopup } from './campaigns';
 import { LoginPanel } from './login';
@@ -90,7 +91,10 @@ function ThemeToggle() {
   return (
     <button
       type="button"
-      onClick={toggle}
+      onClick={() => {
+        hapticSelection();
+        toggle();
+      }}
       className="flex h-7 w-7 items-center justify-center rounded-full border border-line text-muted transition hover:text-text"
       aria-label={t('common.theme')}
       title={theme === 'dark' ? t('common.themeLight') : t('common.themeDark')}
@@ -192,10 +196,8 @@ function VerifyPhoneBanner() {
   const { t } = useI18n();
   const botUsername = getRuntimeConfig().botUsername;
   const open = () => {
-    const url = `https://t.me/${botUsername}?start=verify`;
-    const app = getTelegramWebApp();
-    if (app?.openTelegramLink) app.openTelegramLink(url);
-    else window.open(url, '_blank', 'noreferrer');
+    haptic('tap');
+    openExternalLink(`https://t.me/${botUsername}?start=verify`);
   };
   return (
     <div className="mb-3 flex flex-col gap-2 rounded-2xl border border-gold/30 bg-gold/10 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
@@ -215,7 +217,15 @@ export function Shell({ children }: { children: ReactNode }) {
   const { status, user, wallet, agent, isTelegram, logout } = useSession();
   const { t, lang, setLang } = useI18n();
   const pathname = usePathname();
+  const router = useRouter();
   const [menuOpen, setMenuOpen] = useState(false);
+
+  // Rooms open from the lobby; Telegram's native back button should return
+  // there instead of leaving the Mini App.
+  useTelegramBackButton(() => {
+    haptic('tap');
+    router.push('/');
+  }, pathname.startsWith('/room/'));
 
   if (status === 'loading') {
     return (
@@ -266,7 +276,10 @@ export function Shell({ children }: { children: ReactNode }) {
   const homeHref = isAdmin ? '/admin' : isSupport ? '/support' : agent ? '/agent' : '/';
 
   return (
-    <div className={cn('min-h-dvh', inRoom ? 'pb-2' : adminArea ? 'pb-6' : 'pb-20')}>
+    <div
+      className={cn('min-h-dvh', inRoom ? 'pb-2' : adminArea ? 'pb-6' : 'pb-20')}
+      style={{ minHeight: 'var(--tg-viewport-height, 100dvh)' }}
+    >
       {inRoom ? null : (
       <header className="sticky top-0 z-30 border-b border-line/60 bg-ink/85 backdrop-blur">
         <div
@@ -281,7 +294,10 @@ export function Shell({ children }: { children: ReactNode }) {
             <ThemeToggle />
             <button
               type="button"
-              onClick={() => setLang(lang === 'en' ? 'am' : 'en')}
+              onClick={() => {
+                hapticSelection();
+                setLang(lang === 'en' ? 'am' : 'en');
+              }}
               className="rounded-full border border-line px-2.5 py-1 text-[10px] font-bold uppercase tracking-wide text-muted hover:text-text"
               aria-label={t('common.language')}
             >
@@ -360,7 +376,10 @@ export function Shell({ children }: { children: ReactNode }) {
                       <button
                         key={code}
                         type="button"
-                        onClick={() => setLang(code)}
+                        onClick={() => {
+                          hapticSelection();
+                          setLang(code);
+                        }}
                         className={cn(
                           'flex-1 rounded-lg px-2 py-1 text-[10px] font-bold uppercase',
                           lang === code ? 'bg-raised text-text' : 'text-muted',
@@ -413,6 +432,7 @@ export function Shell({ children }: { children: ReactNode }) {
                 <Link
                   key={item.href}
                   href={item.href}
+                  onClick={() => hapticSelection()}
                   className={cn(
                     'flex flex-1 flex-col items-center gap-0.5 py-1.5 text-[9px] font-semibold uppercase tracking-wide transition',
                     active ? 'text-mint' : 'text-muted hover:text-text',

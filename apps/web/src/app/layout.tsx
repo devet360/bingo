@@ -11,7 +11,7 @@ export const metadata: Metadata = {
   title: 'Bingo 251',
   description: 'Live 75-ball and 90-ball bingo for Ethiopia — agent cash-in, cash-out and instant payouts.',
   applicationName: 'Bingo 251',
-  icons: { icon: '/icon.svg' },
+  icons: { icon: '/icon.svg', apple: '/apple-touch-icon.png' },
 };
 
 export const viewport: Viewport = {

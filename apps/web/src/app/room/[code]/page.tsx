@@ -18,11 +18,17 @@ import { useI18n } from '@/lib/i18n';
 import { useNow } from '@/lib/useNow';
 import { useRoomLive } from '@/lib/useRoom';
 import {
+  confirmAction,
   getFullscreenState,
+  getTelegramWebApp,
+  haptic,
+  hapticImpact,
+  hapticSelection,
   subscribeFullscreen,
   supportsFullscreen,
   toggleFullscreen,
 } from '@/lib/telegram';
+import { useTelegramClosingConfirmation, useTelegramMainButton } from '@/lib/telegram-hooks';
 import { useSession } from '@/components/session';
 import { CardBoard } from '@/components/game/board';
 import { Button, EmptyState, ErrorNote, Panel, Pill, Spinner, cn } from '@/components/ui';
@@ -97,8 +103,19 @@ function BuyPanel({
   );
 
   const purchase = async () => {
-    setBusy(true);
+    if (!selling || !affordable) return;
     setError(null);
+    const confirmed = await confirmAction({
+      title: t('room.buyConfirmTitle'),
+      message: t('room.buyConfirmBody', {
+        count: quantity,
+        amount: formatCredits(cost.toString()),
+      }),
+      confirmText: t('room.buyConfirmAction'),
+      cancelText: t('common.cancel'),
+    });
+    if (!confirmed) return;
+    setBusy(true);
     try {
       const result = await buyCards({
         roomCode,
@@ -107,14 +124,35 @@ function BuyPanel({
         idempotencyKey: idempotency.current,
       });
       idempotency.current = newIdempotencyKey('buy');
+      haptic('success');
       onBought(result.cards);
       void refreshWallet();
     } catch (cause) {
+      haptic('error');
       setError(cause instanceof ApiError ? cause.message : t('room.purchaseFailed'));
     } finally {
       setBusy(false);
     }
   };
+
+  const [nativeButton, setNativeButton] = useState(false);
+  useEffect(() => {
+    setNativeButton(Boolean(getTelegramWebApp()));
+  }, []);
+
+  const buyLabel = selling
+    ? quantity === 1
+      ? t('room.buyOne')
+      : t('room.buyMany', { count: quantity })
+    : t('room.salesClosedButton');
+
+  useTelegramMainButton({
+    text: buyLabel,
+    onClick: () => void purchase(),
+    visible: nativeButton && selling,
+    enabled: selling && affordable && !busy,
+    progress: busy,
+  });
 
   return (
     <Panel className="p-4">
@@ -141,7 +179,10 @@ function BuyPanel({
             key={value}
             type="button"
             disabled={!selling}
-            onClick={() => setQuantity(value)}
+            onClick={() => {
+              hapticSelection();
+              setQuantity(value);
+            }}
             className={cn(
               'rounded-xl border py-2.5 font-display text-base font-bold transition disabled:opacity-40',
               quantity === value
@@ -186,19 +227,17 @@ function BuyPanel({
         </div>
       ) : null}
 
-      <Button
-        className="mt-3 w-full"
-        size="lg"
-        loading={busy}
-        disabled={!selling || !affordable}
-        onClick={() => void purchase()}
-      >
-        {selling
-          ? quantity === 1
-            ? t('room.buyOne')
-            : t('room.buyMany', { count: quantity })
-          : t('room.salesClosedButton')}
-      </Button>
+      {nativeButton ? null : (
+        <Button
+          className="mt-3 w-full"
+          size="lg"
+          loading={busy}
+          disabled={!selling || !affordable}
+          onClick={() => void purchase()}
+        >
+          {buyLabel}
+        </Button>
+      )}
     </Panel>
   );
 }
@@ -681,6 +720,13 @@ export default function RoomPage() {
     return subscribeFullscreen(() => setFullscreen(getFullscreenState()));
   }, []);
 
+  useTelegramClosingConfirmation(
+    round?.status === 'LOCKED' ||
+      round?.status === 'PLAYING' ||
+      round?.status === 'CLAIM_VERIFICATION' ||
+      round?.status === 'RUNNER_UP',
+  );
+
   const deadline = useMemo(
     () => phaseDeadline(round, { lockWindowSecs: room?.timings.lockWindowSecs }),
     [round, room?.timings.lockWindowSecs],
@@ -695,6 +741,8 @@ export default function RoomPage() {
     setClaimNotice(null);
     try {
       const result = await submitClaim({ roundId: round.id, cardId: card.id, pattern });
+      const rejected = result.status === 'INVALID';
+      haptic(rejected ? 'warning' : 'success');
       setClaimNotice({
         tone: 'mint',
         text:
@@ -705,6 +753,7 @@ export default function RoomPage() {
             : t('room.claimSubmitted'),
       });
     } catch (cause) {
+      haptic('error');
       setClaimNotice({
         tone: 'danger',
         text: cause instanceof ApiError ? cause.message : t('room.claimFailed'),
@@ -715,6 +764,7 @@ export default function RoomPage() {
   };
 
   const toggleMark = (card: Card, value: number) => {
+    hapticSelection();
     setManualMarks((current) => {
       const marks = current[card.id] ?? [];
       return {
@@ -728,10 +778,12 @@ export default function RoomPage() {
 
   const press = async (card: Card) => {
     if (!round) return;
+    hapticImpact('heavy');
     setPressing(card.id);
     setClaimNotice(null);
     try {
       const result = await submitClaim({ roundId: round.id, cardId: card.id });
+      haptic(result.status === 'INVALID' ? 'warning' : 'success');
       setClaimNotice({
         tone: result.status === 'INVALID' ? 'danger' : 'mint',
         text:
@@ -744,6 +796,7 @@ export default function RoomPage() {
       await requestRoundView(round.id);
       void refreshRoom();
     } catch (cause) {
+      haptic('error');
       setClaimNotice({
         tone: 'danger',
         text: cause instanceof ApiError ? cause.message : t('room.pressFailed'),
@@ -765,8 +818,10 @@ export default function RoomPage() {
         text: t('room.cardsAdded', { count: added.length }),
       });
       setAddQuantity(1);
+      haptic('success');
       void refreshRoom();
     } catch (cause) {
+      haptic('error');
       setMainNotice({
         tone: 'danger',
         text: cause instanceof ApiError ? cause.message : t('room.addFailed'),
@@ -790,9 +845,11 @@ export default function RoomPage() {
       const updated = new Map(result.cards.map((card) => [card.id, card]));
       setCards((current) => current.map((card) => updated.get(card.id) ?? card));
       setMainNotice({ tone: 'mint', text: t('room.registered') });
+      haptic('success');
       void refreshWallet();
       void refreshRoom();
     } catch (cause) {
+      haptic('error');
       setMainNotice({
         tone: 'danger',
         text: cause instanceof ApiError ? cause.message : t('room.registerFailed'),
