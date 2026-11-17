@@ -36,7 +36,6 @@ console.log('games-provider: boot drain', await outbox.drainOnce(new Date()));
 console.log('games-provider: boot recovery', await runRecovery({ store, wallet }));
 // §5.3.4: every recovery rollback is enqueued now; attempt them before the loop.
 console.log('games-provider: recovery drain', await outbox.drainOnce(new Date()));
-outbox.start(1000);
 
 const stranded = {
   dead: await store.countOutboxByStatus('DEAD'),
@@ -68,6 +67,8 @@ socket = attachSocket({ server, store, engine });
 
 await new Promise<void>((resolve) => server.listen(config.port, resolve));
 console.log(`games-provider: listening on ${config.port}`);
+// §5.3: the background loop starts only once the port is open.
+outbox.start(1000);
 await engine.start();
 
 let shuttingDown = false;

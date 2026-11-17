@@ -79,12 +79,13 @@ try {
     serverSeedHash: sha256Hex(serverSeed),
     startedAt: at,
   });
+  const stake = config.limits.minStake;
   const bet = await store.insertBet({
     roundId: round.id,
     operatorCode: session.operatorCode,
     sessionToken: session.token,
     panel: 0,
-    stake: config.limits.minStake,
+    stake,
     autoCashout: null,
     status: 'ACTIVE',
     cashoutMultiplier: null,
@@ -110,7 +111,14 @@ try {
   const rollback = due.find((row) => row.txnId === bet.betTxnId);
   if (rollback === undefined) throw new Error(`no due outbox row for bet txn ${bet.betTxnId}`);
   check(rollback.type === 'ROLLBACK', `outbox row for bet txn ${bet.betTxnId} is ${rollback.type}`);
-  check(rollback.status === 'PENDING', `outbox row for bet txn ${bet.betTxnId} is ${rollback.status}`);
+  check(
+    rollback.amount === stake,
+    `outbox row for bet txn ${bet.betTxnId} refunds ${rollback.amount}, expected the stake ${stake}`,
+  );
+  check(
+    rollback.sessionToken === session.token,
+    `outbox row for bet txn ${bet.betTxnId} targets session ${rollback.sessionToken}, expected ${session.token}`,
+  );
   // Never call bingo for a fake session: close the row as a labelled tombstone.
   await store.markOutbox(rollback.id, 'SENT', 'SMOKE_TEST');
 

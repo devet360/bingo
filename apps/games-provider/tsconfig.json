@@ -13,6 +13,6 @@
     "baseUrl": ".",
     "paths": { "@/*": ["./*"] }
   },
-  "include": ["server.ts", "src", "tests", "vite.config.ts", "drizzle.config.ts"],
+  "include": ["server.ts", "src", "tests", "scripts", "vite.config.ts", "drizzle.config.ts"],
   "exclude": ["dist"]
 }

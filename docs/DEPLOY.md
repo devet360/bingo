@@ -407,10 +407,12 @@ Register the provider in the bingo admin (**Admin → Providers**):
 3. Enable both. Players then get the crash game in the Mini App lobby.
 
 Smoke test (writes rows, so it demands confirmation; recovery is global, so run it
-before the provider is opened to players or against a staging database):
+before the provider is opened to players or against a staging database). A one-off
+`dokku run` container gets no port mapping and can be handed `PORT=0`, which the
+config rejects, so pass a real port explicitly:
 
 ```bash
-dokku run bingo-crash env SMOKE_CONFIRM=yes npm run games:smoke
+dokku run bingo-crash env PORT=3001 SMOKE_CONFIRM=yes npm run games:smoke
 ```
 
 Keep `web=1`. Round timers live in the process, the outbox has no claim lease and socket
