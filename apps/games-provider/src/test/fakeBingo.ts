@@ -269,9 +269,10 @@ export async function createFakeBingo(options: FakeBingoOptions): Promise<FakeBi
           : null;
       const original = originalKey ? movements.get(originalKey) : undefined;
       if (!original) {
-        // Bingo answers 404 when the referenced movement was never applied.
+        // Bingo answers 404 NOT_FOUND when the referenced movement was never applied;
+        // ROLLBACK_INVALID is reserved for a non-reversible original (409).
         record({ type, status: 404, signatureValid: true, txnId, replayed: false });
-        sendError(res, 404, 'ROLLBACK_INVALID', 'Original transaction not found');
+        sendError(res, 404, 'NOT_FOUND', 'Original transaction not found');
         return;
       }
       if (original.amount !== amount) {

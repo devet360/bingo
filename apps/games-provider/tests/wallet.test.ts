@@ -53,6 +53,23 @@ test('a replayed bet is reported as replayed and does not double-debit', async (
   await fake.close();
 });
 
+test('rolling back an unapplied txnId surfaces a 404 NOT_FOUND WalletError', async () => {
+  const fake = await createFakeBingo({ hmacSecret: SECRET, balance: 10_000n, currency: 'ETB' });
+  const client = await clientFor(fake);
+  await assert.rejects(
+    client.rollback({
+      sessionToken: fake.token,
+      txnId: '44444444-4444-4444-8444-444444444444',
+      amount: 500n,
+      roundId: '1',
+    }),
+    (error: unknown) =>
+      error instanceof WalletError && error.status === 404 && error.code === 'NOT_FOUND',
+  );
+  assert.equal(fake.state().balance, 10_000n);
+  await fake.close();
+});
+
 test('timeouts become a TIMEOUT WalletError', async () => {
   const fake = await createFakeBingo({ hmacSecret: SECRET, balance: 10_000n, currency: 'ETB', betDelayMs: 200 });
   const client = new HttpWalletClient({ callbackUrl: `${fake.url}/api/games/callback/stratos`, hmacSecret: SECRET, timeoutMs: 30 });
