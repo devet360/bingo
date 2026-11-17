@@ -28,6 +28,7 @@ function betManagerStub(overrides: Partial<RoundBetManager> = {}): RoundBetManag
     cancel: async () => undefined,
     cashout: async () => undefined,
     settleRound: async () => undefined,
+    processAutoCashouts: async () => undefined,
     ...overrides,
   };
 }

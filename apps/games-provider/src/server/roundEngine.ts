@@ -47,10 +47,11 @@ export interface RoundBetManager {
   }): Promise<void>;
   settleRound(input: { round: RoundRecord; maxWin: bigint }): Promise<void>;
   /**
-   * Called on every FLYING tick, including the crash tick, before the tick event.
-   * Optional so existing seams keep typechecking.
+   * Called on every FLYING tick, including the crash tick, before the tick
+   * event. Required: an implementation that skips the sweep would silently
+   * leave every auto-cashout bet to crash.
    */
-  processAutoCashouts?(input: {
+  processAutoCashouts(input: {
     round: RoundRecord;
     multiplier: number;
     elapsedMs: number;
@@ -315,9 +316,10 @@ export class RoundEngine {
         const elapsedMs = this.phaseElapsedMs();
         // Computed before the crash check so the auto-cashout sweep also runs on
         // the crash tick with the final multiplier, exactly like the prototype;
-        // the sweep itself guards `autoCashout < round.crashPoint`.
+        // the sweep itself refuses to fire once the multiplier reaches the
+        // crash point (`autoCashout < crashPoint`, `multiplier < crashPoint`).
         const multiplier = multiplierAtElapsedMs(elapsedMs);
-        if (elapsedMs > 0 && this.betManager?.processAutoCashouts) {
+        if (elapsedMs > 0 && this.betManager) {
           try {
             await this.betManager.processAutoCashouts({ round, multiplier, elapsedMs });
           } catch (error) {
