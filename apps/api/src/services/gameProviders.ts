@@ -20,7 +20,7 @@ import {
   rollbackLedgerKey,
   verifyCallbackSignature,
 } from '../lib/providerCallback';
-import { buildBalanceReply, buildLaunchUrl, withBalance } from '../lib/providerContract';
+import { buildBalanceReply, buildLaunchUrl, movementRequiresOpenSession, withBalance } from '../lib/providerContract';
 import { postLedger } from './ledger';
 import { getConfig } from './config';
 import { runTransaction, withTxRetry } from '../lib/tx';
@@ -618,7 +618,8 @@ export async function handleProviderCallback(input: {
       },
     });
     if (!session || session.providerId !== provider.id) throw Errors.notFound('Game session');
-    if (session.status !== 'OPEN' || session.expiresAt <= new Date()) {
+    const sessionOpen = session.status === 'OPEN' && session.expiresAt > new Date();
+    if (movementRequiresOpenSession(payload.type) && !sessionOpen) {
       throw Errors.conflict('Game session is closed', 'SESSION_CLOSED');
     }
     if (session.user.status !== 'ACTIVE') {

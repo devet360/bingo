@@ -33,6 +33,7 @@ export interface Store {
   updateBet(id: string, patch: Partial<Pick<BetRecord, 'status' | 'cashoutMultiplier' | 'payout' | 'winTxnId' | 'settledAt'>>): Promise<void>;
   getBet(roundId: number, sessionToken: string, panel: 0 | 1): Promise<BetRecord | null>;
   listBetsForRound(roundId: number): Promise<BetRecord[]>;
+  countBetsForRound(roundId: number): Promise<number>;
   listUnsettledBets(): Promise<BetRecord[]>;
   /**
    * Terminal bets whose wallet reconciliation row was never written: a CASHED

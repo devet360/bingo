@@ -1,6 +1,6 @@
 import type { Lang } from './types';
 
-const en = {
+export const en = {
   balance: 'Balance',
   bet: 'Bet',
   cancel: 'Cancel',
@@ -14,6 +14,13 @@ const en = {
   lost: 'Lost',
   cancelled: 'Cancelled — stake refunded',
   rejected: 'Bet rejected',
+  actionFailed: 'That action failed — try again',
+  bettingClosed: 'Betting is closed for this round',
+  stakeOutOfRange: 'Stake is outside the allowed limits',
+  autoCashoutInvalid: 'Auto cash out must be at least 1.00x',
+  roundBetLimit: 'This round is full — try again next round',
+  noActiveBet: 'No active bet to settle',
+  roundNotFlying: 'The round is not flying yet',
   unresolved: 'Awaiting settlement',
   sessionEnded: 'Session ended',
   sessionEndedBody: 'Your game session is closed. Return to the lobby to play again.',
@@ -65,6 +72,13 @@ const am: Record<keyof typeof en, string> = {
   lost: 'ተሸንፈዋል',
   cancelled: 'ተሰርዟል — ውርርዱ ተመላሽ ሆኗል',
   rejected: 'ውርርድ ተቀባይነት አላገኘም',
+  actionFailed: 'ይህ እርምጃ አልተሳካም — እንደገና ይሞክሩ',
+  bettingClosed: 'በዚህ ዙር ውርርድ ተዘግቷል',
+  stakeOutOfRange: 'የውርርድ መጠኑ ከተፈቀደው ክልል ውጭ ነው',
+  autoCashoutInvalid: 'ራስ-ሰር ውጣት ቢያንስ 1.00x መሆን አለበት',
+  roundBetLimit: 'ይህ ዙር ሙሉ ነው — በሚቀጥለው ዙር ይሞክሩ',
+  noActiveBet: 'ለመክፈል ንቁ ውርርድ የለም',
+  roundNotFlying: 'ዙሩ ገና በበረራ ላይ አይደለም',
   unresolved: 'ውጤቱ በመጠባበቅ ላይ',
   sessionEnded: 'ክፍለ ጊዜው አብቅቷል',
   sessionEndedBody: 'የጨዋታ ክፍለ ጊዜዎ ተዘግቷል። ለመጫወት ወደ መግቢያው ይመለሱ።',
@@ -103,6 +117,7 @@ const am: Record<keyof typeof en, string> = {
 };
 
 export const strings: Record<Lang, Record<string, string>> = { en, am };
+
 export function t(lang: Lang, key: keyof typeof en): string {
   return strings[lang][key];
 }

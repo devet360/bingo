@@ -7,7 +7,7 @@ import { createPostgresStore } from './src/db/storePostgres';
 import { BetManager } from './src/server/betManager';
 import { createApp } from './src/server/http';
 import { OutboxWorker } from './src/server/outbox';
-import { runRecovery } from './src/server/recovery';
+import { reconcileUnresolvedBets, RECONCILE_INTERVAL_MS, runRecovery } from './src/server/recovery';
 import { RoundEngine } from './src/server/roundEngine';
 import { attachSocket, type SocketHandle } from './src/server/socket';
 import { HttpWalletClient } from './src/server/wallet';
@@ -76,6 +76,23 @@ console.log(`games-provider: listening on ${config.port}`);
 outbox.start(1000);
 await engine.start();
 
+// Runtime sweep for bets stranded by a flaky wallet; boot recovery only runs
+// at process start, so without this an UNRESOLVED bet waits for a restart.
+let reconciling = false;
+const reconcileTimer = setInterval(() => {
+  if (reconciling) return;
+  reconciling = true;
+  void reconcileUnresolvedBets({ store, wallet })
+    .then((resolved) => {
+      if (resolved > 0) console.log(`games-provider: reconciled ${resolved} unresolved bets`);
+    })
+    .catch((error: unknown) => console.error('games-provider: reconcile sweep failed', error))
+    .finally(() => {
+      reconciling = false;
+    });
+}, RECONCILE_INTERVAL_MS);
+reconcileTimer.unref();
+
 let shuttingDown = false;
 async function shutdown(signal: string): Promise<void> {
   if (shuttingDown) return;
@@ -83,6 +100,7 @@ async function shutdown(signal: string): Promise<void> {
   console.log(`games-provider: ${signal}, shutting down`);
   engine.stop(); // no new rounds, no new ticks
   outbox.stop();
+  clearInterval(reconcileTimer);
   await socket?.close(); // terminates live clients so server.close can finish
   await new Promise<void>((resolve) => server.close(() => resolve()));
   await database.close();

@@ -15,6 +15,18 @@ export function buildLaunchUrl(template: string | null, ctx: LaunchContext): str
     .replaceAll('{currency}', encodeURIComponent(ctx.currency));
 }
 
+export type ProviderMovementType = 'balance' | 'bet' | 'win' | 'rollback';
+
+/**
+ * Reads and new debits need a live launch session. Settlements (win/rollback)
+ * are movements of money the round already committed, so they must land even
+ * after the session was closed or its launch TTL expired -- rejecting them
+ * would silently forfeit a player's win or refund.
+ */
+export function movementRequiresOpenSession(type: ProviderMovementType): boolean {
+  return type === 'balance' || type === 'bet';
+}
+
 export interface BalanceReplyInput {
   secret: string;
   sessionId: string;

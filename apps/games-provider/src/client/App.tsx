@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { exitGame, installBridge } from './bridge';
-import { t } from './i18n';
+import { en, t } from './i18n';
 import { money, BetPanel } from './components/BetPanel';
 import { FlightCanvas } from './components/FlightCanvas';
 import { ProvablyFairModal } from './components/ProvablyFairModal';
@@ -18,6 +18,16 @@ function readLang(): Lang {
   const value = new URLSearchParams(window.location.search).get('lang');
   return value === 'am' ? 'am' : 'en';
 }
+
+// The server message is a dev fallback: players only ever see a localized rule.
+const ERROR_KEYS: Record<string, keyof typeof en> = {
+  BETTING_CLOSED: 'bettingClosed',
+  STAKE_OUT_OF_RANGE: 'stakeOutOfRange',
+  AUTO_CASHOUT_INVALID: 'autoCashoutInvalid',
+  ROUND_BET_LIMIT: 'roundBetLimit',
+  NO_ACTIVE_BET: 'noActiveBet',
+  ROUND_NOT_FLYING: 'roundNotFlying',
+};
 
 const EndedScreen: React.FC<{ lang: Lang; body?: string }> = ({ lang, body }) => (
   <div className="min-h-dvh bg-[var(--g-bg)] text-[var(--g-text)] flex flex-col items-center justify-center gap-3 px-6 text-center">
@@ -132,7 +142,7 @@ const GameScreen: React.FC<{ token: string; session: HandshakeData; lang: Lang }
       )}
       {socket.lastError && (
         <div className="mx-3 mb-2 rounded-lg bg-rose-950/70 border border-rose-500/40 px-3 py-1.5 text-xs text-rose-200">
-          {socket.lastError.message}
+          {t(lang, ERROR_KEYS[socket.lastError.code] ?? 'actionFailed')}
         </div>
       )}
 

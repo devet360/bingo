@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { runRecovery } from '../src/server/recovery';
+import { reconcileUnresolvedBets, runRecovery } from '../src/server/recovery';
 import {
   WalletError,
   type MovementInput,
@@ -367,4 +367,97 @@ test('a second recovery pass on the same store is a clean no-op', async () => {
     repairedSettlements: 0,
   });
   assert.deepEqual(store.dump(), settled);
+});
+
+test('the runtime sweep refunds an UNRESOLVED bet the wallet now accepts', async () => {
+  const { store, wallet, replays } = fixture();
+  const round = await store.createRound({ serverSeed: 's', serverSeedHash: 'h', startedAt: AT });
+  const unresolved = await seedBet(store, {
+    roundId: round.id, sessionToken: token(1), stake: 600n, status: 'UNRESOLVED', betTxnId: txn(1),
+  });
+
+  assert.equal(await reconcileUnresolvedBets({ store, wallet, now }), 1);
+
+  // The original txn id is replayed, so bingo dedupes a second sweep.
+  assert.equal(replays.length, 1);
+  assert.equal(replays[0]!.txnId, unresolved.betTxnId);
+  const resolved = betByTxn(store, unresolved.betTxnId);
+  assert.equal(resolved.status, 'CANCELLED');
+  assert.equal(resolved.settledAt?.getTime(), now().getTime());
+  const rows = outboxFor(store, 'ROLLBACK', unresolved.betTxnId);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]!.amount, 600n);
+  assert.equal(rows[0]!.sessionToken, unresolved.sessionToken);
+});
+
+test('the runtime sweep leaves an UNRESOLVED bet alone while the wallet still fails', async () => {
+  const { store, wallet } = fixture({
+    bet: async () => { throw new WalletError(500, 'WALLET_HTTP_ERROR', 'boom'); },
+  });
+  const round = await store.createRound({ serverSeed: 's', serverSeedHash: 'h', startedAt: AT });
+  const unresolved = await seedBet(store, {
+    roundId: round.id, sessionToken: token(1), stake: 600n, status: 'UNRESOLVED', betTxnId: txn(1),
+  });
+
+  assert.equal(await reconcileUnresolvedBets({ store, wallet, now }), 0);
+
+  const bet = betByTxn(store, unresolved.betTxnId);
+  assert.equal(bet.status, 'UNRESOLVED');
+  assert.equal(bet.settledAt, null);
+  assert.equal(store.dump().outbox.length, 0);
+});
+
+test('the runtime sweep never touches an ACTIVE bet in a live round', async () => {
+  const { store, wallet, replays } = fixture();
+  const round = await store.createRound({ serverSeed: 's', serverSeedHash: 'h', startedAt: AT });
+  await store.startFlight(round.id, { crashPoint: 2.5, clientSeedComposite: 'composite', at: AT });
+  const active = await seedBet(store, {
+    roundId: round.id, sessionToken: token(1), stake: 900n, status: 'ACTIVE', betTxnId: txn(1),
+  });
+
+  assert.equal(await reconcileUnresolvedBets({ store, wallet, now }), 0);
+
+  assert.equal(replays.length, 0);
+  assert.equal(betByTxn(store, active.betTxnId).status, 'ACTIVE');
+  assert.equal(store.dump().outbox.length, 0);
+});
+
+test('running the runtime sweep twice does not roll back twice', async () => {
+  const { store, wallet, replays } = fixture();
+  const round = await store.createRound({ serverSeed: 's', serverSeedHash: 'h', startedAt: AT });
+  const unresolved = await seedBet(store, {
+    roundId: round.id, sessionToken: token(1), stake: 600n, status: 'UNRESOLVED', betTxnId: txn(1),
+  });
+
+  assert.equal(await reconcileUnresolvedBets({ store, wallet, now }), 1);
+  assert.equal(await reconcileUnresolvedBets({ store, wallet, now }), 0);
+
+  assert.equal(replays.length, 1);
+  assert.equal(outboxFor(store, 'ROLLBACK', unresolved.betTxnId).length, 1);
+  assert.equal(store.dump().outbox.length, 1);
+});
+
+test('an UNRESOLVED bet in a crashed round is refunded while its ACTIVE neighbour is lost', async () => {
+  const { store, wallet } = fixture();
+  const round = await store.createRound({ serverSeed: 's', serverSeedHash: 'h', startedAt: AT });
+  await store.startFlight(round.id, { crashPoint: 1.5, clientSeedComposite: 'composite', at: AT });
+  await store.finishRound(round.id, { status: 'CRASHED', at: AT });
+  const unresolved = await seedBet(store, {
+    roundId: round.id, sessionToken: token(1), stake: 600n, status: 'UNRESOLVED', betTxnId: txn(1),
+  });
+  const active = await seedBet(store, {
+    roundId: round.id, sessionToken: token(2), stake: 700n, status: 'ACTIVE', betTxnId: txn(2),
+  });
+
+  const summary = await runRecovery({ store, wallet, now });
+
+  assert.equal(summary.resolvedIndeterminate, 1);
+  assert.equal(summary.lostBets, 1);
+  // Never joined the round: refund, don't mark LOST.
+  const refunded = betByTxn(store, unresolved.betTxnId);
+  assert.equal(refunded.status, 'CANCELLED');
+  assert.equal(outboxFor(store, 'ROLLBACK', unresolved.betTxnId).length, 1);
+  // The ACTIVE bet did join the round, so the crash decides it.
+  assert.equal(betByTxn(store, active.betTxnId).status, 'LOST');
+  assert.equal(outboxFor(store, 'ROLLBACK', active.betTxnId).length, 0);
 });

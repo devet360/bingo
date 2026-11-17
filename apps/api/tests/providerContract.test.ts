@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
-import { buildBalanceReply, buildLaunchUrl, withBalance } from '../src/lib/providerContract';
+import { buildBalanceReply, buildLaunchUrl, movementRequiresOpenSession, withBalance } from '../src/lib/providerContract';
 
 test('launch url substitutes the real currency, not the legacy CREDIT literal', () => {
   const url = buildLaunchUrl('https://crash.example/play?token={token}&lang={lang}&currency={currency}', {
@@ -67,4 +67,11 @@ test('withBalance appends the post-movement balance as a string', () => {
     replayed: false,
     balance: '900',
   });
+});
+
+test('settlements do not require an open session but reads and debits do', () => {
+  assert.equal(movementRequiresOpenSession('win'), false);
+  assert.equal(movementRequiresOpenSession('rollback'), false);
+  assert.equal(movementRequiresOpenSession('bet'), true);
+  assert.equal(movementRequiresOpenSession('balance'), true);
 });

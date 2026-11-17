@@ -19,6 +19,14 @@ export interface BetManagerDeps {
 
 type Panel = 0 | 1;
 
+/** A player-facing rejection: the socket forwards `code` so the client can localize. */
+export class BetRuleError extends Error {
+  constructor(readonly code: string, message: string) {
+    super(message);
+    this.name = 'BetRuleError';
+  }
+}
+
 /**
  * Bet state machine.
  *
@@ -56,16 +64,20 @@ export class BetManager implements RoundBetManager {
     const { round, session, panel, stake, autoCashout } = input;
     // The engine can still hand us a round during the CRASHED cooldown, so the
     // phase gate is authoritative here, not the caller.
-    if (round.status !== 'BETTING') throw new Error('Betting is closed');
-    if (stake < this.limits.minStake || stake > this.limits.maxStake) {
-      throw new Error('Stake outside limits');
+    if (round.status !== 'BETTING') throw new BetRuleError('BETTING_CLOSED', 'Betting is closed');
+    // The operator-signed session limits are the effective ones; handshake
+    // already falls back to config when the wallet reply omits them.
+    if (stake < session.minStake || stake > session.maxStake) {
+      throw new BetRuleError('STAKE_OUT_OF_RANGE', 'Stake outside limits');
     }
-    if (autoCashout !== null && autoCashout < 1) throw new Error('Invalid auto cashout');
+    if (autoCashout !== null && autoCashout < 1) {
+      throw new BetRuleError('AUTO_CASHOUT_INVALID', 'Invalid auto cashout');
+    }
 
     const existing = await this.store.getBet(round.id, session.token, panel);
     if (existing) return existing; // idempotent frame replay
-    if ((await this.store.listBetsForRound(round.id)).length >= this.limits.maxBetsPerRound) {
-      throw new Error('Round bet limit reached');
+    if ((await this.store.countBetsForRound(round.id)) >= this.limits.maxBetsPerRound) {
+      throw new BetRuleError('ROUND_BET_LIMIT', 'Round bet limit reached');
     }
 
     const bet = await this.store.insertBet({
@@ -113,9 +125,11 @@ export class BetManager implements RoundBetManager {
 
   async cancel(input: { round: RoundRecord; session: SessionRecord; panel: Panel }): Promise<void> {
     const { round, session, panel } = input;
-    if (round.status !== 'BETTING') throw new Error('Betting is closed');
+    if (round.status !== 'BETTING') throw new BetRuleError('BETTING_CLOSED', 'Betting is closed');
     const bet = await this.store.getBet(round.id, session.token, panel);
-    if (bet === null || bet.status !== 'ACTIVE') throw new Error('No active bet for this round');
+    if (bet === null || bet.status !== 'ACTIVE') {
+      throw new BetRuleError('NO_ACTIVE_BET', 'No active bet for this round');
+    }
 
     await this.store.updateBet(bet.id, { status: 'CANCELLED', settledAt: this.now() });
     // Roll back the exact charge: the placement's own txn id and stake.
@@ -135,9 +149,11 @@ export class BetManager implements RoundBetManager {
     multiplier: number;
   }): Promise<void> {
     const { round, session, panel, multiplier } = input;
-    if (round.status !== 'FLYING') throw new Error('Round is not flying');
+    if (round.status !== 'FLYING') throw new BetRuleError('ROUND_NOT_FLYING', 'Round is not flying');
     const bet = await this.store.getBet(round.id, session.token, panel);
-    if (bet === null || bet.status !== 'ACTIVE') throw new Error('No active bet for this round');
+    if (bet === null || bet.status !== 'ACTIVE') {
+      throw new BetRuleError('NO_ACTIVE_BET', 'No active bet for this round');
+    }
     await this.settleWin(bet, multiplier, session);
   }
 
@@ -155,7 +171,7 @@ export class BetManager implements RoundBetManager {
     elapsedMs: number;
   }): Promise<void> {
     const { round, multiplier } = input;
-    if (round.status !== 'FLYING') throw new Error('Round is not flying');
+    if (round.status !== 'FLYING') throw new BetRuleError('ROUND_NOT_FLYING', 'Round is not flying');
     const crashPoint = round.crashPoint;
     // Without a committed crash point there is nothing safe to compare against.
     if (crashPoint === null) return;

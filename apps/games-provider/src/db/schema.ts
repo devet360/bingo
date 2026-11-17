@@ -91,14 +91,3 @@ export const walletOutbox = pgTable('wallet_outbox', {
   index('outbox_due_idx').on(table.status, table.nextAttemptAt),
 ]);
 
-export const walletCalls = pgTable('wallet_calls', {
-  id: uuid('id').primaryKey(),
-  type: text('type').notNull(),
-  sessionToken: uuid('session_token'),
-  txnId: text('txn_id'),
-  httpStatus: integer('http_status'),
-  latencyMs: integer('latency_ms'),
-  requestHash: text('request_hash'),
-  error: text('error'),
-  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-});

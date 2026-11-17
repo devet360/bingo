@@ -141,6 +141,9 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): MemoryStore
     async listBetsForRound(roundId) {
       return [...bets.values()].filter((row) => row.roundId === roundId).map(clone);
     },
+    async countBetsForRound(roundId) {
+      return [...bets.values()].filter((row) => row.roundId === roundId).length;
+    },
     async listUnsettledBets() {
       return [...bets.values()]
         .filter((row) => UNSETTLED.includes(row.status))

@@ -71,8 +71,10 @@ export const BetPanel: React.FC<BetPanelProps> = ({
   const unaffordable = stakeMinor > balanceMinor;
 
   const adjust = (delta: number) => {
-    const next = Math.max(1, (Number.parseFloat(stakeMajor) || 0) + delta);
-    setStakeMajor(String(next));
+    // Hundredth steps in integer minor units: never reparse the display as a float.
+    const stepped = parseStakeMinor(stakeMajor) + BigInt(delta) * 100n;
+    const next = stepped < 100n ? 100n : stepped;
+    setStakeMajor(`${next / 100n}.${(next % 100n).toString().padStart(2, '0')}`);
   };
 
   const renderPrimary = () => {

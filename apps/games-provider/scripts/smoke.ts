@@ -4,8 +4,9 @@ import { loadConfig } from '../src/config';
 import { createDb } from '../src/db/index';
 import { createPostgresStore } from '../src/db/storePostgres';
 import { sha256Hex } from '../src/domain/provablyFair';
+import { BetManager } from '../src/server/betManager';
 import { runRecovery } from '../src/server/recovery';
-import { HttpWalletClient } from '../src/server/wallet';
+import { HttpWalletClient, type WalletClient } from '../src/server/wallet';
 
 /**
  * Production smoke: proves a real database migrates, the operator row is
@@ -128,8 +129,92 @@ try {
     `second recovery was not idempotent: ${JSON.stringify(second)}`,
   );
 
+  // One full round through the bet manager, still without calling bingo: a stub
+  // wallet accepts the placement so the numeric columns and settle path run.
+  const playRound = await store.createRound({
+    serverSeed: randomUUID(),
+    serverSeedHash: sha256Hex(randomUUID()),
+    startedAt: at,
+  });
+  const stubWallet: WalletClient = {
+    balance: async () => { throw new Error('smoke: stub wallet balance must not be called'); },
+    bet: async () => ({ accepted: true, replayed: false, balance: null }),
+    win: async () => { throw new Error('smoke: stub wallet win must not be called directly'); },
+    rollback: async () => { throw new Error('smoke: stub wallet rollback must not be called directly'); },
+  };
+  const betManager = new BetManager({
+    store,
+    wallet: stubWallet,
+    limits: config.limits,
+    newId: () => randomUUID(),
+  });
+  const playStake = config.limits.minStake;
+  // place() only accepts a BETTING round, so the bet goes down before takeoff.
+  const firstBet = await betManager.place({
+    round: playRound, session, panel: 0, stake: playStake, autoCashout: null,
+  });
+  check(firstBet.status === 'ACTIVE', `bet ${firstBet.id} is ${firstBet.status}, expected ACTIVE`);
+
+  await store.startFlight(playRound.id, {
+    crashPoint: 3.5,
+    clientSeedComposite: 'smoke-client-seed-composite',
+    at,
+  });
+  const flying = await store.getRound(playRound.id);
+  if (flying === null) throw new Error(`round ${playRound.id} vanished after takeoff`);
+  check(flying.status === 'FLYING', `round ${playRound.id} is ${flying.status}, expected FLYING`);
+
+  await betManager.cashout({ round: flying, session, panel: 0, multiplier: 2.37 });
+  const cashed = await store.getBet(playRound.id, session.token, 0);
+  if (cashed === null) throw new Error(`bet ${firstBet.id} vanished after cashout`);
+  check(cashed.status === 'CASHED', `bet ${cashed.id} is ${cashed.status}, expected CASHED`);
+  check(
+    cashed.cashoutMultiplier === 2.37,
+    `bet ${cashed.id} round-tripped ${cashed.cashoutMultiplier}, expected 2.37`,
+  );
+  const expectedPayout = (playStake * 237n) / 100n;
+  check(cashed.payout === expectedPayout, `bet ${cashed.id} pays ${cashed.payout}, expected ${expectedPayout}`);
+
+  // A second ACTIVE bet must lose the round while the cashed one stays paid.
+  await store.insertBet({
+    roundId: playRound.id,
+    operatorCode: session.operatorCode,
+    sessionToken: session.token,
+    panel: 1,
+    stake: playStake,
+    autoCashout: null,
+    status: 'ACTIVE',
+    cashoutMultiplier: null,
+    payout: null,
+    betTxnId: randomUUID(),
+    winTxnId: null,
+  });
+  const crashedAt = new Date();
+  await store.finishRound(playRound.id, { status: 'CRASHED', at: crashedAt });
+  await betManager.settleRound({
+    round: { ...flying, status: 'CRASHED', crashPoint: 3.5, crashedAt },
+    maxWin: config.limits.maxWin,
+  });
+  const lost = await store.getBet(playRound.id, session.token, 1);
+  check(lost?.status === 'LOST', `second bet is ${lost?.status}, expected LOST`);
+  const stillCashed = await store.getBet(playRound.id, session.token, 0);
+  check(stillCashed?.status === 'CASHED', `first bet is ${stillCashed?.status}, expected CASHED`);
+
+  const winTxnId = cashed.winTxnId;
+  if (winTxnId === null) throw new Error(`cashed bet ${cashed.id} has no win txn id`);
+  const afterRound = await store.claimDueOutbox(new Date(), 1000);
+  const win = afterRound.find((row) => row.txnId === winTxnId);
+  if (win === undefined) throw new Error(`no due outbox row for win txn ${winTxnId}`);
+  check(win.type === 'WIN', `outbox row for win txn ${winTxnId} is ${win.type}`);
+  check(win.amount === expectedPayout, `WIN row for ${winTxnId} pays ${win.amount}, expected ${expectedPayout}`);
+  check(win.sessionToken === session.token, `WIN row targets session ${win.sessionToken}, expected ${session.token}`);
+  await store.markOutbox(win.id, 'SENT', 'SMOKE_TEST');
+
   console.log('smoke: first recovery', JSON.stringify(first));
   console.log('smoke: second recovery', JSON.stringify(second));
+  console.log(
+    `smoke: played round=${playRound.id} cashedBet=${cashed.id} payout=${cashed.payout} winOutbox=${win.id}`,
+  );
   console.log(
     `smoke: wrote session=${session.token} round=${round.id} bet=${bet.id} betTxn=${bet.betTxnId} rollbackOutbox=${rollback.id}`,
   );

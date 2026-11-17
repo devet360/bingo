@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { BetManager } from '../src/server/betManager';
+import { BetManager, BetRuleError } from '../src/server/betManager';
 import { WalletError, type WalletClient, type MovementReply } from '../src/server/wallet';
 import { type RoundBetManager } from '../src/server/roundEngine';
 import { createMemoryStore } from '../src/test/memoryStore';
@@ -10,6 +10,7 @@ import type { BetRecord, RoundRecord, SessionRecord } from '../src/domain/types'
 async function fixture(
   walletOverrides: Partial<WalletClient> = {},
   hooks: { onSettled?: (bet: BetRecord) => void } = {},
+  sessionOverrides: Partial<SessionRecord> = {},
 ) {
   const store = createMemoryStore();
   const calls: Array<{ kind: string; amount: bigint; txnId: string }> = [];
@@ -37,6 +38,7 @@ async function fixture(
     token: '11111111-1111-4111-8111-111111111111', operatorCode: 'bingo251', currency: 'ETB',
     minStake: 100n, maxStake: 100_000n, maxWin: 3_000_000n, displayBalance: 10_000n,
     status: 'OPEN', createdAt: new Date(0), lastHandshakeAt: new Date(0),
+    ...sessionOverrides,
   };
   // The sweep has no session argument, so the auto-cashout payout limit comes
   // from the persisted session row.
@@ -65,6 +67,35 @@ test('out-of-range stakes are rejected without a wallet call', async () => {
     await assert.rejects(manager.place({ round, session, panel: 0, stake, autoCashout: null }), /stake/i);
   }
   assert.equal(calls.length, 0);
+});
+
+test('the signed session maxStake, not config, bounds the stake', async () => {
+  // Config allows 100_000n; the operator signed a tighter 5_000n cap.
+  const { manager, calls, round, session } = await fixture({}, {}, { maxStake: 5_000n });
+  await assert.rejects(
+    manager.place({ round, session, panel: 0, stake: 10_000n, autoCashout: null }),
+    (error: unknown) => error instanceof BetRuleError && error.code === 'STAKE_OUT_OF_RANGE',
+  );
+  assert.equal(calls.length, 0);
+});
+
+test('stakes exactly at the session minimum and maximum are accepted', async () => {
+  const { manager, round, session } = await fixture({}, {}, { minStake: 500n, maxStake: 2_000n });
+  const low = await manager.place({ round, session, panel: 0, stake: 500n, autoCashout: null });
+  const high = await manager.place({ round, session, panel: 1, stake: 2_000n, autoCashout: null });
+  assert.equal(low.status, 'ACTIVE');
+  assert.equal(high.status, 'ACTIVE');
+});
+
+test('the round bet limit rejects the bet after maxBetsPerRound', async () => {
+  const { manager, round, session } = await fixture();
+  await manager.place({ round, session, panel: 0, stake: 1_000n, autoCashout: null });
+  await manager.place({ round, session, panel: 1, stake: 1_000n, autoCashout: null });
+  const other = { ...session, token: '33333333-3333-4333-8333-333333333333' };
+  await assert.rejects(
+    manager.place({ round, session: other, panel: 0, stake: 1_000n, autoCashout: null }),
+    (error: unknown) => error instanceof BetRuleError && error.code === 'ROUND_BET_LIMIT',
+  );
 });
 
 test('a wallet 409 marks the bet REJECTED and surfaces the code', async () => {

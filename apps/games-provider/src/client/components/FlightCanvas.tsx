@@ -231,7 +231,7 @@ export const FlightCanvas: React.FC<FlightCanvasProps> = ({
                 {t(lang, 'nextRoundIn')}
               </div>
               <div className="text-3xl sm:text-4xl font-display font-bold text-[var(--g-text)] font-mono tabular-nums">
-                {bettingSecondsLeft.toFixed(1)}s
+                {Math.max(0.1, bettingSecondsLeft).toFixed(1)}s
               </div>
               <div className="w-56 h-2 bg-slate-800/90 rounded-full overflow-hidden border border-white/10">
                 <div

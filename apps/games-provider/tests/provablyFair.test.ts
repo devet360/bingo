@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   buildCombinedSeedInput, deriveCrashPointFromSha512Hex, elapsedMsForMultiplier,
-  multiplierAtElapsedMs, sha512Hex,
+  multiplierAtElapsedMs, sha256Hex, sha512Hex,
 } from '../src/domain/provablyFair';
 
 test('curve matches the prototype pacing', () => {
@@ -42,4 +42,22 @@ test('crash point never exceeds 100000x', async () => {
     const digest = await sha512Hex(`cap-${i}`);
     assert.ok(deriveCrashPointFromSha512Hex(digest).crashPoint <= 100_000);
   }
+});
+
+// One shared vector; tests/clientFair.test.ts asserts the same literals through
+// the browser implementation, so the two provably-fair ports cannot drift.
+test('the shared vector matches its hard-coded constants', async () => {
+  const serverSeed = 'vect-server-seed';
+  const clientSeeds = ['alpha', 'beta', 'gamma'];
+
+  assert.equal(sha256Hex(serverSeed), 'e8c2cd0724faba2597b31c5708b812127cc99174e57f64b1418534a65dfa0574');
+  const digest = await sha512Hex(buildCombinedSeedInput(serverSeed, clientSeeds));
+  assert.equal(
+    digest,
+    'dae7fa435c56d5d221e0f1730fdb4cc61fdd895da28e3b3c32295db87a61b1dc8b47449569eca882db12bf85c204ea738058fbba95bec58c793c874d0e88fbf4',
+  );
+  const derived = deriveCrashPointFromSha512Hex(digest);
+  assert.equal(derived.hexSlice52Bit, 'dae7fa435c56d');
+  assert.equal(derived.decimalValue, 3851037936305517);
+  assert.equal(derived.crashPoint, 6.84);
 });

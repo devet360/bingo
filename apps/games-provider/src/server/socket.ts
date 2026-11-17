@@ -1,6 +1,7 @@
 import type { Server } from 'node:http';
 import { WebSocketServer, WebSocket } from 'ws';
 import type { BetRecord } from '../domain/types';
+import { BetRuleError } from './betManager';
 import type { RoundEngine, RoundEngineEvent } from './roundEngine';
 import type { Store } from './store';
 import { WalletError } from './wallet';
@@ -165,11 +166,11 @@ export function attachSocket(input: { server: Server; store: Store; engine: Engi
     try {
       await action();
     } catch (error) {
-      if (error instanceof WalletError) {
-        send(ws, { type: 'error', code: error.code, message: error.message });
-      } else {
-        send(ws, { type: 'error', code: 'BET_REJECTED', message: error instanceof Error ? error.message : 'Bet rejected' });
-      }
+      send(ws, {
+        type: 'error',
+        code: error instanceof WalletError ? error.code : error instanceof BetRuleError ? error.code : 'BET_REJECTED',
+        message: error instanceof Error ? error.message : 'Bet rejected',
+      });
       return;
     }
     if (roundId !== null) {

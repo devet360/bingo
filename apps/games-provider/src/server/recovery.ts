@@ -89,6 +89,24 @@ export async function runRecovery(deps: RecoveryDeps): Promise<RecoverySummary> 
   return summary;
 }
 
+/** Runtime counterpart of boot recovery for bets stranded by a flaky wallet. */
+export const RECONCILE_INTERVAL_MS = 60_000;
+
+/**
+ * Replays bets whose placement is still ambiguous. Only UNRESOLVED rows are
+ * touched: ACTIVE belongs to the live engine, PLACING to an in-flight
+ * placement, and boot recovery owns everything else.
+ */
+export async function reconcileUnresolvedBets(deps: RecoveryDeps): Promise<number> {
+  const now = deps.now ?? (() => new Date());
+  let resolved = 0;
+  for (const bet of await deps.store.listUnsettledBets()) {
+    if (bet.status !== 'UNRESOLVED') continue;
+    if (await resolveIndeterminate(deps.store, deps.wallet, bet, now)) resolved += 1;
+  }
+  return resolved;
+}
+
 async function refundBet(store: Store, bet: BetRecord, now: () => Date): Promise<void> {
   await store.updateBet(bet.id, { status: 'CANCELLED', settledAt: now() });
   await store.enqueueOutbox({
@@ -105,6 +123,8 @@ async function resolveIndeterminate(store: Store, wallet: WalletClient, bet: Bet
     });
     // A 2xx that accepts nothing is still ambiguous: leave it for the next boot.
     if (!reply.accepted && !reply.replayed) return false;
+    // An indeterminate placement never joined the round (the player was shown a
+    // failure), so the round outcome must not decide it: refund, not LOST.
     await refundBet(store, bet, now);
     return true;
   } catch (error) {
