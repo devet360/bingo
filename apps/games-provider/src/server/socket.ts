@@ -14,11 +14,12 @@ export interface SocketHandle {
   close(): Promise<void>;
 }
 
-interface ClientState { sessionToken: string | null; alive: boolean }
+interface ClientState { sessionToken: string | null; alive: boolean; tail: Promise<void> }
 
 export function attachSocket(input: { server: Server; store: Store; engine: EngineView }): SocketHandle {
   const { store, engine } = input;
-  const wss = new WebSocketServer({ server: input.server, path: '/ws' });
+  // maxPayload keeps a hostile client from buffering 100 MiB before JSON.parse.
+  const wss = new WebSocketServer({ server: input.server, path: '/ws', maxPayload: 64 * 1024 });
   const clients = new Map<WebSocket, ClientState>();
 
   const send = (ws: WebSocket, frame: Record<string, unknown>) => {
@@ -29,14 +30,26 @@ export function attachSocket(input: { server: Server; store: Store; engine: Engi
   };
 
   wss.on('connection', (ws) => {
-    clients.set(ws, { sessionToken: null, alive: true });
-    ws.on('pong', () => { const state = clients.get(ws); if (state) state.alive = true; });
+    const state: ClientState = { sessionToken: null, alive: true, tail: Promise.resolve() };
+    clients.set(ws, state);
+    ws.on('pong', () => { state.alive = true; });
+    // `ws` emits 'error' for protocol violations (e.g. an unmasked frame); an
+    // EventEmitter 'error' with no listener is an uncaughtException that would
+    // take down the whole provider. Never leave it unhandled.
+    ws.on('error', (error) => {
+      console.error('socket client failed', error);
+      clients.delete(ws);
+    });
     ws.on('close', () => clients.delete(ws));
+    // A socket's frames run strictly in order: a cancel must never overtake the
+    // place it cancels while both sit on store/wallet awaits.
     ws.on('message', (raw) => {
-      void handleFrame(ws, raw.toString()).catch((error: unknown) => {
-        console.error('socket frame failed', error);
-        send(ws, { type: 'error', code: 'INTERNAL_ERROR', message: 'Frame handling failed' });
-      });
+      state.tail = state.tail
+        .then(() => handleFrame(ws, raw.toString()))
+        .catch((error: unknown) => {
+          console.error('socket frame failed', error);
+          send(ws, { type: 'error', code: 'INTERNAL_ERROR', message: 'Frame handling failed' });
+        });
     });
   });
 
@@ -92,7 +105,7 @@ export function attachSocket(input: { server: Server; store: Store; engine: Engi
       const panel = frame.panel;
       const stake = frame.stake;
       const autoCashout = frame.autoCashout ?? null;
-      if (!PANELS.includes(panel as Panel) || typeof stake !== 'string' || !/^\d+$/.test(stake)
+      if (!PANELS.includes(panel as Panel) || typeof stake !== 'string' || !/^[1-9]\d*$/.test(stake)
         || (autoCashout !== null && (typeof autoCashout !== 'number' || !Number.isFinite(autoCashout) || autoCashout < 1))) {
         send(ws, { type: 'error', code: 'BAD_FRAME', message: 'bet:place requires panel 0|1, a decimal stake and an optional autoCashout >= 1' });
         return;

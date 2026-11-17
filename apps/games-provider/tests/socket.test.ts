@@ -134,6 +134,11 @@ test('a bad frame is answered with BAD_FRAME and the socket keeps its auth', asy
   const bad = await frames.next((frame) => frame.type === 'error');
   assert.equal(bad.code, 'BAD_FRAME');
 
+  // "0" and "000" are decimal strings but not positive stakes.
+  frames.send({ type: 'bet:place', panel: 0, stake: '0' });
+  const zero = await frames.next((frame) => frame.type === 'error');
+  assert.equal(zero.code, 'BAD_FRAME');
+
   // Still authed: the next valid frame reaches the engine (no round is open yet).
   frames.send({ type: 'bet:place', panel: 0, stake: '1000' });
   const rejected = await frames.next((frame) => frame.type === 'error');
