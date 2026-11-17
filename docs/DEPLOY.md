@@ -122,16 +122,15 @@ dokku config:set bingo-web \
   NODE_ENV=production \
   API_URL="https://api.example.com" \
   SOCKET_URL="https://api.example.com" \
-  TELEGRAM_BOT_USERNAME="<bot username without @>" \
-  NEXT_PUBLIC_GAMES_PROVIDER_URL="https://crash.example.com"
+  TELEGRAM_BOT_USERNAME="<bot username without @>"
 ```
 
 `API_URL`, `SOCKET_URL` and `TELEGRAM_BOT_USERNAME` are read at runtime by
 `/config.js` in the web app, so they can be changed with a restart and no rebuild.
-`NEXT_PUBLIC_GAMES_PROVIDER_URL` is different: it is the origin of the embedded
-provider game iframe (`/games/play/<sessionId>`) and Next.js inlines `NEXT_PUBLIC_*`
-values at build time, so it has to be present when the web image is built and a
-change needs a redeploy.
+The embedded provider game iframe (`/games/play/<sessionId>`) needs no provider
+host of its own: the play page takes the launch URL from the API's game-session
+response and derives the iframe origin — and the `postMessage` target origin for
+the theme/locale bridge — from that URL at runtime.
 `CORS_ORIGINS` is a comma-separated allow-list and must contain every browser origin
 that calls the API (the Mini App origin and any staff dashboard preview origin).
 

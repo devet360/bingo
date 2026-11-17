@@ -7,14 +7,13 @@ import { useI18n } from '@/lib/i18n';
 import { haptic, getTelegramWebApp } from '@/lib/telegram';
 import { Button, Spinner } from '@/components/ui';
 
-const PROVIDER_ORIGIN = new URL(process.env.NEXT_PUBLIC_GAMES_PROVIDER_URL ?? 'https://crash.invalid').origin;
-
 export default function PlayGamePage() {
   const params = useParams<{ sessionId: string }>();
   const router = useRouter();
   const { t, lang } = useI18n();
   const frameRef = useRef<HTMLIFrameElement | null>(null);
   const [launchUrl, setLaunchUrl] = useState<string | null>(null);
+  const [providerOrigin, setProviderOrigin] = useState<string | null>(null);
   const [ended, setEnded] = useState(false);
 
   const exit = useCallback(() => router.replace('/games'), [router]);
@@ -26,8 +25,16 @@ export default function PlayGamePage() {
         if (cancelled) return;
         // The API returns closed rows too: only an OPEN session with a launch
         // URL can be entered, otherwise the spinner would never resolve.
+        // The provider origin comes from that URL, so postMessage always targets
+        // the host the session actually points at (no build-time env inlining).
         if (session.status === 'OPEN' && typeof session.launchUrl === 'string' && session.launchUrl) {
-          setLaunchUrl(session.launchUrl);
+          try {
+            const origin = new URL(session.launchUrl).origin;
+            setLaunchUrl(session.launchUrl);
+            setProviderOrigin(origin);
+          } catch {
+            setEnded(true);
+          }
         } else {
           setEnded(true);
         }
@@ -41,6 +48,7 @@ export default function PlayGamePage() {
   }, [params.sessionId]);
 
   const postTheme = useCallback(() => {
+    if (!providerOrigin) return;
     const styles = getComputedStyle(document.documentElement);
     const rgb = (name: string) => `rgb(${styles.getPropertyValue(name).trim().split(/\s+/).join(',')})`;
     frameRef.current?.contentWindow?.postMessage(
@@ -60,13 +68,13 @@ export default function PlayGamePage() {
           viewportHeight: window.innerHeight,
         },
       },
-      PROVIDER_ORIGIN,
+      providerOrigin,
     );
-  }, []);
+  }, [providerOrigin]);
 
   useEffect(() => {
     const onMessage = (event: MessageEvent) => {
-      if (event.origin !== PROVIDER_ORIGIN) return;
+      if (!providerOrigin || event.origin !== providerOrigin) return;
       if (event.data?.type === 'bingo:haptic') {
         haptic(event.data.payload === 'success' ? 'success' : event.data.payload === 'error' ? 'error' : 'tap');
       }
@@ -74,15 +82,15 @@ export default function PlayGamePage() {
     };
     window.addEventListener('message', onMessage);
     return () => window.removeEventListener('message', onMessage);
-  }, [exit]);
+  }, [exit, providerOrigin]);
 
   useEffect(() => {
-    if (!launchUrl) return;
+    if (!launchUrl || !providerOrigin) return;
     postTheme();
     const frame = frameRef.current;
     const send = () => {
       postTheme();
-      frame?.contentWindow?.postMessage({ type: 'bingo:locale', payload: lang }, PROVIDER_ORIGIN);
+      frame?.contentWindow?.postMessage({ type: 'bingo:locale', payload: lang }, providerOrigin);
     };
     frame?.addEventListener('load', send);
     const timer = window.setTimeout(send, 300);
@@ -90,7 +98,7 @@ export default function PlayGamePage() {
       frame?.removeEventListener('load', send);
       window.clearTimeout(timer);
     };
-  }, [launchUrl, lang, postTheme]);
+  }, [launchUrl, lang, providerOrigin, postTheme]);
 
   useEffect(() => {
     const back = getTelegramWebApp()?.BackButton;
