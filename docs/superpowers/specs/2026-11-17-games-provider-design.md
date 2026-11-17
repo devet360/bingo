@@ -154,14 +154,14 @@ Policy: an indeterminate placement is refunded **even if its round crashed**. It
 
 ### 4.6 Win delivery
 
-A win row is written to `wallet_outbox` immediately after the `CASHED` bet row commits, in the same request (not one transaction: the two stores share no transactional handle). A crash between the two writes leaves a `CASHED` bet with no outbox row, which boot recovery's orphan scan repairs — that window is tested. The worker drains the row. Classification:
+A win row is written to `wallet_outbox` immediately after the `CASHED` bet row commits, in the same request (the two writes share a database but are not wrapped in one transaction). A crash between the two writes leaves a `CASHED` bet with no outbox row, which boot recovery's orphan scan repairs — that window is tested. The worker drains the row. Classification:
 
 - `2xx` → `SENT`.
 - `409 WIN_LIMIT_EXCEEDED` → `CAP_REJECTED`, alert, no retry. Payouts are clamped locally to the session's `maxWin` so this should be unreachable.
 - Any other 4xx (including `TRANSACTION_ROLLED_BACK`) survives one replay, then → `DEAD`, logged.
 - Others → `PENDING` with exponential backoff.
 
-`SESSION_CLOSED`/expiry cannot strand a settlement from the bingo side: bingo accepts `win` and `rollback` for closed or expired sessions (see §7 item 7). A `DEAD` row therefore means contract drift, and the worker logs it for an operator every tick.
+`SESSION_CLOSED`/expiry cannot strand a settlement from the bingo side: bingo accepts `win` and `rollback` for closed or expired sessions (see §7 item 7). A `DEAD` row therefore means a non-retryable rejection — contract drift, or an inactive/unverified account on a settlement — and the worker logs it for an operator every tick.
 
 ---
 
