@@ -22,6 +22,8 @@ export interface FakeBingoOptions {
   hmacSecret: string;
   balance: bigint;
   currency?: string;
+  /** When false, every signed callback answers 409 SESSION_CLOSED. Defaults to true. */
+  sessionOpen?: boolean;
   /** Delays the bet response only, before the movement is applied. */
   betDelayMs?: number;
 }
@@ -156,6 +158,7 @@ function parseAmount(value: unknown): bigint | null {
 export async function createFakeBingo(options: FakeBingoOptions): Promise<FakeBingo> {
   const secret = options.hmacSecret;
   const currency = (options.currency ?? 'ETB').toUpperCase();
+  const sessionOpen = options.sessionOpen ?? true;
   const limits: FakeBingoLimits = { ...DEFAULT_LIMITS };
   const applied = new Set<string>();
   const movements = new Map<string, AppliedMovement>();
@@ -228,6 +231,11 @@ export async function createFakeBingo(options: FakeBingoOptions): Promise<FakeBi
     }
 
     const type = body.type as CallbackType;
+    if (!sessionOpen) {
+      record({ type, status: 409, signatureValid: true, txnId: null, replayed: false });
+      sendError(res, 409, 'SESSION_CLOSED', 'Game session is closed');
+      return;
+    }
     const sessionId = body.sessionId;
     if (typeof sessionId !== 'string' || !UUID_RE.test(sessionId)) {
       record({ type, status: 400, signatureValid: true, txnId: null, replayed: false });

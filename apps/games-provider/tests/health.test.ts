@@ -2,6 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import type { AddressInfo } from 'node:net';
 import { createApp } from '../src/server/http';
+import { HttpWalletClient } from '../src/server/wallet';
+import { createMemoryStore } from '../src/test/memoryStore';
 import { loadConfig } from '../src/config';
 
 const config = loadConfig({
@@ -11,7 +13,12 @@ const config = loadConfig({
 });
 
 test('health endpoint reports ok', async () => {
-  const server = createApp({ config }).listen(0);
+  const store = createMemoryStore();
+  const wallet = new HttpWalletClient({
+    callbackUrl: config.operator.callbackUrl,
+    hmacSecret: config.operator.hmacSecret,
+  });
+  const server = createApp({ config, store, wallet }).listen(0);
   const { port } = server.address() as AddressInfo;
   const response = await fetch(`http://127.0.0.1:${port}/api/health`);
   assert.equal(response.status, 200);
