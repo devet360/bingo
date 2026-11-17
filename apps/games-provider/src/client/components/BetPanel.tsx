@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { Minus, Plus } from 'lucide-react';
 import { t } from '../i18n';
-import type { BetFrame, BetLimits, GamePhase, Lang } from '../types';
+import type { BetFrame, BetLimits, BetStatus, GamePhase, Lang } from '../types';
 
 interface BetPanelProps {
   panel: 0 | 1;
@@ -19,8 +19,35 @@ interface BetPanelProps {
 
 const PRESETS_MAJOR = [1, 5, 25, 100];
 
-export const money = (minor: bigint, currency: string) =>
-  `${(Number(minor) / 100).toFixed(2)} ${currency}`;
+// Money is integer minor units: no float math anywhere on the way out.
+export const money = (minor: bigint, currency: string) => {
+  const negative = minor < 0n;
+  const abs = negative ? -minor : minor;
+  const major = abs / 100n;
+  const cents = (abs % 100n).toString().padStart(2, '0');
+  return `${negative ? '-' : ''}${major}.${cents} ${currency}`;
+};
+
+// Parse a major-unit decimal string (at most 2 fraction digits) into minor
+// units without going through a float.
+const parseStakeMinor = (input: string): bigint => {
+  const match = /^(\d+)(?:\.(\d{0,2}))?$/.exec(input.trim());
+  if (!match) return 0n;
+  const fraction = (match[2] ?? '').padEnd(2, '0');
+  return BigInt(match[1]) * 100n + BigInt(fraction);
+};
+
+const TERMINAL_STATUSES: readonly BetStatus[] = ['LOST', 'CANCELLED', 'REJECTED', 'UNRESOLVED'];
+
+const terminalLabel = (lang: Lang, status: BetStatus): string | null => {
+  switch (status) {
+    case 'LOST': return t(lang, 'lost');
+    case 'CANCELLED': return t(lang, 'cancelled');
+    case 'REJECTED': return t(lang, 'rejected');
+    case 'UNRESOLVED': return t(lang, 'unresolved');
+    default: return null;
+  }
+};
 
 export const BetPanel: React.FC<BetPanelProps> = ({
   panel, phase, multiplier, currency, balanceMinor, limits, bet, lang, onPlace, onCancel, onCashout,
@@ -29,11 +56,12 @@ export const BetPanel: React.FC<BetPanelProps> = ({
   const [autoEnabled, setAutoEnabled] = useState(false);
   const [autoValue, setAutoValue] = useState('2.00');
 
-  const parsed = Number.parseFloat(stakeMajor);
-  const stakeMinor = Number.isFinite(parsed) && parsed > 0 ? BigInt(Math.round(parsed * 100)) : 0n;
+  const stakeMinor = parseStakeMinor(stakeMajor);
   const active = bet !== null && (bet.status === 'ACTIVE' || bet.status === 'PLACING');
   const cashed = bet?.status === 'CASHED';
-  const finished = bet !== null && ['LOST', 'CANCELLED', 'REJECTED', 'UNRESOLVED'].includes(bet.status);
+  const finishedLabel = bet !== null && TERMINAL_STATUSES.includes(bet.status)
+    ? terminalLabel(lang, bet.status)
+    : null;
   const autoCashout = (() => {
     if (!autoEnabled) return null;
     const value = Number.parseFloat(autoValue);
@@ -51,7 +79,7 @@ export const BetPanel: React.FC<BetPanelProps> = ({
     const base =
       'w-full h-full min-h-[56px] px-3 rounded-xl font-display font-bold flex flex-col items-center justify-center transition-colors cursor-pointer disabled:cursor-not-allowed disabled:opacity-50';
     if (active && phase === 'FLYING' && bet) {
-      const estimate = BigInt(Math.floor(Number(bet.stake) * multiplier));
+      const estimate = BigInt(bet.stake) * BigInt(Math.round(multiplier * 100)) / 100n;
       return (
         <button type="button" onClick={() => onCashout(panel)}
           className={`${base} bg-[var(--g-gold)] text-slate-950`}>
@@ -77,10 +105,12 @@ export const BetPanel: React.FC<BetPanelProps> = ({
         </button>
       );
     }
-    if (finished) {
+    if (finishedLabel) {
+      const lost = bet?.status === 'LOST';
       return (
-        <button type="button" disabled className={`${base} bg-slate-800 text-slate-400`}>
-          {t(lang, 'lost')}
+        <button type="button" disabled
+          className={`${base} ${lost ? 'bg-slate-800 text-slate-400' : 'bg-slate-700/60 text-slate-200'}`}>
+          <span className="text-sm text-center leading-tight">{finishedLabel}</span>
         </button>
       );
     }
@@ -104,7 +134,7 @@ export const BetPanel: React.FC<BetPanelProps> = ({
   return (
     <div className="bg-[var(--g-panel)] border border-white/10 rounded-xl p-3 flex flex-col gap-2">
       <div className="flex items-center gap-2">
-        <button type="button" onClick={() => adjust(-1)} aria-label="Decrease stake"
+        <button type="button" onClick={() => adjust(-1)} aria-label={t(lang, 'decreaseStake')}
           disabled={active}
           className="w-9 h-9 flex items-center justify-center rounded-lg bg-slate-800 text-[var(--g-text)] disabled:opacity-40">
           <Minus className="w-4 h-4" />
@@ -116,7 +146,7 @@ export const BetPanel: React.FC<BetPanelProps> = ({
             className="w-20 bg-transparent text-center font-mono font-semibold text-sm text-[var(--g-text)] focus:outline-none disabled:opacity-50" />
           <span className="text-xs font-mono text-[var(--g-hint)]">{currency}</span>
         </div>
-        <button type="button" onClick={() => adjust(1)} aria-label="Increase stake"
+        <button type="button" onClick={() => adjust(1)} aria-label={t(lang, 'increaseStake')}
           disabled={active}
           className="w-9 h-9 flex items-center justify-center rounded-lg bg-slate-800 text-[var(--g-text)] disabled:opacity-40">
           <Plus className="w-4 h-4" />

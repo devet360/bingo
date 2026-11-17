@@ -12,6 +12,9 @@ const en = {
   crashedAt: 'Flew away at',
   won: 'Won',
   lost: 'Lost',
+  cancelled: 'Cancelled — stake refunded',
+  rejected: 'Bet rejected',
+  unresolved: 'Awaiting settlement',
   sessionEnded: 'Session ended',
   sessionEndedBody: 'Your game session is closed. Return to the lobby to play again.',
   backToGames: 'Back to games',
@@ -37,6 +40,15 @@ const en = {
   combinedInput: 'Combined input (server seed + client seeds)',
   crashResult: 'Crash result',
   tap: 'Tap to bet',
+  recentRounds: 'Recent rounds',
+  noRoundsYet: 'Waiting for the first completed round…',
+  tapToVerify: 'Tap to verify the provably fair proof',
+  sha256Commit: 'SHA-256 commit',
+  gameTitle: 'Crash',
+  decreaseStake: 'Decrease stake',
+  increaseStake: 'Increase stake',
+  close: 'Close',
+  instantCrashEdge: 'instant crash (edge)',
 };
 
 const am: Record<keyof typeof en, string> = {
@@ -51,6 +63,9 @@ const am: Record<keyof typeof en, string> = {
   crashedAt: 'የተቋረጠበት',
   won: 'አሸንፈዋል',
   lost: 'ተሸንፈዋል',
+  cancelled: 'ተሰርዟል — ውርርዱ ተመላሽ ሆኗል',
+  rejected: 'ውርርድ ተቀባይነት አላገኘም',
+  unresolved: 'ውጤቱ በመጠባበቅ ላይ',
   sessionEnded: 'ክፍለ ጊዜው አብቅቷል',
   sessionEndedBody: 'የጨዋታ ክፍለ ጊዜዎ ተዘግቷል። ለመጫወት ወደ መግቢያው ይመለሱ።',
   backToGames: 'ወደ ጨዋታዎች',
@@ -76,6 +91,15 @@ const am: Record<keyof typeof en, string> = {
   combinedInput: 'የተዋሃደ ግብዓት (የሰርቨር ዘር + የደንበኛ ዘሮች)',
   crashResult: 'የመቋረጥ ውጤት',
   tap: 'ለመወራረድ ይንኩ',
+  recentRounds: 'የቅርብ ጊዜ ዙሮች',
+  noRoundsYet: 'የመጀመሪያው ዙር እስኪጠናቀቅ በመጠበቅ ላይ…',
+  tapToVerify: 'ሊረጋገጥ የሚችል ፍትሃዊነት ማስረጃን ለማረጋገጥ ይንኩ',
+  sha256Commit: 'SHA-256 ቁርጠኝነት',
+  gameTitle: 'ክራሽ',
+  decreaseStake: 'ውርርድ ቀንስ',
+  increaseStake: 'ውርርድ ጨምር',
+  close: 'ዝጋ',
+  instantCrashEdge: 'ቅጽበታዊ መቋረጥ (ጠርዝ)',
 };
 
 export const strings: Record<Lang, Record<string, string>> = { en, am };

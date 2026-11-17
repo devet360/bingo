@@ -7,8 +7,12 @@ import type {
 
 const BETTING_WINDOW_MS = 5_500;
 
-export function useCrashSocket(input: { token: string; onSessionEnded: () => void }) {
-  const { token, onSessionEnded } = input;
+export function useCrashSocket(input: {
+  token: string;
+  initialBalance: string;
+  onSessionEnded: () => void;
+}) {
+  const { token, initialBalance, onSessionEnded } = input;
   const [connected, setConnected] = useState(false);
   const [phase, setPhase] = useState<GamePhase>('BETTING');
   const [roundId, setRoundId] = useState<number | null>(null);
@@ -19,13 +23,19 @@ export function useCrashSocket(input: { token: string; onSessionEnded: () => voi
   const [serverSeedHash, setServerSeedHash] = useState<string | null>(null);
   const [history, setHistory] = useState<RoundHistoryItem[]>([]);
   const [bets, setBets] = useState<[BetFrame | null, BetFrame | null]>([null, null]);
-  const [balance, setBalance] = useState('0');
+  const [balance, setBalance] = useState(initialBalance);
   const [lastError, setLastError] = useState<{ code: string; message: string } | null>(null);
   const [ended, setEnded] = useState<string | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
   const endedRef = useRef(false);
   const errorTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // The round only changes on `snapshot` / `round:betting`; bet:update frames
+  // are matched against it so a late sweep cannot touch a newer round's panels.
+  const roundIdRef = useRef<number | null>(null);
+  // Last (roundId, panel, status) tuple that played win feedback, so a
+  // duplicated CASHED frame does not chime or buzz twice.
+  const feedbackRef = useRef<string | null>(null);
 
   useEffect(() => {
     let unmounted = false;
@@ -50,6 +60,7 @@ export function useCrashSocket(input: { token: string; onSessionEnded: () => voi
         case 'snapshot':
           setPhase(frame.phase);
           setRoundId(frame.roundId);
+          roundIdRef.current = frame.roundId;
           setMultiplier(frame.multiplier);
           setElapsedMs(frame.elapsedMs);
           setBettingWindowMs(BETTING_WINDOW_MS);
@@ -61,20 +72,13 @@ export function useCrashSocket(input: { token: string; onSessionEnded: () => voi
         case 'round:betting':
           setPhase('BETTING');
           setRoundId(frame.roundId);
+          roundIdRef.current = frame.roundId;
           setMultiplier(1);
           setElapsedMs(0);
           setBettingWindowMs(frame.bettingEndsInMs);
           setBettingEndsAt(Date.now() + frame.bettingEndsInMs);
           setServerSeedHash(frame.serverSeedHash);
           setBets([null, null]);
-          break;
-        case 'round:flying':
-          setPhase('FLYING');
-          setMultiplier(1);
-          setElapsedMs(0);
-          setBettingEndsAt(null);
-          setServerSeedHash(frame.serverSeedHash);
-          soundEngine.playTakeoff();
           break;
         case 'round:tick':
           // The gateway delivers takeoff as the elapsed-0 tick, and emits ticks
@@ -97,6 +101,7 @@ export function useCrashSocket(input: { token: string; onSessionEnded: () => voi
           soundEngine.playCrash();
           break;
         case 'bet:update': {
+          if (frame.roundId !== roundIdRef.current) break;
           const bet: BetFrame = frame;
           setBets((prev) => {
             const next: [BetFrame | null, BetFrame | null] = [prev[0], prev[1]];
@@ -105,8 +110,12 @@ export function useCrashSocket(input: { token: string; onSessionEnded: () => voi
           });
           if (bet.status === 'ACTIVE') soundEngine.playBetPlaced();
           if (bet.status === 'CASHED') {
-            soundEngine.playCashout();
-            haptic('success');
+            const feedbackKey = `${bet.roundId}:${bet.panel}:${bet.status}`;
+            if (feedbackRef.current !== feedbackKey) {
+              feedbackRef.current = feedbackKey;
+              soundEngine.playCashout();
+              haptic('success');
+            }
           }
           break;
         }

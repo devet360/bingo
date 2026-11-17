@@ -47,7 +47,7 @@ const GameScreen: React.FC<{ token: string; session: HandshakeData; lang: Lang }
     setEnded(true);
     exitGame();
   }, []);
-  const socket = useCrashSocket({ token, onSessionEnded });
+  const socket = useCrashSocket({ token, initialBalance: session.balance, onSessionEnded });
 
   const limits = {
     minStake: BigInt(session.limits.minStake),
@@ -119,7 +119,7 @@ const GameScreen: React.FC<{ token: string; session: HandshakeData; lang: Lang }
         isFullscreen ? 'fixed inset-0 z-50 overflow-y-auto' : 'min-h-dvh'
       }`}>
       <header className="flex items-center justify-between gap-2 px-3 py-2">
-        <div className="font-display font-bold">Crash</div>
+        <div className="font-display font-bold">{t(lang, 'gameTitle')}</div>
         <div className="font-mono font-bold tabular-nums text-[var(--g-gold)]">
           {money(balanceMinor, session.currency)}
         </div>

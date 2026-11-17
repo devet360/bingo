@@ -47,13 +47,17 @@ export const ProvablyFairModal: React.FC<ProvablyFairModalProps> = ({
   useEffect(() => {
     if (!proof) return;
     let cancelled = false;
-    void verifyProof(proof).then((next) => {
-      if (!cancelled) setResult(next);
-    });
+    void verifyProof(proof)
+      .then((next) => {
+        if (!cancelled) setResult(next);
+      })
+      .catch(() => {
+        if (!cancelled) setError(t(lang, 'verificationMismatch'));
+      });
     return () => {
       cancelled = true;
     };
-  }, [proof]);
+  }, [proof, lang]);
 
   if (!isOpen) return null;
 
@@ -72,7 +76,7 @@ export const ProvablyFairModal: React.FC<ProvablyFairModalProps> = ({
             <ShieldCheck className="w-5 h-5 text-emerald-400" />
             <h2 className="text-sm font-display font-bold text-[var(--g-text)]">{t(lang, 'provablyFair')}</h2>
           </div>
-          <button type="button" onClick={onClose} aria-label="Close"
+          <button type="button" onClick={onClose} aria-label={t(lang, 'close')}
             className="p-1.5 rounded-lg text-[var(--g-hint)] hover:text-[var(--g-text)]">
             <X className="w-4 h-4" />
           </button>
@@ -141,7 +145,7 @@ export const ProvablyFairModal: React.FC<ProvablyFairModalProps> = ({
                 </div>
                 <div className="font-mono text-[var(--g-text)]">
                   {t(lang, 'crashResult')}: {result.computedCrashPoint.toFixed(2)}x
-                  {result.decimalValue % 33 === 0 ? ' · instant crash (edge)' : ''}
+                  {result.decimalValue % 33 === 0 ? ` · ${t(lang, 'instantCrashEdge')}` : ''}
                 </div>
               </div>
             )}

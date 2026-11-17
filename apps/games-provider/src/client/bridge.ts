@@ -39,7 +39,10 @@ if (typeof window !== 'undefined') {
     if (!parentOrigin || event.origin !== parentOrigin) return;
     const data = event.data as { type?: string; payload?: unknown } | null;
     if (data?.type === 'bingo:theme') {
-      applyTheme((data as ThemeMessage).payload);
+      const payload = (data as { payload?: unknown }).payload;
+      if (payload !== null && typeof payload === 'object') {
+        applyTheme(payload as ThemeMessage['payload']);
+      }
     }
     if (data?.type === 'bingo:locale') {
       const lang: Lang = data.payload === 'am' ? 'am' : 'en';

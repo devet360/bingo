@@ -50,13 +50,6 @@ export interface BettingFrame {
   clientSeeds: string[];
   bettingEndsInMs: number;
 }
-export interface FlyingFrame {
-  type: 'round:flying';
-  roundId: number;
-  serverSeedHash: string;
-  multiplier: number;
-  elapsedMs: number;
-}
 export interface TickFrame { type: 'round:tick'; roundId: number; multiplier: number; elapsedMs: number }
 export interface CrashedFrame {
   type: 'round:crashed';
@@ -73,5 +66,5 @@ export interface SessionEndedFrame { type: 'session:ended'; reason: string }
 export interface ErrorFrame { type: 'error'; code: string; message: string }
 
 export type ServerFrame =
-  | SnapshotFrame | BettingFrame | FlyingFrame | TickFrame | CrashedFrame
+  | SnapshotFrame | BettingFrame | TickFrame | CrashedFrame
   | BetUpdateFrame | BalanceFrame | SessionEndedFrame | ErrorFrame;

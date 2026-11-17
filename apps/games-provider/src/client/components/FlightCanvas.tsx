@@ -142,18 +142,18 @@ export const FlightCanvas: React.FC<FlightCanvasProps> = ({
     <div className="flex flex-col gap-2.5 w-full">
       <div className="flex items-center gap-2 bg-[var(--g-panel)] border border-white/10 rounded-xl px-3 py-2">
         <span className="text-[11px] font-medium text-[var(--g-hint)] whitespace-nowrap shrink-0 mr-1">
-          Recent Rounds
+          {t(lang, 'recentRounds')}
         </span>
         <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar flex-1 py-0.5">
           {history.length === 0 ? (
-            <span className="text-xs text-[var(--g-hint)]">Waiting for first completed round...</span>
+            <span className="text-xs text-[var(--g-hint)]">{t(lang, 'noRoundsYet')}</span>
           ) : (
             history.slice(0, 24).map((item) => (
               <button
                 key={item.roundId}
                 type="button"
                 onClick={() => onSelectHistoryRound(item.roundId)}
-                title={`Round #${item.roundId} · Click to verify Provably Fair proof`}
+                title={`${t(lang, 'round')} #${item.roundId} · ${t(lang, 'tapToVerify')}`}
                 className={`px-2 py-1 text-xs font-mono font-semibold rounded-md border transition-colors whitespace-nowrap shrink-0 cursor-pointer tabular-nums ${getHistoryChipStyle(
                   item.crashPoint
                 )}`}
@@ -178,7 +178,7 @@ export const FlightCanvas: React.FC<FlightCanvasProps> = ({
         <div className="absolute top-3 left-3.5 right-3.5 flex items-center justify-between pointer-events-none">
           <div className="flex items-center gap-2.5 text-xs text-[var(--g-hint)] pointer-events-auto">
             <span className="font-mono font-semibold text-[var(--g-text)] tabular-nums">
-              Round #{roundId ?? '—'}
+              {t(lang, 'round')} #{roundId ?? '—'}
             </span>
             <span aria-hidden="true">·</span>
             <span className="flex items-center gap-1.5">
@@ -272,7 +272,7 @@ export const FlightCanvas: React.FC<FlightCanvasProps> = ({
 
         {serverSeedHash && (
           <div className="absolute bottom-2.5 left-3.5 text-[11px] font-mono text-[var(--g-hint)] truncate max-w-[75%] pointer-events-none">
-            SHA-256 Commit: {serverSeedHash.slice(0, 18)}...{serverSeedHash.slice(-8)}
+            {t(lang, 'sha256Commit')}: {serverSeedHash.slice(0, 18)}...{serverSeedHash.slice(-8)}
           </div>
         )}
       </div>
