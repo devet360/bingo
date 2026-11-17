@@ -39,6 +39,9 @@ export function attachSocket(input: { server: Server; store: Store; engine: Engi
     ws.on('error', (error) => {
       console.error('socket client failed', error);
       clients.delete(ws);
+      // wss.close() waits for its own client set to drain, and a hostile peer can
+      // stall the close handshake for closeTimeout (30 s). Destroy it now.
+      ws.terminate();
     });
     ws.on('close', () => clients.delete(ws));
     // A socket's frames run strictly in order: a cancel must never overtake the
@@ -107,7 +110,11 @@ export function attachSocket(input: { server: Server; store: Store; engine: Engi
       const autoCashout = frame.autoCashout ?? null;
       if (!PANELS.includes(panel as Panel) || typeof stake !== 'string' || !/^[1-9]\d*$/.test(stake)
         || (autoCashout !== null && (typeof autoCashout !== 'number' || !Number.isFinite(autoCashout) || autoCashout < 1))) {
-        send(ws, { type: 'error', code: 'BAD_FRAME', message: 'bet:place requires panel 0|1, a decimal stake and an optional autoCashout >= 1' });
+        send(ws, {
+          type: 'error',
+          code: 'BAD_FRAME',
+          message: 'bet:place requires panel 0|1, stake must be a positive integer minor-unit string and an optional autoCashout >= 1',
+        });
         return;
       }
       await act(ws, token, panel as Panel, () =>

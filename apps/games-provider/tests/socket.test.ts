@@ -144,3 +144,28 @@ test('a bad frame is answered with BAD_FRAME and the socket keeps its auth', asy
   const rejected = await frames.next((frame) => frame.type === 'error');
   assert.equal(rejected.code, 'BET_REJECTED');
 });
+
+test('an oversized frame kills only its socket, not the provider process', async (t) => {
+  const env = await setup();
+  t.after(async () => { await env.close(); await env.fake.close(); });
+
+  // maxPayload (64 KiB) makes `ws` emit 'error' on this socket pre-auth; without
+  // the error listener that EventEmitter throw would end the provider process.
+  const hostile = new WebSocket(env.wsUrl);
+  hostile.on('error', () => { /* the server-side violation is expected here */ });
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('hostile socket never opened')), 5000);
+    hostile.once('open', () => { clearTimeout(timer); resolve(); });
+  });
+  hostile.send(JSON.stringify({ type: 'auth', token: 'x'.repeat(70 * 1024) }));
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('hostile socket never closed')), 5000);
+    hostile.once('close', () => { clearTimeout(timer); resolve(); });
+  });
+
+  // A fresh client still gets served: the process survived the bad frame.
+  const { frames } = await connect(env.wsUrl);
+  frames.send({ type: 'auth', token: env.fake.token });
+  const snapshot = await frames.next((frame) => frame.type === 'snapshot');
+  assert.equal(snapshot.type, 'snapshot');
+});
