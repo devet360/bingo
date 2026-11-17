@@ -31,13 +31,14 @@ const DETERMINISTIC_RETRY_LIMIT = 1;
  *
  * The outbox row was committed with the bet, so this worker only classifies
  * bingo's answer: a 2xx is `SENT`, a cap breach is `CAP_REJECTED`, and a 4xx that
- * is not `WALLET_RESPONSE_INVALID`, `WALLET_HTTP_ERROR` or 408/429 is a
- * deterministic refusal that gets one replay before `DEAD`. Everything
- * indeterminate (timeout, 5xx, `WALLET_RESPONSE_INVALID`, `WALLET_HTTP_ERROR`,
- * unreadable 2xx, 408/429) stays `PENDING` with
- * exponential backoff. A bet must always reach a terminal wallet state, so DEAD
- * rows are the audit trail: the refusing code is kept in `lastError`. Rows are
- * drained sequentially so the wallet call order bingo sees is deterministic.
+ * is not `WALLET_RESPONSE_INVALID`, `WALLET_HTTP_ERROR`, `CONCURRENT_UPDATE` or
+ * 408/429 is a deterministic refusal that gets one replay before `DEAD`.
+ * Everything indeterminate (timeout, 5xx, `WALLET_RESPONSE_INVALID`,
+ * `WALLET_HTTP_ERROR`, `CONCURRENT_UPDATE`, unreadable 2xx, 408/429) stays
+ * `PENDING` with exponential backoff. A bet must always reach a terminal wallet
+ * state, so DEAD rows are the audit trail: the refusing code is kept in
+ * `lastError`. Rows are drained sequentially so the wallet call order bingo sees
+ * is deterministic.
  *
  * `attempts` is read from the claimed snapshot; only `rescheduleOutbox`
  * increments it, so the backoff schedule is 1s, 2s, 4s ... 60s.
@@ -147,13 +148,16 @@ export class OutboxWorker {
     // refusal could not be read (`WALLET_RESPONSE_INVALID` for a 2xx body,
     // `WALLET_HTTP_ERROR` for an unreadable or codeless non-2xx body, where an
     // intermediary such as a proxy can answer with a 4xx HTML page) plus 408/429
-    // as timeout/throttling signals. Those stay on the retry path. A refusal gets
+    // as timeout/throttling signals. `CONCURRENT_UPDATE` is also exempt: bingo
+    // answered it after its own transaction retried and collided again, so it is
+    // transient, not a refusal. Those stay on the retry path. A refusal gets
     // exactly one replay (a rollback can race the win it refunds) and then DEAD,
     // because a bet must always end in a terminal wallet state.
     const isDeterministicRefusal =
       isClientError &&
       code !== 'WALLET_RESPONSE_INVALID' &&
       code !== 'WALLET_HTTP_ERROR' &&
+      code !== 'CONCURRENT_UPDATE' &&
       status !== 408 &&
       status !== 429;
     if (isDeterministicRefusal) {

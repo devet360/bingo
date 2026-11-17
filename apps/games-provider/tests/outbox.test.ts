@@ -408,6 +408,26 @@ test('a rejected drain is logged, never thrown, and the timer keeps running', as
   }
 });
 
+test('a 409 CONCURRENT_UPDATE stays retryable', async () => {
+  const { store, seed, script, worker } = fixture();
+  await seed({ txnId: 'win-collided' });
+  // bingo's own transaction retried and collided again: transient, not a refusal.
+  script('win-collided', fail(409, 'CONCURRENT_UPDATE'));
+
+  assert.deepEqual(await worker.drainOnce(NOW), { sent: 0, retried: 1, capped: 0, dead: 0 });
+  const pending = rowOf(store, 'win-collided');
+  assert.equal(pending.status, 'PENDING');
+  assert.equal(pending.lastError, 'CONCURRENT_UPDATE');
+  assert.equal(pending.nextAttemptAt.getTime(), NOW.getTime() + 1_000);
+
+  assert.deepEqual(await worker.drainOnce(pending.nextAttemptAt), { sent: 0, retried: 1, capped: 0, dead: 0 });
+  const row = rowOf(store, 'win-collided');
+  assert.equal(row.status, 'PENDING');
+  assert.equal(row.attempts, 2);
+  assert.equal(row.lastError, 'CONCURRENT_UPDATE');
+  assert.notEqual(row.status, 'DEAD');
+});
+
 test('retry backoff is capped at 60s', async () => {
   const { store, seed, script, worker } = fixture();
   const seeded = await seed({ txnId: 'win-boom' });
