@@ -408,5 +408,12 @@ export function createPostgresStore(db: Database): Store {
         .where(eq(walletOutbox.status, 'PENDING'));
       return rows[0]?.total ?? 0;
     },
+    async countOutboxByStatus(status) {
+      const rows = await db
+        .select({ total: count() })
+        .from(walletOutbox)
+        .where(eq(walletOutbox.status, status));
+      return rows[0]?.total ?? 0;
+    },
   };
 }

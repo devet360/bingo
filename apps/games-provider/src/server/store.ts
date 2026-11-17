@@ -45,4 +45,5 @@ export interface Store {
   markOutbox(id: string, status: OutboxStatus, error?: string | null): Promise<void>;
   rescheduleOutbox(id: string, nextAttemptAt: Date, error: string): Promise<void>;
   pendingOutboxCount(): Promise<number>;
+  countOutboxByStatus(status: OutboxStatus): Promise<number>;
 }

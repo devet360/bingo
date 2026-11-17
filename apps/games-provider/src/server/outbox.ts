@@ -86,7 +86,13 @@ export class OutboxWorker {
     if (this.running) return;
     this.running = true;
     try {
-      await this.drainOnce(new Date());
+      const summary = await this.drainOnce(new Date());
+      if (summary.dead > 0 || summary.capped > 0) {
+        // DEAD/CAP_REJECTED rows are the audit trail for a payout that will never
+        // land; an operator has to see it, and a background tick is the only place
+        // a runtime failure surfaces.
+        console.error('outbox: wallet rows need operator attention', summary);
+      }
     } catch (error) {
       // A drain failure must never surface as an unhandled rejection; the rows
       // are still PENDING and the next tick retries them.

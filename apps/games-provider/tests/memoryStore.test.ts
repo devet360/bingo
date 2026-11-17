@@ -40,3 +40,22 @@ test('outbox attempts count reschedules only, never terminal marks', async () =>
   assert.equal(row.lastError, null);
   assert.equal(row.updatedAt.getTime(), clock.getTime());
 });
+
+test('countOutboxByStatus counts the rows of one status only', async () => {
+  const store = createMemoryStore();
+  const row = await store.enqueueOutbox({
+    operatorCode: 'op-a',
+    type: 'ROLLBACK',
+    txnId: 'txn-1',
+    sessionToken: 'sess-1',
+    amount: 2500n,
+  });
+  assert.ok(row);
+
+  assert.equal(await store.countOutboxByStatus('PENDING'), 1);
+  assert.equal(await store.countOutboxByStatus('DEAD'), 0);
+
+  await store.markOutbox(row.id, 'DEAD', 'X');
+  assert.equal(await store.countOutboxByStatus('DEAD'), 1);
+  assert.equal(await store.countOutboxByStatus('PENDING'), 0);
+});

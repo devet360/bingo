@@ -321,3 +321,99 @@ The Flutter app will be another client of the same API and Socket.io gateway. It
 no new Dokku app: point it at `https://api.example.com` and authenticate with Telegram
 `initData` after the same bot contact-share verification. Mobile HTTP clients are not
 subject to browser CORS.
+
+## 12. Crash game provider (`bingo-crash`)
+
+The crash game provider is a third Dokku app built from this repository. It keeps its
+own Postgres database and serves the game client plus its HTTP/WebSocket API on one
+process:
+
+| Dokku app | Image | Processes | Serves | Port |
+| --- | --- | --- | --- | --- |
+| `bingo-crash` | `Dockerfile.games` | `web` (from `Procfile.games`) | Handshake/close/proof API, `/ws` gateway, `/play` client | 3001 |
+
+Create the app and its database:
+
+```bash
+dokku apps:create bingo-crash
+dokku postgres:create bingo-crash-db
+dokku postgres:link bingo-crash-db bingo-crash
+dokku builder-dockerfile:set bingo-crash dockerfile-path Dockerfile.games
+dokku ps:set bingo-crash procfile-path Procfile.games
+dokku ports:set bingo-crash http:80:3001
+dokku ps:scale bingo-crash web=1
+git remote add dokku-crash dokku@YOUR_VPS:bingo-crash
+```
+
+`postgres:link` injects `DATABASE_URL`; Dokku injects `PORT` for the web process, so
+neither is set by hand. Configure everything else (copy
+`apps/games-provider/.env.example`, type the real values):
+
+```bash
+dokku config:set bingo-crash \
+  NODE_ENV=production \
+  OPERATOR_CODE=bingo251 \
+  OPERATOR_NAME="Bingo 251" \
+  OPERATOR_CALLBACK_URL="https://api.example.com/games/callback/stratos" \
+  OPERATOR_HMAC_SECRET="<provider secret from Admin → Providers>" \
+  OPERATOR_CURRENCY=ETB \
+  ALLOWED_PARENT_ORIGINS="https://app.example.com" \
+  GAME_MIN_STAKE=100 \
+  GAME_MAX_STAKE=100000 \
+  GAME_MAX_WIN=3000000 \
+  GAME_MAX_BETS_PER_ROUND=200 \
+  CLIENT_SEEDS="stratos_slot_1_00000001,stratos_slot_2_00000002,stratos_slot_3_00000003" \
+  BOT_COUNT=0
+```
+
+`OPERATOR_HMAC_SECRET` must equal the webhook secret of the provider record in the bingo
+admin; it is never committed and never printed. `ALLOWED_PARENT_ORIGINS` is the
+comma-separated list of origins allowed to iframe `/play`.
+
+Deploy and expose it:
+
+```bash
+git push dokku-crash feat/games-provider-v1:main
+
+dokku domains:add bingo-crash crash.example.com
+dokku letsencrypt:enable bingo-crash
+```
+
+The image builds the client (`vite`) and then prunes devDependencies, so `tsx` must stay
+a runtime dependency; `Procfile.games` runs `server.ts` directly through it.
+
+First boot does everything itself; expect these log lines:
+
+```
+games-provider: boot drain { sent: 0, retried: 0, capped: 0, dead: 0 }
+games-provider: boot recovery { abandonedRoundIds: [], refundedBets: 0, ... }
+games-provider: recovery drain { ... }
+games-provider: listening on 3001
+```
+
+Migrations run from `apps/games-provider/drizzle` at boot and the operator row is
+upserted from the config every time. A `wallet rows need operator attention` line means
+`DEAD`/`CAP_REJECTED` outbox rows exist: a payout or rollback was refused terminally and
+needs a human (`dokku logs bingo-crash`).
+
+Register the provider in the bingo admin (**Admin → Providers**):
+
+1. Add provider: code `stratos`, kind `AGGREGATOR`, currency `ETB`, the win cap, and the
+   same webhook secret as `OPERATOR_HMAC_SECRET`. Bingo shows the callback it signs:
+   `POST https://api.example.com/games/callback/stratos` — that URL is what
+   `OPERATOR_CALLBACK_URL` points at, and it must be reachable from `bingo-crash`.
+2. Add game: external id `crash`, category `crash`, launch URL template
+   `https://<crash-host>/play?token={token}&lang={lang}&currency={currency}`.
+3. Enable both. Players then get the crash game in the Mini App lobby.
+
+Smoke test (writes rows, so it demands confirmation; recovery is global, so run it
+before the provider is opened to players or against a staging database):
+
+```bash
+dokku run bingo-crash env SMOKE_CONFIRM=yes npm run games:smoke
+```
+
+Keep `web=1`. Round timers live in the process, the outbox has no claim lease and socket
+fan-out is local, so a second replica would run a second game and duplicate wallet
+calls. Scaling the crash provider above one replica is unsupported in V1.
+

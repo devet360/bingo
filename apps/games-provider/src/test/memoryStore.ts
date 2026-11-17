@@ -3,6 +3,7 @@ import type {
   BetRecord,
   OperatorRecord,
   OutboxRecord,
+  OutboxStatus,
   RoundRecord,
   SessionRecord,
 } from '../domain/types';
@@ -217,6 +218,9 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): MemoryStore
     },
     async pendingOutboxCount() {
       return [...outbox.values()].filter((row) => row.status === 'PENDING').length;
+    },
+    async countOutboxByStatus(status: OutboxStatus) {
+      return [...outbox.values()].filter((row) => row.status === status).length;
     },
 
     dump() {

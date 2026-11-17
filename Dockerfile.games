@@ -1,0 +1,28 @@
+# syntax=docker/dockerfile:1
+# Crash game provider image for Dokku (apps/games-provider). Context is the repo root.
+FROM node:22-bookworm-slim AS build
+WORKDIR /app
+
+COPY package.json package-lock.json ./
+COPY apps/api/package.json apps/api/package.json
+COPY apps/web/package.json apps/web/package.json
+COPY apps/games-provider/package.json apps/games-provider/package.json
+RUN npm ci
+
+COPY apps/games-provider apps/games-provider
+# vite/react are devDependencies, so the client must be built before the prune.
+RUN npm run build -w @bingo/games-provider \
+  && npm prune --omit=dev \
+  && npx tsx --version
+
+FROM node:22-bookworm-slim AS runtime
+ENV NODE_ENV=production
+WORKDIR /app
+
+COPY --from=build /app/node_modules ./node_modules
+COPY --from=build /app/package.json ./package.json
+# dist/client is served by /play from this directory.
+COPY --from=build /app/apps ./apps
+
+EXPOSE 3001
+CMD ["node", "--import", "tsx", "apps/games-provider/server.ts"]

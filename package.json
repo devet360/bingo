@@ -18,6 +18,7 @@
     "games:build": "npm run build -w @bingo/games-provider",
     "games:test": "npm run test -w @bingo/games-provider",
     "games:typecheck": "npm run typecheck -w @bingo/games-provider",
+    "games:smoke": "node --import tsx apps/games-provider/scripts/smoke.ts",
     "typecheck": "npm run typecheck -w @bingo/api && npm run typecheck -w @bingo/web && npm run typecheck -w @bingo/games-provider",
     "db:validate": "prisma validate --schema apps/api/prisma/schema.prisma",
     "db:format": "prisma format --schema apps/api/prisma/schema.prisma",
