@@ -110,8 +110,9 @@ test('boot recovery abandons the round, refunds ACTIVE bets, resolves the indete
   const summary = await runRecovery({ store, wallet, now });
 
   assert.deepEqual(summary, {
-    abandonedRoundId: seeded.round.id,
+    abandonedRoundIds: [seeded.round.id],
     refundedBets: 2,
+    lostBets: 0,
     resolvedIndeterminate: 1,
     repairedSettlements: 2,
   });
@@ -177,6 +178,7 @@ test('a replayed placement that is accepted is refunded and counted', async () =
 
   assert.equal(summary.resolvedIndeterminate, 1);
   assert.equal(summary.refundedBets, 0);
+  assert.equal(summary.lostBets, 0);
   assert.equal(summary.repairedSettlements, 0);
   const resolved = betByTxn(store, placing.betTxnId);
   assert.equal(resolved.status, 'CANCELLED');
@@ -240,7 +242,69 @@ test('a 5xx on the replay leaves the bet UNRESOLVED and uncounted', async () => 
   assert.equal(store.dump().outbox.length, 0);
 });
 
-test('TRANSACTION_ROLLED_BACK cancels the bet without a second rollback', async () => {
+test('an ACTIVE bet in an already-ABANDONED round is refunded without re-abandoning the round', async () => {
+  const { store, wallet } = fixture();
+  const round = await store.createRound({ serverSeed: 's', serverSeedHash: 'h', startedAt: AT });
+  // A previous pass died between `finishRound(ABANDONED)` and the refund loop.
+  await store.finishRound(round.id, { status: 'ABANDONED', at: AT });
+  const leftover = await seedBet(store, {
+    roundId: round.id, sessionToken: token(1), stake: 900n, status: 'ACTIVE', betTxnId: txn(1),
+  });
+
+  const summary = await runRecovery({ store, wallet, now });
+
+  assert.deepEqual(summary.abandonedRoundIds, []);
+  assert.equal(summary.refundedBets, 1);
+  assert.equal(summary.lostBets, 0);
+  assert.equal((await store.getRound(round.id))!.crashedAt?.getTime(), AT.getTime());
+  const cancelled = betByTxn(store, leftover.betTxnId);
+  assert.equal(cancelled.status, 'CANCELLED');
+  assert.equal(cancelled.settledAt?.getTime(), now().getTime());
+  const rows = outboxFor(store, 'ROLLBACK', leftover.betTxnId);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]!.amount, 900n);
+});
+
+test('an ACTIVE bet in a CRASHED round is lost, not refunded', async () => {
+  const { store, wallet } = fixture();
+  const round = await store.createRound({ serverSeed: 's', serverSeedHash: 'h', startedAt: AT });
+  await store.startFlight(round.id, { crashPoint: 1.5, clientSeedComposite: 'composite', at: AT });
+  // A crash before settleRound swept the round leaves the bet ACTIVE.
+  await store.finishRound(round.id, { status: 'CRASHED', at: AT });
+  const leftover = await seedBet(store, {
+    roundId: round.id, sessionToken: token(1), stake: 700n, status: 'ACTIVE', betTxnId: txn(1),
+  });
+
+  const summary = await runRecovery({ store, wallet, now });
+
+  assert.equal(summary.lostBets, 1);
+  assert.equal(summary.refundedBets, 0);
+  assert.deepEqual(summary.abandonedRoundIds, []);
+  const lost = betByTxn(store, leftover.betTxnId);
+  assert.equal(lost.status, 'LOST');
+  assert.equal(lost.settledAt?.getTime(), now().getTime());
+  assert.equal(store.dump().outbox.length, 0);
+});
+
+test('a 5xx carrying TRANSACTION_ROLLED_BACK is not definitive and leaves the bet UNRESOLVED', async () => {
+  const { store, wallet } = fixture({
+    bet: async () => { throw new WalletError(500, 'TRANSACTION_ROLLED_BACK', 'upstream mislabelled'); },
+  });
+  const round = await store.createRound({ serverSeed: 's', serverSeedHash: 'h', startedAt: AT });
+  const unresolved = await seedBet(store, {
+    roundId: round.id, sessionToken: token(1), stake: 800n, status: 'UNRESOLVED', betTxnId: txn(1),
+  });
+
+  const summary = await runRecovery({ store, wallet, now });
+
+  assert.equal(summary.resolvedIndeterminate, 0);
+  const bet = betByTxn(store, unresolved.betTxnId);
+  assert.equal(bet.status, 'UNRESOLVED');
+  assert.equal(bet.settledAt, null);
+  assert.equal(store.dump().outbox.length, 0);
+});
+
+test('a 409 TRANSACTION_ROLLED_BACK tombstones the rollback so the next pass is a no-op', async () => {
   const { store, wallet } = fixture({
     bet: async () => { throw new WalletError(409, 'TRANSACTION_ROLLED_BACK', 'already refunded'); },
   });
@@ -252,10 +316,21 @@ test('TRANSACTION_ROLLED_BACK cancels the bet without a second rollback', async 
   const summary = await runRecovery({ store, wallet, now });
 
   assert.equal(summary.resolvedIndeterminate, 1);
-  const bet = betByTxn(store, unresolved.betTxnId);
-  assert.equal(bet.status, 'CANCELLED');
-  assert.equal(bet.settledAt?.getTime(), now().getTime());
-  assert.equal(store.dump().outbox.length, 0);
+  assert.equal(summary.repairedSettlements, 0);
+  assert.equal(betByTxn(store, unresolved.betTxnId).status, 'CANCELLED');
+
+  // bingo already applied that rollback: the row is a marker, never delivered.
+  const rows = outboxFor(store, 'ROLLBACK', unresolved.betTxnId);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]!.status, 'SENT');
+  assert.equal(rows[0]!.lastError, 'ALREADY_ROLLED_BACK');
+  assert.equal(rows[0]!.amount, 800n);
+
+  const second = await runRecovery({ store, wallet, now });
+
+  assert.equal(second.repairedSettlements, 0);
+  assert.equal(outboxFor(store, 'ROLLBACK', unresolved.betTxnId).length, 1);
+  assert.equal(store.dump().outbox.length, 1);
 });
 
 test('any other 4xx rejects the bet without a rollback', async () => {
@@ -285,8 +360,9 @@ test('a second recovery pass on the same store is a clean no-op', async () => {
   const summary = await runRecovery({ store, wallet, now });
 
   assert.deepEqual(summary, {
-    abandonedRoundId: null,
+    abandonedRoundIds: [],
     refundedBets: 0,
+    lostBets: 0,
     resolvedIndeterminate: 0,
     repairedSettlements: 0,
   });

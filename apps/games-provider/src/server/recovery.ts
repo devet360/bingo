@@ -10,8 +10,9 @@ export interface RecoveryDeps {
 }
 
 export interface RecoverySummary {
-  abandonedRoundId: number | null;
+  abandonedRoundIds: number[];
   refundedBets: number;
+  lostBets: number;
   resolvedIndeterminate: number;
   repairedSettlements: number;
 }
@@ -20,7 +21,7 @@ export interface RecoverySummary {
  * Boot-time recovery pass, run before the engine's first round.
  *
  * It repairs the three windows persistence-first betting can leave behind:
- * a round interrupted mid-flight (abandoned, its ACTIVE bets refunded), bets
+ * rounds interrupted mid-flight (abandoned, their ACTIVE bets refunded), bets
  * whose wallet charge is still ambiguous (replayed with their original txn id),
  * and terminal bets whose outbox reconciliation row was never written.
  *
@@ -31,7 +32,7 @@ export async function runRecovery(deps: RecoveryDeps): Promise<RecoverySummary> 
   const now = deps.now ?? (() => new Date());
   const { store, wallet } = deps;
   const summary: RecoverySummary = {
-    abandonedRoundId: null, refundedBets: 0, resolvedIndeterminate: 0, repairedSettlements: 0,
+    abandonedRoundIds: [], refundedBets: 0, lostBets: 0, resolvedIndeterminate: 0, repairedSettlements: 0,
   };
 
   // Snapshot the orphaned settlements before any repair: a bet this pass
@@ -39,21 +40,30 @@ export async function runRecovery(deps: RecoveryDeps): Promise<RecoverySummary> 
   // not an orphan and must not be refunded a second time.
   const orphanedSettlements = await store.listSettledBetsMissingOutbox();
 
-  const unfinished = await store.lastUnfinishedRound();
-  if (unfinished !== null) {
-    await store.finishRound(unfinished.id, { status: 'ABANDONED', at: now() });
-    summary.abandonedRoundId = unfinished.id;
-    for (const bet of await store.listBetsForRound(unfinished.id)) {
-      if (bet.status !== 'ACTIVE') continue;
-      await refundBet(store, bet, now);
-      summary.refundedBets += 1;
-    }
+  // Abandon every unfinished round (normally at most one; the loop heals a
+  // previous pass that died before it recorded the abandonment).
+  for (let round = await store.lastUnfinishedRound(); round !== null; round = await store.lastUnfinishedRound()) {
+    await store.finishRound(round.id, { status: 'ABANDONED', at: now() });
+    summary.abandonedRoundIds.push(round.id);
   }
 
-  // ACTIVE bets belonged to the abandoned round above; only the ambiguous rows
-  // are replayed, and each replay is scoped to its own bet row.
   for (const bet of await store.listUnsettledBets()) {
-    if (bet.status !== 'UNRESOLVED' && bet.status !== 'PLACING') continue;
+    if (bet.status === 'ACTIVE') {
+      // A crash between `finishRound(ABANDONED)` and this refund (or a crash
+      // before settleRound swept a CRASHED round) leaves the bet ACTIVE; the
+      // round's status, not the previous pass's progress, decides its fate.
+      const round = await store.getRound(bet.roundId);
+      if (round !== null && round.status === 'CRASHED') {
+        await store.updateBet(bet.id, { status: 'LOST', settledAt: now() });
+        summary.lostBets += 1;
+      } else {
+        // Abandoned or unknown round: the stake was charged and there is no
+        // outcome, so refund it.
+        await refundBet(store, bet, now);
+        summary.refundedBets += 1;
+      }
+      continue;
+    }
     if (await resolveIndeterminate(store, wallet, bet, now)) summary.resolvedIndeterminate += 1;
   }
 
@@ -99,12 +109,21 @@ async function resolveIndeterminate(store: Store, wallet: WalletClient, bet: Bet
     return true;
   } catch (error) {
     if (error instanceof WalletError) {
-      if (error.code === 'TRANSACTION_ROLLED_BACK') {
-        // The charge landed and was refunded before the restart: no second rollback.
+      // Only a 4xx status is definitive, whatever code the body carries.
+      const isClientError = error.status !== null && error.status >= 400 && error.status < 500;
+      if (isClientError && error.code === 'TRANSACTION_ROLLED_BACK') {
+        // The charge landed and was refunded before the restart: cancel it and
+        // leave a SENT tombstone so later boots do not mistake the CANCELLED bet
+        // for an orphan and fabricate a delivery.
         await store.updateBet(bet.id, { status: 'CANCELLED', settledAt: now() });
+        const row = await store.enqueueOutbox({
+          operatorCode: bet.operatorCode, type: 'ROLLBACK', txnId: bet.betTxnId,
+          sessionToken: bet.sessionToken, amount: bet.stake,
+        });
+        if (row !== null) await store.markOutbox(row.id, 'SENT', 'ALREADY_ROLLED_BACK');
         return true;
       }
-      if (error.status !== null && error.status >= 400 && error.status < 500) {
+      if (isClientError) {
         await store.updateBet(bet.id, { status: 'REJECTED', settledAt: now() });
         return true;
       }
