@@ -173,6 +173,74 @@ test('a rollback whose original never applied dies with NOT_FOUND after one retr
   assert.deepEqual(calls.map((call) => call.kind), ['rollback', 'rollback']);
 });
 
+test('a permanent 4xx refusal that is not a closed session is DEAD after one replay', async () => {
+  const { store, seed, script, worker } = fixture();
+  await seed({ txnId: 'win-inactive' });
+  script('win-inactive', fail(403, 'ACCOUNT_INACTIVE'));
+
+  assert.deepEqual(await worker.drainOnce(NOW), { sent: 0, retried: 1, capped: 0, dead: 0 });
+  const pending = rowOf(store, 'win-inactive');
+  assert.equal(pending.status, 'PENDING');
+  assert.equal(pending.lastError, 'ACCOUNT_INACTIVE');
+  assert.equal(pending.attempts, 1);
+
+  // A refusal is deterministic: the second pass must end the row, not back off again.
+  assert.equal((await worker.drainOnce(pending.nextAttemptAt)).dead, 1);
+  const row = rowOf(store, 'win-inactive');
+  assert.equal(row.status, 'DEAD');
+  assert.equal(row.lastError, 'ACCOUNT_INACTIVE');
+});
+
+test('a WIN that 404s on an unknown session is DEAD after one replay', async () => {
+  const { store, seed, script, worker } = fixture();
+  await seed({ txnId: 'win-unknown' });
+  script('win-unknown', fail(404, 'NOT_FOUND'));
+
+  assert.deepEqual(await worker.drainOnce(NOW), { sent: 0, retried: 1, capped: 0, dead: 0 });
+  const pending = rowOf(store, 'win-unknown');
+  assert.equal(pending.status, 'PENDING');
+  assert.equal(pending.lastError, 'NOT_FOUND');
+  assert.equal(pending.attempts, 1);
+
+  assert.equal((await worker.drainOnce(pending.nextAttemptAt)).dead, 1);
+  const row = rowOf(store, 'win-unknown');
+  assert.equal(row.status, 'DEAD');
+  assert.equal(row.lastError, 'NOT_FOUND');
+});
+
+test('an unreadable 4xx body stays retryable', async () => {
+  const { store, seed, script, worker } = fixture();
+  await seed({ txnId: 'win-mangled' });
+  script('win-mangled', fail(400, 'WALLET_RESPONSE_INVALID'));
+
+  assert.equal((await worker.drainOnce(NOW)).retried, 1);
+  const pending = rowOf(store, 'win-mangled');
+  assert.equal(pending.status, 'PENDING');
+  assert.equal(pending.nextAttemptAt.getTime(), NOW.getTime() + 1_000);
+
+  assert.equal((await worker.drainOnce(pending.nextAttemptAt)).retried, 1);
+  const row = rowOf(store, 'win-mangled');
+  assert.equal(row.status, 'PENDING');
+  assert.notEqual(row.status, 'DEAD');
+  assert.equal(row.attempts, 2);
+});
+
+test('a 429 stays retryable', async () => {
+  const { store, seed, script, worker } = fixture();
+  await seed({ txnId: 'win-throttled' });
+  script('win-throttled', fail(429, 'RATE_LIMITED'));
+
+  assert.equal((await worker.drainOnce(NOW)).retried, 1);
+  const pending = rowOf(store, 'win-throttled');
+  assert.equal(pending.status, 'PENDING');
+  assert.equal(pending.attempts, 1);
+
+  assert.equal((await worker.drainOnce(pending.nextAttemptAt)).retried, 1);
+  const row = rowOf(store, 'win-throttled');
+  assert.equal(row.status, 'PENDING');
+  assert.equal(row.attempts, 2);
+});
+
 test('a 2xx reply that does not accept the movement retries as NOT_ACCEPTED, never SENT', async () => {
   const { store, seed, script, worker } = fixture();
   await seed({ txnId: 'win-declined' });

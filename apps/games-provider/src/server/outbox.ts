@@ -20,21 +20,23 @@ const CLAIM_LIMIT = 20;
 const MAX_BACKOFF_MS = 60_000;
 const BACKOFF_CAP_EXPONENT = 6;
 /**
- * A live but unusable session gets exactly one replay before the row is
- * abandoned. `attempts` counts retry rounds and only `rescheduleOutbox`
- * increments it, so `attempts === 1` at claim time means this is the retry.
+ * A deterministic refusal gets exactly one replay before the row is abandoned.
+ * `attempts` counts retry rounds and only `rescheduleOutbox` increments it, so
+ * `attempts === 1` at claim time means this is the retry.
  */
-const SESSION_RETRY_LIMIT = 1;
+const DETERMINISTIC_RETRY_LIMIT = 1;
 
 /**
  * Durable delivery of win/rollback movements.
  *
  * The outbox row was committed with the bet, so this worker only classifies
- * bingo's answer: a 2xx is `SENT`, a cap breach is `CAP_REJECTED`, a dead
- * session or a rolled-back debit gets one replay before `DEAD`, and everything
- * indeterminate (timeout, 5xx, malformed 2xx, unknown 4xx) stays `PENDING` with
- * exponential backoff. Rows are drained sequentially so the wallet call order
- * bingo sees is deterministic.
+ * bingo's answer: a 2xx is `SENT`, a cap breach is `CAP_REJECTED`, and a 4xx that
+ * is not `WALLET_RESPONSE_INVALID` or 408/429 is a deterministic refusal that
+ * gets one replay before `DEAD`. Everything indeterminate (timeout, 5xx,
+ * `WALLET_RESPONSE_INVALID`, unreadable 2xx, 408/429) stays `PENDING` with
+ * exponential backoff. A bet must always reach a terminal wallet state, so DEAD
+ * rows are the audit trail: the refusing code is kept in `lastError`. Rows are
+ * drained sequentially so the wallet call order bingo sees is deterministic.
  *
  * `attempts` is read from the claimed snapshot; only `rescheduleOutbox`
  * increments it, so the backoff schedule is 1s, 2s, 4s ... 60s.
@@ -140,17 +142,15 @@ export class OutboxWorker {
       return;
     }
 
-    // A closed session or a rolled-back debit may be transient on bingo's side
-    // (a rollback racing the win), so it gets exactly one replay. A DEAD row is
-    // the audit trail when it still fails.
-    if (isClientError && (code === 'SESSION_CLOSED' || code === 'TRANSACTION_ROLLED_BACK')) {
-      await this.settleOrRetry(row, now, summary, code);
-      return;
-    }
-
-    // 404 on a rollback means the original transaction never applied: there is
-    // nothing to refund, and after one replay the row is audited as DEAD.
-    if (row.type === 'ROLLBACK' && status === 404 && code === 'NOT_FOUND') {
+    // Any other 4xx is a deterministic refusal, except the cases that are not
+    // actually refusals: `WALLET_RESPONSE_INVALID` because an intermediary can
+    // return a 4xx status with an unreadable body, and 408/429 because they are
+    // timeout/throttling signals. Those stay on the retry path. A refusal gets
+    // exactly one replay (a rollback can race the win it refunds) and then DEAD,
+    // because a bet must always end in a terminal wallet state.
+    const isDeterministicRefusal =
+      isClientError && code !== 'WALLET_RESPONSE_INVALID' && status !== 408 && status !== 429;
+    if (isDeterministicRefusal) {
       await this.settleOrRetry(row, now, summary, code);
       return;
     }
@@ -158,14 +158,14 @@ export class OutboxWorker {
     await this.retry(row, now, summary, code);
   }
 
-  /** One replay, then DEAD: `attempts` was incremented by the previous retry. */
+  /** One replay, then DEAD for a deterministic refusal: `attempts` was incremented by the previous retry. */
   private async settleOrRetry(
     row: OutboxRecord,
     now: Date,
     summary: DrainSummary,
     code: string,
   ): Promise<void> {
-    if (row.attempts < SESSION_RETRY_LIMIT) {
+    if (row.attempts < DETERMINISTIC_RETRY_LIMIT) {
       await this.retry(row, now, summary, code);
       return;
     }
