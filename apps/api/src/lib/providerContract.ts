@@ -15,6 +15,22 @@ export function buildLaunchUrl(template: string | null, ctx: LaunchContext): str
     .replaceAll('{currency}', encodeURIComponent(ctx.currency));
 }
 
+/**
+ * The player app embeds the launch URL in an iframe, so a template without a
+ * scheme or with angle-bracket placeholders only fails at play time. Reject
+ * those when the operator saves the game instead.
+ */
+export function isPlayableLaunchUrl(template: string | null): boolean {
+  const url = buildLaunchUrl(template, { token: 'token', lang: 'en', currency: 'ETB' });
+  if (!url) return false;
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
 export type ProviderMovementType = 'balance' | 'bet' | 'win' | 'rollback';
 
 /**

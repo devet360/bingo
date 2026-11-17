@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
-import { buildBalanceReply, buildLaunchUrl, movementRequiresOpenSession, withBalance } from '../src/lib/providerContract';
+import { buildBalanceReply, buildLaunchUrl, isPlayableLaunchUrl, movementRequiresOpenSession, withBalance } from '../src/lib/providerContract';
 
 test('launch url substitutes the real currency, not the legacy CREDIT literal', () => {
   const url = buildLaunchUrl('https://crash.example/play?token={token}&lang={lang}&currency={currency}', {
@@ -21,6 +21,15 @@ test('launch url is null without a template and encodes the token', () => {
     buildLaunchUrl('https://x/play?t={sessionId}', { token: 'a b', lang: 'en', currency: 'ETB' }),
     'https://x/play?t=a%20b',
   );
+});
+
+test('launch templates must be absolute http(s) URLs to be playable', () => {
+  assert.equal(isPlayableLaunchUrl('https://crash.example/play?token={token}&lang={lang}'), true);
+  assert.equal(isPlayableLaunchUrl('http://crash.example/play?token={token}'), true);
+  assert.equal(isPlayableLaunchUrl('crash.example/play?token={token}'), false);
+  assert.equal(isPlayableLaunchUrl('https://<crash-host>/play?token={token}'), false);
+  assert.equal(isPlayableLaunchUrl('javascript:alert(1)'), false);
+  assert.equal(isPlayableLaunchUrl(null), false);
 });
 
 test('balance reply signs the exact sessionId.currency.balance.timestamp.nonce string', () => {

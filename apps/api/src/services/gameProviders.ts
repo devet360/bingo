@@ -20,7 +20,7 @@ import {
   rollbackLedgerKey,
   verifyCallbackSignature,
 } from '../lib/providerCallback';
-import { buildBalanceReply, buildLaunchUrl, movementRequiresOpenSession, withBalance } from '../lib/providerContract';
+import { buildBalanceReply, buildLaunchUrl, isPlayableLaunchUrl, movementRequiresOpenSession, withBalance } from '../lib/providerContract';
 import { postLedger } from './ledger';
 import { getConfig } from './config';
 import { runTransaction, withTxRetry } from '../lib/tx';
@@ -177,6 +177,14 @@ export interface GameInput {
 export async function upsertGame(providerCode: string, input: GameInput): Promise<ProviderGame> {
   const provider = await prisma.gameProvider.findUnique({ where: { code: providerCode } });
   if (!provider) throw Errors.notFound('Provider');
+  if (input.launchUrlTemplate !== undefined && input.launchUrlTemplate !== null) {
+    if (!isPlayableLaunchUrl(input.launchUrlTemplate)) {
+      throw Errors.badRequest(
+        'Launch URL template must be an absolute http(s) URL, e.g. https://host/play?token={token}',
+        'LAUNCH_URL_INVALID',
+      );
+    }
+  }
   return prisma.providerGame.upsert({
     where: {
       providerId_externalId: { providerId: provider.id, externalId: input.externalId },
@@ -240,6 +248,14 @@ export async function launchGame(input: {
   if (!game) throw Errors.notFound('Game');
   if (!game.enabled || !game.provider.enabled) {
     throw Errors.conflict('This game is not available right now', 'GAME_UNAVAILABLE');
+  }
+  // A template without an absolute http(s) URL produces a session the player
+  // app cannot embed, so refuse the launch instead of sending a dead link.
+  if (!isPlayableLaunchUrl(game.launchUrlTemplate)) {
+    throw Errors.conflict(
+      'This game is not configured with a valid launch URL',
+      'LAUNCH_URL_INVALID',
+    );
   }
 
   const externalSessionId = randomUUID();
