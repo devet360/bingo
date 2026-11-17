@@ -34,6 +34,11 @@ export interface Store {
   getBet(roundId: number, sessionToken: string, panel: 0 | 1): Promise<BetRecord | null>;
   listBetsForRound(roundId: number): Promise<BetRecord[]>;
   listUnsettledBets(): Promise<BetRecord[]>;
+  /**
+   * Terminal bets whose wallet reconciliation row was never written: a CASHED
+   * bet without its WIN row, or a CANCELLED bet without its ROLLBACK row.
+   */
+  listSettledBetsMissingOutbox(): Promise<BetRecord[]>;
 
   enqueueOutbox(entry: NewOutbox): Promise<OutboxRecord | null>;
   claimDueOutbox(now: Date, limit: number): Promise<OutboxRecord[]>;

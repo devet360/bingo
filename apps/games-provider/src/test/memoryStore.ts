@@ -146,6 +146,20 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): MemoryStore
         .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
         .map(clone);
     },
+    async listSettledBetsMissingOutbox() {
+      return [...bets.values()]
+        .filter((bet) => {
+          if (bet.status === 'CASHED') {
+            return bet.winTxnId !== null && !outboxIds.has(outboxKey(bet.operatorCode, 'WIN', bet.winTxnId));
+          }
+          if (bet.status === 'CANCELLED') {
+            return !outboxIds.has(outboxKey(bet.operatorCode, 'ROLLBACK', bet.betTxnId));
+          }
+          return false;
+        })
+        .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
+        .map(clone);
+    },
 
     async enqueueOutbox(entry: NewOutbox) {
       const key = outboxKey(entry.operatorCode, entry.type, entry.txnId);

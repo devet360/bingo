@@ -20,6 +20,10 @@ type OutboxRow = typeof walletOutbox.$inferSelect;
 
 const UNSETTLED: readonly BetRecord['status'][] = ['PLACING', 'ACTIVE', 'UNRESOLVED'];
 
+/** The outbox dedupe key, mirroring the `outbox_dedupe` unique constraint. */
+const outboxKey = (operatorCode: string, type: string, txnId: string): string =>
+  `${operatorCode}|${type}|${txnId}`;
+
 /**
  * Drizzle reads `numeric` columns as strings (Postgres sends them as text), but
  * the domain records carry numbers. `numeric(12,2)` values round-trip exactly
@@ -303,6 +307,45 @@ export function createPostgresStore(db: Database): Store {
         .where(inArray(bets.status, [...UNSETTLED]))
         .orderBy(asc(bets.createdAt));
       return rows.map(toBetRecord);
+    },
+    async listSettledBetsMissingOutbox() {
+      const rows = await db
+        .select()
+        .from(bets)
+        .where(inArray(bets.status, ['CASHED', 'CANCELLED']))
+        .orderBy(asc(bets.createdAt));
+
+      // Only terminal bets that name the txn id to reconcile can be repaired; a
+      // CASHED bet without a win txn id has no key to look up.
+      const candidates: Array<{ bet: BetRecord; key: string; txnId: string }> = [];
+      for (const bet of rows.map(toBetRecord)) {
+        if (bet.status === 'CASHED') {
+          if (bet.winTxnId !== null) {
+            candidates.push({ bet, key: outboxKey(bet.operatorCode, 'WIN', bet.winTxnId), txnId: bet.winTxnId });
+          }
+          continue;
+        }
+        candidates.push({
+          bet,
+          key: outboxKey(bet.operatorCode, 'ROLLBACK', bet.betTxnId),
+          txnId: bet.betTxnId,
+        });
+      }
+      if (candidates.length === 0) return [];
+
+      // One probe for every candidate txn id; the rows that come back are the
+      // reconciliation rows already written (at any status, since the unique
+      // key is status-independent).
+      const written = await db
+        .select({
+          operatorCode: walletOutbox.operatorCode,
+          type: walletOutbox.type,
+          txnId: walletOutbox.txnId,
+        })
+        .from(walletOutbox)
+        .where(inArray(walletOutbox.txnId, candidates.map(({ txnId }) => txnId)));
+      const existing = new Set(written.map((row) => outboxKey(row.operatorCode, row.type, row.txnId)));
+      return candidates.filter(({ key }) => !existing.has(key)).map(({ bet }) => bet);
     },
 
     async enqueueOutbox(entry: NewOutbox) {
