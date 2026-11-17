@@ -29,9 +29,15 @@ export default function PlayGamePage() {
         // the host the session actually points at (no build-time env inlining).
         if (session.status === 'OPEN' && typeof session.launchUrl === 'string' && session.launchUrl) {
           try {
-            const origin = new URL(session.launchUrl).origin;
-            setLaunchUrl(session.launchUrl);
-            setProviderOrigin(origin);
+            const url = new URL(session.launchUrl);
+            // `javascript:`/`data:` URLs parse but have the opaque origin "null",
+            // which postMessage rejects as a targetOrigin — show the ended screen.
+            if (url.protocol === 'http:' || url.protocol === 'https:') {
+              setLaunchUrl(session.launchUrl);
+              setProviderOrigin(url.origin);
+            } else {
+              setEnded(true);
+            }
           } catch {
             setEnded(true);
           }

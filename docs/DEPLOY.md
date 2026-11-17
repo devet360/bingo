@@ -127,10 +127,12 @@ dokku config:set bingo-web \
 
 `API_URL`, `SOCKET_URL` and `TELEGRAM_BOT_USERNAME` are read at runtime by
 `/config.js` in the web app, so they can be changed with a restart and no rebuild.
+
 The embedded provider game iframe (`/games/play/<sessionId>`) needs no provider
 host of its own: the play page takes the launch URL from the API's game-session
 response and derives the iframe origin — and the `postMessage` target origin for
 the theme/locale bridge — from that URL at runtime.
+
 `CORS_ORIGINS` is a comma-separated allow-list and must contain every browser origin
 that calls the API (the Mini App origin and any staff dashboard preview origin).
 
