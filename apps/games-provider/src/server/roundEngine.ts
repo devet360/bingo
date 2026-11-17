@@ -46,6 +46,15 @@ export interface RoundBetManager {
     multiplier: number;
   }): Promise<void>;
   settleRound(input: { round: RoundRecord; maxWin: bigint }): Promise<void>;
+  /**
+   * Called on every FLYING tick, including the crash tick, before the tick event.
+   * Optional so existing seams keep typechecking.
+   */
+  processAutoCashouts?(input: {
+    round: RoundRecord;
+    multiplier: number;
+    elapsedMs: number;
+  }): Promise<void>;
 }
 
 export type RoundEngineEvent =
@@ -179,7 +188,11 @@ export class RoundEngine {
   async start(): Promise<void> {
     if (this.running) return;
     this.running = true;
-    this.wallStartedAtMs = this.now().getTime();
+    // Rebase the wall clock onto the engine clock: `onTimer` derives its advance
+    // from `wallElapsed - clockMs`, so without this a stop→start would stall for
+    // as long as the engine had already run. A fresh engine has `clockMs === 0`,
+    // which leaves the old behaviour untouched.
+    this.wallStartedAtMs = this.now().getTime() - this.clockMs;
     this.loopTimer = setInterval(() => this.onTimer(), FLIGHT_TICK_MS);
   }
 
@@ -300,11 +313,22 @@ export class RoundEngine {
         const crashPoint = round?.crashPoint ?? null;
         if (round === null || crashPoint === null) return;
         const elapsedMs = this.phaseElapsedMs();
+        // Computed before the crash check so the auto-cashout sweep also runs on
+        // the crash tick with the final multiplier, exactly like the prototype;
+        // the sweep itself guards `autoCashout < round.crashPoint`.
+        const multiplier = multiplierAtElapsedMs(elapsedMs);
+        if (elapsedMs > 0 && this.betManager?.processAutoCashouts) {
+          try {
+            await this.betManager.processAutoCashouts({ round, multiplier, elapsedMs });
+          } catch (error) {
+            // A sweep failure must not stop the loop or hide the crash.
+            console.error('auto cashout sweep failed', error);
+          }
+        }
         if (elapsedMs >= elapsedMsForMultiplier(crashPoint)) {
           await this.crash(crashPoint);
           continue;
         }
-        const multiplier = multiplierAtElapsedMs(elapsedMs);
         this.multiplier = multiplier;
         // Elapsed 0 is the takeoff instant, already covered by `round:flying`.
         if (elapsedMs > 0) {
@@ -386,12 +410,9 @@ export class RoundEngine {
     if (round === null) return;
 
     const crashedAt = this.now();
-    // The result is committed (and bets settled) before it is announced.
+    // The result is committed before it is announced.
     await this.store.finishRound(round.id, { status: 'CRASHED', at: crashedAt });
     const crashedRound: RoundRecord = { ...round, status: 'CRASHED', crashPoint, crashedAt };
-    if (this.betManager) {
-      await this.betManager.settleRound({ round: crashedRound, maxWin: this.limits.maxWin });
-    }
 
     this.round = crashedRound;
     this.phase = 'CRASHED';
@@ -409,5 +430,18 @@ export class RoundEngine {
         crashedAt,
       },
     });
+
+    // Settlement only marks leftover ACTIVE bets LOST -- a DB-only update, since the
+    // stake was already debited at placement. A settlement failure must therefore
+    // never freeze the loop (which would re-run this path on every tick) or hide the
+    // crash broadcast; the leftovers stay recoverable via `listUnsettledBets()` and
+    // boot recovery.
+    if (this.betManager) {
+      try {
+        await this.betManager.settleRound({ round: crashedRound, maxWin: this.limits.maxWin });
+      } catch (error) {
+        console.error('round settle failed', error);
+      }
+    }
   }
 }
