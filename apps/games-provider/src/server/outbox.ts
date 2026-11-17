@@ -148,9 +148,10 @@ export class OutboxWorker {
     // refusal could not be read (`WALLET_RESPONSE_INVALID` for a 2xx body,
     // `WALLET_HTTP_ERROR` for an unreadable or codeless non-2xx body, where an
     // intermediary such as a proxy can answer with a 4xx HTML page) plus 408/429
-    // as timeout/throttling signals. `CONCURRENT_UPDATE` is also exempt: bingo
-    // answered it after its own transaction retried and collided again, so it is
-    // transient, not a refusal. Those stay on the retry path. A refusal gets
+    // as timeout/throttling signals. `CONCURRENT_UPDATE` (bingo's P2034
+    // collision code) is also exempt: today bingo maps it to a 500, but if it
+    // ever surfaces the 409 it is transient, not a refusal. Those stay on the
+    // retry path. A refusal gets
     // exactly one replay (a rollback can race the win it refunds) and then DEAD,
     // because a bet must always end in a terminal wallet state.
     const isDeterministicRefusal =
