@@ -1,7 +1,6 @@
 import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { balanceSignatureInput } from '../server/wallet';
 
 /**
  * A fake bingo wallet for contract tests. It mirrors `POST
@@ -50,6 +49,11 @@ export interface FakeBingo {
   readonly token: string;
   state(): FakeBingoState;
   setLimits(limits: Partial<FakeBingoLimits>): void;
+  /**
+   * Answers the next callback request with `body` verbatim, bypassing the normal
+   * handler (one-shot). Used to exercise the client's response-parsing paths.
+   */
+  respondNextWith(body: string, init?: { status?: number; contentType?: string }): void;
   /** Stops the server; resolves once it is no longer accepting requests. */
   close(): Promise<void>;
 }
@@ -75,6 +79,21 @@ function isRecord(value: unknown): value is Json {
 /** Bytes in, bytes out: never re-serialize before verifying. */
 function hmacHex(secret: string, raw: Buffer): string {
   return createHmac('sha256', secret).update(raw).digest('hex');
+}
+
+/**
+ * The wire string bingo signs for a balance reply. Deliberately a local literal
+ * rather than importing `balanceSignatureInput` from the client: if the client's
+ * field order regresses, this fake must disagree with it.
+ */
+function balanceSigningString(input: {
+  sessionId: string;
+  currency: string;
+  balance: string;
+  timestamp: number;
+  nonce: string;
+}): string {
+  return `${input.sessionId}.${input.currency}.${input.balance}.${input.timestamp}.${input.nonce}`;
 }
 
 function signatureValid(secret: string, raw: Buffer, header: string | string[] | undefined): boolean {
@@ -110,6 +129,16 @@ const sendData = (res: ServerResponse, status: number, data: Json): void => send
 const sendError = (res: ServerResponse, status: number, code: string, message: string): void =>
   send(res, status, { error: { code, message } });
 
+/** Sends `body` verbatim so tests can produce truncated or non-JSON replies. */
+function sendRaw(res: ServerResponse, status: number, body: string, contentType = 'application/json'): void {
+  if (res.writableEnded || res.destroyed) return;
+  res.writeHead(status, {
+    'content-type': contentType,
+    'content-length': Buffer.byteLength(body).toString(),
+  });
+  res.end(body);
+}
+
 /** Positive integer minor units, as a decimal string or an integer number. */
 function parseAmount(value: unknown): bigint | null {
   if (typeof value === 'string') {
@@ -134,6 +163,7 @@ export async function createFakeBingo(options: FakeBingoOptions): Promise<FakeBi
   const calls: FakeBingoCall[] = [];
   let balance = options.balance;
   let closed = false;
+  let oneOff: { body: string; status: number; contentType?: string } | null = null;
 
   const pendingWaits = new Set<() => void>();
 
@@ -156,6 +186,15 @@ export async function createFakeBingo(options: FakeBingoOptions): Promise<FakeBi
   async function handler(req: IncomingMessage, res: ServerResponse): Promise<void> {
     if (req.method !== 'POST' || !CALLBACK_PATH_RE.test(new URL(req.url ?? '/', 'http://127.0.0.1').pathname)) {
       sendError(res, 404, 'NOT_FOUND', 'Route not found');
+      return;
+    }
+
+    if (oneOff) {
+      const override = oneOff;
+      oneOff = null;
+      req.resume();
+      record({ type: 'raw', status: override.status, signatureValid: false, txnId: null, replayed: false });
+      sendRaw(res, override.status, override.body, override.contentType);
       return;
     }
 
@@ -218,7 +257,7 @@ export async function createFakeBingo(options: FakeBingoOptions): Promise<FakeBi
       const nonce = typeof body.nonce === 'string' ? body.nonce : randomUUID();
       const balanceRaw = balance.toString();
       const signature = createHmac('sha256', secret)
-        .update(balanceSignatureInput({ sessionId, currency, balance: balanceRaw, timestamp, nonce }))
+        .update(balanceSigningString({ sessionId, currency, balance: balanceRaw, timestamp, nonce }))
         .digest('hex');
       record({ type, status: 200, signatureValid: true, txnId: null, replayed: false });
       sendData(res, 200, {
@@ -366,6 +405,9 @@ export async function createFakeBingo(options: FakeBingoOptions): Promise<FakeBi
       if (next.minStake !== undefined) limits.minStake = next.minStake;
       if (next.maxStake !== undefined) limits.maxStake = next.maxStake;
       if (next.maxWin !== undefined) limits.maxWin = next.maxWin;
+    },
+    respondNextWith: (body, init) => {
+      oneOff = { body, status: init?.status ?? 200, contentType: init?.contentType };
     },
     close: () => {
       if (closing) return closing;
