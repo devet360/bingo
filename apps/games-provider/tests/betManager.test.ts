@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 import { BetManager } from '../src/server/betManager';
 import { WalletError, type WalletClient, type MovementReply } from '../src/server/wallet';
 import { type RoundBetManager } from '../src/server/roundEngine';
@@ -40,7 +41,7 @@ async function fixture(walletOverrides: Partial<WalletClient> = {}) {
   // Typed as the seam interface so a missing method fails the typecheck, not just a test.
   const manager: RoundBetManager = new BetManager({
     store, wallet, limits: { minStake: 100n, maxStake: 100_000n, maxWin: 3_000_000n, maxBetsPerRound: 2 },
-    now: () => new Date(1_000), newId: () => crypto.randomUUID(),
+    now: () => new Date(1_000), newId: () => randomUUID(),
   });
   return { store, wallet, calls, round, session, manager };
 }
@@ -109,11 +110,51 @@ test('cancel before takeoff enqueues a rollback for the stake', async () => {
   assert.equal(store.dump().outbox[0]!.amount, 1_000n);
 });
 
-test('settling a crashed round marks uncashed ACTIVE bets LOST and caps payouts', async () => {
+test('settling a crashed round marks uncashed ACTIVE bets LOST', async () => {
   const { manager, store, round, session } = await fixture();
   await manager.place({ round, session, panel: 0, stake: 1_000n, autoCashout: 1.0 });
   await manager.settleRound({ round: { ...round, status: 'CRASHED', crashPoint: 1 }, maxWin: 30_000n });
   assert.equal(store.dump().bets[0]!.status, 'LOST');
+});
+
+test('settleRound only settles a crashed round', async () => {
+  const { manager, store, round, session } = await fixture();
+  await manager.place({ round, session, panel: 0, stake: 1_000n, autoCashout: null });
+  const flying = { ...round, status: 'FLYING' as const, crashPoint: 2 };
+  await assert.rejects(manager.settleRound({ round: flying, maxWin: 3_000_000n }), /not crashed/i);
+  assert.equal(store.dump().bets[0]!.status, 'ACTIVE');
+});
+
+test('settling a crashed round leaves a cashed bet untouched', async () => {
+  const { manager, store, round, session } = await fixture();
+  await manager.place({ round, session, panel: 0, stake: 1_000n, autoCashout: null });
+  const flying = { ...round, status: 'FLYING' as const, crashPoint: 2 };
+  await manager.cashout({ round: flying, session, panel: 0, multiplier: 1.5 });
+  await manager.settleRound({ round: { ...flying, status: 'CRASHED' }, maxWin: 3_000_000n });
+
+  const bet = store.dump().bets[0]!;
+  assert.equal(bet.status, 'CASHED');
+  assert.equal(bet.payout, 1_500n);
+  assert.equal(store.dump().outbox.length, 1);
+});
+
+test('place on a flying round is rejected', async () => {
+  const { manager, calls, round, session } = await fixture();
+  const flying = { ...round, status: 'FLYING' as const, crashPoint: 2 };
+  await assert.rejects(
+    manager.place({ round: flying, session, panel: 0, stake: 1_000n, autoCashout: null }),
+    /Betting is closed/,
+  );
+  assert.equal(calls.length, 0);
+});
+
+test('cashout on a betting round is rejected', async () => {
+  const { manager, round, session } = await fixture();
+  await manager.place({ round, session, panel: 0, stake: 1_000n, autoCashout: null });
+  await assert.rejects(
+    manager.cashout({ round, session, panel: 0, multiplier: 1.5 }),
+    /not flying/i,
+  );
 });
 
 test('auto cashout settles the bet at its target and enqueues a win', async () => {
@@ -137,15 +178,73 @@ test('auto cashout settles the bet at its target and enqueues a win', async () =
   assert.equal(store.dump().bets[0]!.payout, 1_500n);
 });
 
+test('a payout above session.maxWin is clamped', async () => {
+  const { manager, store, round, session } = await fixture();
+  // 100_000 x 40.0 = 4_000_000, above the fixture's maxWin of 3_000_000.
+  await manager.place({ round, session, panel: 0, stake: 100_000n, autoCashout: 40 });
+  const flying = { ...round, status: 'FLYING' as const, crashPoint: 50 };
+  await manager.processAutoCashouts({ round: flying, multiplier: 45, elapsedMs: 1_000 });
+
+  const bet = store.dump().bets[0]!;
+  assert.equal(bet.status, 'CASHED');
+  assert.equal(bet.cashoutMultiplier, 40);
+  assert.equal(bet.payout, session.maxWin);
+  assert.equal(store.dump().outbox[0]!.amount, session.maxWin);
+});
+
 test('auto cashout never fires at or above the crash point', async () => {
   const { manager, store, round, session } = await fixture();
-  await manager.place({ round, session, panel: 0, stake: 1_000n, autoCashout: 1.5 });
+  await manager.place({ round, session, panel: 0, stake: 1_000n, autoCashout: 2.0 });
   const flying = { ...round, status: 'FLYING' as const, crashPoint: 2 };
   await manager.processAutoCashouts({ round: flying, multiplier: 2, elapsedMs: 1_000 });
   assert.equal(store.dump().bets[0]!.status, 'ACTIVE');
-  await manager.processAutoCashouts({ round: flying, multiplier: 2.5, elapsedMs: 1_200 });
-  assert.equal(store.dump().bets[0]!.status, 'ACTIVE');
   assert.equal(store.dump().outbox.length, 0);
+});
+
+test('the crash-tick sweep pays a target crossed after the last tick', async () => {
+  const { manager, store, round, session } = await fixture();
+  await manager.place({ round, session, panel: 0, stake: 1_000n, autoCashout: 1.5 });
+  const flying = { ...round, status: 'FLYING' as const, crashPoint: 2 };
+  // The last 50 ms tick saw 1.98; the crash-tick sweep reports the final 2.00.
+  await manager.processAutoCashouts({ round: flying, multiplier: 2, elapsedMs: 1_000 });
+
+  const bet = store.dump().bets[0]!;
+  assert.equal(bet.status, 'CASHED');
+  assert.equal(bet.cashoutMultiplier, 1.5);
+  assert.equal(bet.payout, 1_500n);
+  const outbox = store.dump().outbox;
+  assert.equal(outbox.length, 1);
+  assert.equal(outbox[0]!.type, 'WIN');
+  assert.equal(outbox[0]!.amount, 1_500n);
+});
+
+test('a manual cashout racing the sweep mints exactly one win', async () => {
+  const { manager, store, round, session } = await fixture();
+  await manager.place({ round, session, panel: 0, stake: 1_000n, autoCashout: 1.5 });
+  const flying = { ...round, status: 'FLYING' as const, crashPoint: 2 };
+  // Same bet, target and multiplier coincide: both paths pass the ACTIVE check.
+  await Promise.all([
+    manager.cashout({ round: flying, session, panel: 0, multiplier: 1.5 }),
+    manager.processAutoCashouts({ round: flying, multiplier: 1.5, elapsedMs: 1_000 }),
+  ]);
+
+  const wins = store.dump().outbox.filter((row) => row.type === 'WIN');
+  assert.equal(wins.length, 1);
+  assert.equal(wins.reduce((total, row) => total + row.amount, 0n), 1_500n);
+  assert.equal(store.dump().bets[0]!.status, 'CASHED');
+});
+
+test('a 2xx reply that does not accept the bet leaves it UNRESOLVED', async () => {
+  const { manager, store, round, session } = await fixture({
+    bet: async () => ({ accepted: false, replayed: false, balance: 8_000n }) satisfies MovementReply,
+  });
+  await assert.rejects(
+    manager.place({ round, session, panel: 0, stake: 1_000n, autoCashout: null }),
+    (error: unknown) => error instanceof WalletError && error.code === 'BET_NOT_ACCEPTED',
+  );
+  assert.equal(store.dump().bets[0]!.status, 'UNRESOLVED');
+  // The declined reply's balance is never mirrored: no charge happened.
+  assert.equal(store.dump().sessions[0]!.displayBalance, session.displayBalance);
 });
 
 test('a 5xx wallet error leaves the bet UNRESOLVED', async () => {
@@ -165,7 +264,7 @@ test('the sweep only touches the current round', async () => {
   await store.insertBet({
     roundId: 2, operatorCode: session.operatorCode, sessionToken: session.token, panel: 0,
     stake: 1_000n, autoCashout: 1.2, status: 'ACTIVE', cashoutMultiplier: null, payout: null,
-    betTxnId: crypto.randomUUID(), winTxnId: null,
+    betTxnId: randomUUID(), winTxnId: null,
   });
   const flying = { ...round, status: 'FLYING' as const, crashPoint: 2 };
   await manager.processAutoCashouts({ round: flying, multiplier: 1.5, elapsedMs: 1_000 });

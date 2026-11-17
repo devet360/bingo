@@ -31,6 +31,8 @@ export class BetManager implements RoundBetManager {
   private readonly limits: EngineLimits;
   private readonly now: () => Date;
   private readonly newId: () => string;
+  /** Per-bet tail promise; settlement for one bet never overlaps itself. */
+  private readonly settling = new Map<string, Promise<void>>();
 
   constructor(deps: BetManagerDeps) {
     this.store = deps.store;
@@ -92,6 +94,14 @@ export class BetManager implements RoundBetManager {
       throw error;
     }
 
+    // A 2xx means bingo processed the request but did not accept the placement:
+    // the bet is not ACTIVE and must never win. UNRESOLVED is the conservative
+    // state -- recovery replays the txnId and resolves it either way.
+    if (!reply.accepted && !reply.replayed) {
+      await this.store.updateBet(bet.id, { status: 'UNRESOLVED' });
+      throw new WalletError(null, 'BET_NOT_ACCEPTED', 'Wallet did not accept the placement');
+    }
+
     await this.store.updateBet(bet.id, { status: 'ACTIVE' });
     if (reply.balance !== null) await this.store.setSessionBalance(session.token, reply.balance);
     return { ...bet, status: 'ACTIVE' };
@@ -129,9 +139,11 @@ export class BetManager implements RoundBetManager {
 
   /**
    * Sweeps the round's ACTIVE bets that opted into an auto cashout and settles
-   * every one whose target has been reached below the crash point. Runs on each
-   * FLYING tick, crash tick included, so the sweep must be idempotent: only an
-   * ACTIVE bet is ever settled, so a second pass pays nothing.
+   * every one whose target has been reached strictly below the crash point.
+   * Runs on each FLYING tick, crash tick included: the crash-tick sweep is what
+   * pays a target crossed between the last 50 ms tick and the crash, so it must
+   * not be skipped. The sweep must stay idempotent: only an ACTIVE bet is ever
+   * settled, under the per-bet lock, so a second pass pays nothing.
    */
   async processAutoCashouts(input: {
     round: RoundRecord;
@@ -143,14 +155,13 @@ export class BetManager implements RoundBetManager {
     const crashPoint = round.crashPoint;
     // Without a committed crash point there is nothing safe to compare against.
     if (crashPoint === null) return;
-    // At or above the crash point the round is over: an auto cashout may no
-    // longer fire, even if its target was crossed earlier.
-    if (multiplier >= crashPoint) return;
 
     const bets = await this.store.listBetsForRound(round.id);
     for (const listed of bets) {
       if (listed.status !== 'ACTIVE') continue;
       const target = listed.autoCashout;
+      // At or above the crash point the target never won, even on the crash
+      // tick; anything strictly below it is paid, however late the tick.
       if (target === null || target > multiplier || target >= crashPoint) continue;
 
       const session = await this.store.getSession(listed.sessionToken);
@@ -159,7 +170,8 @@ export class BetManager implements RoundBetManager {
         console.error('auto cashout skipped: session not found', listed.id);
         continue;
       }
-      // Re-read so a manual cashout that landed while we awaited cannot pay twice.
+      // Skip work a manual cashout already finished; `settleWin` re-reads the
+      // status once more under the per-bet lock before it writes anything.
       const bet = await this.store.getBet(round.id, listed.sessionToken, listed.panel);
       if (bet === null || bet.status !== 'ACTIVE') continue;
 
@@ -167,8 +179,17 @@ export class BetManager implements RoundBetManager {
     }
   }
 
+  /**
+   * Marks every leftover ACTIVE bet LOST. Only a CRASHED round settles here:
+   * an ABANDONED round is rolled back by boot recovery rather than settled as
+   * LOST, and a live round has no outcome yet.
+   *
+   * `maxWin` stays in the signature for the seam contract; the effective cap is
+   * `session.maxWin`, applied at payout time.
+   */
   async settleRound(input: { round: RoundRecord; maxWin: bigint }): Promise<void> {
     const { round } = input;
+    if (round.status !== 'CRASHED') throw new Error(`Round is not crashed: ${round.status}`);
     const settledAt = this.now();
     const bets = await this.store.listBetsForRound(round.id);
     for (const bet of bets) {
@@ -179,22 +200,52 @@ export class BetManager implements RoundBetManager {
     }
   }
 
-  private async settleWin(bet: BetRecord, multiplier: number, session: SessionRecord): Promise<void> {
-    const payout = payoutFor(bet.stake, multiplier, session.maxWin);
-    const winTxnId = this.newId();
-    await this.store.updateBet(bet.id, {
-      status: 'CASHED',
-      cashoutMultiplier: multiplier,
-      payout,
-      winTxnId,
-      settledAt: this.now(),
+  /**
+   * Serialises settlement of one bet. A manual cashout and the auto-cashout
+   * sweep can both pass their ACTIVE pre-check before either writes; the
+   * second arrival waits here and then re-reads the final status, so exactly
+   * one WIN is minted per bet.
+   */
+  private async withBetLock<T>(betId: string, fn: () => Promise<T>): Promise<T> {
+    const previous = this.settling.get(betId) ?? Promise.resolve();
+    let release!: () => void;
+    const current = new Promise<void>((resolve) => {
+      release = resolve;
     });
-    await this.store.enqueueOutbox({
-      operatorCode: session.operatorCode,
-      type: 'WIN',
-      txnId: winTxnId,
-      sessionToken: session.token,
-      amount: payout,
+    const tail = previous.then(() => current);
+    this.settling.set(betId, tail);
+    await previous;
+    try {
+      return await fn();
+    } finally {
+      release();
+      if (this.settling.get(betId) === tail) this.settling.delete(betId);
+    }
+  }
+
+  private async settleWin(bet: BetRecord, multiplier: number, session: SessionRecord): Promise<void> {
+    await this.withBetLock(bet.id, async () => {
+      // The authoritative status read: whoever held the lock first may have
+      // settled this bet while we waited, in which case there is nothing to pay.
+      const current = await this.store.getBet(bet.roundId, bet.sessionToken, bet.panel);
+      if (current === null || current.status !== 'ACTIVE') return;
+
+      const payout = payoutFor(current.stake, multiplier, session.maxWin);
+      const winTxnId = this.newId();
+      await this.store.updateBet(current.id, {
+        status: 'CASHED',
+        cashoutMultiplier: multiplier,
+        payout,
+        winTxnId,
+        settledAt: this.now(),
+      });
+      await this.store.enqueueOutbox({
+        operatorCode: session.operatorCode,
+        type: 'WIN',
+        txnId: winTxnId,
+        sessionToken: session.token,
+        amount: payout,
+      });
     });
   }
 

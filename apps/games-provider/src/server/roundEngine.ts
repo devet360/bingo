@@ -315,9 +315,9 @@ export class RoundEngine {
         if (round === null || crashPoint === null) return;
         const elapsedMs = this.phaseElapsedMs();
         // Computed before the crash check so the auto-cashout sweep also runs on
-        // the crash tick with the final multiplier, exactly like the prototype;
-        // the sweep itself refuses to fire once the multiplier reaches the
-        // crash point (`autoCashout < crashPoint`, `multiplier < crashPoint`).
+        // the crash tick with the final multiplier, exactly like the prototype:
+        // a target crossed between the last 50 ms tick and the crash point is
+        // still paid, since only targets at or above the crash point are skipped.
         const multiplier = multiplierAtElapsedMs(elapsedMs);
         if (elapsedMs > 0 && this.betManager) {
           try {
