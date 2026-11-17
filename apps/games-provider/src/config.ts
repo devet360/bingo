@@ -8,9 +8,9 @@ const EnvSchema = z.object({
   OPERATOR_HMAC_SECRET: z.string().min(16),
   OPERATOR_CURRENCY: z.string().length(3).default('ETB'),
   ALLOWED_PARENT_ORIGINS: z.string().default(''),
-  GAME_MIN_STAKE: z.coerce.bigint().default(100n),
-  GAME_MAX_STAKE: z.coerce.bigint().default(100_000n),
-  GAME_MAX_WIN: z.coerce.bigint().default(3_000_000n),
+  GAME_MIN_STAKE: z.coerce.bigint().min(1n).default(100n),
+  GAME_MAX_STAKE: z.coerce.bigint().min(1n).default(100_000n),
+  GAME_MAX_WIN: z.coerce.bigint().min(1n).default(3_000_000n),
   BOT_COUNT: z.coerce.number().int().min(0).default(0),
 });
 
