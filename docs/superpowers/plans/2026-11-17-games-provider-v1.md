@@ -346,7 +346,9 @@ import { useI18n } from '@/lib/i18n';
 import { haptic, getTelegramWebApp } from '@/lib/telegram';
 import { Button, Spinner } from '@/components/ui';
 
-const PROVIDER_ORIGIN = new URL(process.env.NEXT_PUBLIC_GAMES_PROVIDER_URL ?? 'https://crash.invalid').origin;
+// No build-time env: the provider origin is derived from the session's
+// launchUrl at runtime (ruling recorded during execution), so the deployed
+// image never falls back to a placeholder host.
 
 export default function PlayGamePage() {
   const params = useParams<{ sessionId: string }>();
@@ -461,7 +463,7 @@ export default function PlayGamePage() {
 }
 ```
 
-Add `NEXT_PUBLIC_GAMES_PROVIDER_URL` to `apps/web/.env.example` and to the Dokku web config in `docs/DEPLOY.md` with the provider host (placeholder in docs: `https://crash.example.com`).
+The provider origin for `postMessage` comes from `new URL(session.launchUrl).origin` at runtime; there is no `NEXT_PUBLIC_*` variable to configure (see ruling in the SDD ledger).
 
 - [ ] **Step 4: Make the shell immersive for the play route**
 
