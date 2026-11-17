@@ -176,17 +176,19 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): MemoryStore
         .slice(0, limit)
         .map(clone);
     },
+    // Terminal transitions only: `attempts` counts retry rounds, so it is
+    // owned exclusively by `rescheduleOutbox`.
     async markOutbox(id, status, error = null) {
       const row = outbox.get(id);
       if (!row) return;
       outbox.set(id, {
         ...row,
         status,
-        attempts: row.attempts + 1,
         lastError: error,
         updatedAt: now(),
       });
     },
+    // Sole owner of `attempts`: one increment per retry round.
     async rescheduleOutbox(id, nextAttemptAt, error) {
       const row = outbox.get(id);
       if (!row) return;
