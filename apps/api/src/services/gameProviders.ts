@@ -18,9 +18,9 @@ import {
   legacyProviderLedgerKey,
   providerLedgerKey,
   rollbackLedgerKey,
-  signBalance,
   verifyCallbackSignature,
 } from '../lib/providerCallback';
+import { buildBalanceReply, buildLaunchUrl, withBalance } from '../lib/providerContract';
 import { postLedger } from './ledger';
 import { getConfig } from './config';
 import { runTransaction, withTxRetry } from '../lib/tx';
@@ -217,15 +217,6 @@ export async function deleteGame(providerCode: string, externalId: string): Prom
   if (removed.count === 0) throw Errors.notFound('Game');
 }
 
-function buildLaunchUrl(template: string | null, token: string, lang: string): string | null {
-  if (!template) return null;
-  return template
-    .replaceAll('{token}', encodeURIComponent(token))
-    .replaceAll('{sessionId}', encodeURIComponent(token))
-    .replaceAll('{lang}', encodeURIComponent(lang))
-    .replaceAll('{currency}', 'CREDIT');
-}
-
 /** Issues a provider session token and returns the launch URL for the game iframe. */
 export async function launchGame(input: {
   userId: string;
@@ -258,7 +249,11 @@ export async function launchGame(input: {
       providerId: game.providerId,
       gameId: game.id,
       externalSessionId,
-      launchUrl: buildLaunchUrl(game.launchUrlTemplate, externalSessionId, input.lang),
+      launchUrl: buildLaunchUrl(game.launchUrlTemplate, {
+        token: externalSessionId,
+        lang: input.lang,
+        currency: game.provider.currency,
+      }),
       expiresAt: new Date(Date.now() + SESSION_TTL_MS),
     },
   });
@@ -632,24 +627,23 @@ export async function handleProviderCallback(input: {
         select: { available: true },
       });
       const available = wallet?.available ?? 0n;
+      const maxWin = await resolveMaxWin(provider, context.game);
       const timestamp = Math.floor(Date.now() / 1000);
       const nonce = payload.nonce ?? randomUUID();
       await writeCallbackLog(audit, 200);
       return {
         status: 200,
-        data: {
+        data: buildBalanceReply({
+          secret: provider.webhookSecret!,
+          sessionId: payload.sessionId,
           currency: provider.currency,
-          balance: available.toString(),
+          balance: available,
+          minStake: context.game?.minStake ?? null,
+          maxStake: context.game?.maxStake ?? null,
+          maxWin,
           timestamp,
           nonce,
-          signature: signBalance(provider.webhookSecret!, {
-            sessionId: payload.sessionId,
-            currency: provider.currency,
-            balance: available,
-            timestamp,
-            nonce,
-          }),
-        },
+        }),
       };
     }
 
@@ -664,7 +658,15 @@ export async function handleProviderCallback(input: {
         amount,
       });
       await writeCallbackLog(audit, replayed ? 200 : 201);
-      return { status: replayed ? 200 : 201, data: { accepted: true, replayed } };
+      const walletAfter = await prisma.wallet.findUnique({
+        where: { userId: session.userId },
+        select: { available: true },
+      });
+      const balanceNow = walletAfter?.available ?? 0n;
+      return {
+        status: replayed ? 200 : 201,
+        data: withBalance({ accepted: true, replayed }, balanceNow),
+      };
     }
 
     if (payload.type === 'win') {
@@ -684,7 +686,15 @@ export async function handleProviderCallback(input: {
       amount,
     });
     await writeCallbackLog(audit, replayed ? 200 : 201);
-    return { status: replayed ? 200 : 201, data: { accepted: true, replayed } };
+    const walletAfter = await prisma.wallet.findUnique({
+      where: { userId: session.userId },
+      select: { available: true },
+    });
+    const balanceNow = walletAfter?.available ?? 0n;
+    return {
+      status: replayed ? 200 : 201,
+      data: withBalance({ accepted: true, replayed }, balanceNow),
+    };
   } catch (error) {
     const appError = error instanceof AppError ? error : Errors.internal('Provider callback failed');
     await writeCallbackLog(audit, appError.status, `${appError.code}: ${appError.message}`);
