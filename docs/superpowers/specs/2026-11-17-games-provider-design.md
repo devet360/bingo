@@ -84,9 +84,10 @@ Rules:
 | `rounds` | `id` bigserial PK, `serverSeed`, `serverSeedHash`, `clientSeedComposite`, `crashPoint numeric(12,2)`, `status BETTING|FLYING|CRASHED|ABANDONED`, `startedAt`, `flewAt`, `crashedAt` |
 | `bets` | `id` uuid PK, `roundId`, `operatorCode`, `sessionToken`, `panel smallint`, `stake bigint`, `autoCashout numeric(12,2)`, `status PLACING|ACTIVE|CASHED|LOST|CANCELLED|REJECTED|UNRESOLVED`, `cashoutMultiplier numeric(12,2)`, `payout bigint`, `betTxnId` uuid, `winTxnId` uuid, timestamps; unique `(roundId, sessionToken, panel)` |
 | `wallet_outbox` | `id` uuid PK, `operatorCode`, `type WIN|ROLLBACK`, `txnId` uuid, `sessionToken`, `amount bigint`, `status PENDING|SENT|CAP_REJECTED|DEAD`, `attempts`, `nextAttemptAt`, `lastError`; unique `(operatorCode, type, txnId)` |
-| `wallet_calls` | Audit of every outbound call: `type`, `sessionToken`, `txnId`, `httpStatus`, `latencyMs`, `requestHash`, `error`, `createdAt` |
 
 Money is `bigint` minor units everywhere (1 ETB = 100 minor). No floats in money paths.
+
+The outbound-call audit lives on the bingo side (`provider_callback_log`) plus the outbox's `DEAD`/`CAP_REJECTED` rows and their `lastError`; the draft's provider-side `wallet_calls` table was never written and is removed in V1 (migration `0001`).
 
 ---
 
@@ -119,7 +120,7 @@ signed with `x-provider-signature: HMAC-SHA256(rawBody, operatorHmacSecret)`.
 4. Provider verifies `HMAC-SHA256("<sessionId>.<currency>.<balance>.<timestamp>.<nonce>")` with the same secret and a ≤120s timestamp skew. Limits are optional; when absent fall back to provider defaults `minStake 100`, `maxStake 100000`, `maxWin 3000000`.
 5. On success, upsert the `sessions` row and return `{sessionId, gameId, currency, balance, limits, expiresAt}`. Any 4xx from bingo is terminal: the client shows "session ended, return to the lobby" (`410`). A transport failure or 5xx is retried twice, then the client shows a retry screen rather than declaring the session dead.
 
-Re-handshake is forced on every WebSocket (re)connect and at most every 5 minutes while idle. `SESSION_CLOSED` / expired are terminal.
+The handshake runs once per client boot. A WebSocket (re)connect reuses the stored token — the gateway re-reads the session row on every frame — and the fresh balance arrives with the `snapshot` frame, so a reconnect does not need a second signed call. `SESSION_CLOSED` / expired at boot are terminal (the client shows the ended screen).
 
 ### 4.3 Movements
 
@@ -141,20 +142,26 @@ Error mapping from bingo (`error.code`): `SIGNATURE_INVALID`, `CALLBACK_MALFORME
 
 ### 4.4 Display balance
 
-The provider stores `displayBalance` and updates it from (a) the signed handshake reply, (b) the additive `balance` field in bet/win replies, (c) a `balance` poll at most every 30s while a session is open. Bet acceptance never depends on it.
+The provider stores `displayBalance` and updates it from (a) the signed handshake reply, (b) the additive `balance` field in bet/win/rollback replies, and (c) pushed `balance:update` frames after every delivered movement, plus the `snapshot` on (re)connect. There is no periodic balance poll: settlements are the only thing that moves the balance during a session, and they are pushed. Bet acceptance never depends on it.
 
 ### 4.5 The indeterminate bet
 
 If a `bet` call exceeds 3s, the bet is **excluded from the round** and marked `UNRESOLVED` — never `ACTIVE`, never silently `REJECTED`. The outbox replays the identical `txnId` (bingo is idempotent, so a replay can only confirm). If the replay lands, a `rollback` for that txnId is enqueued immediately. Net effect is exactly once: never charged, or charged and refunded. The player loses a round; no funds are at risk.
 
+Resolution happens at boot recovery and again on a 60s runtime sweep (`reconcileUnresolvedBets`), so a bet stranded by a flaky wallet never waits for a restart. The sweep touches `UNRESOLVED` rows only — `ACTIVE` belongs to the live engine and `PLACING` to an in-flight placement.
+
+Policy: an indeterminate placement is refunded **even if its round crashed**. It never joined the round (the player was shown a failure and it was never `ACTIVE`), so the round outcome must not decide it.
+
 ### 4.6 Win delivery
 
-A win row is written to `wallet_outbox` in the same database transaction that settles the bet. The worker drains it. Classification:
+A win row is written to `wallet_outbox` immediately after the `CASHED` bet row commits, in the same request (not one transaction: the two stores share no transactional handle). A crash between the two writes leaves a `CASHED` bet with no outbox row, which boot recovery's orphan scan repairs — that window is tested. The worker drains the row. Classification:
 
 - `2xx` → `SENT`.
 - `409 WIN_LIMIT_EXCEEDED` → `CAP_REJECTED`, alert, no retry. Payouts are clamped locally to the session's `maxWin` so this should be unreachable.
-- `409 TRANSACTION_ROLLED_BACK` or `SESSION_CLOSED` that survives one retry → `DEAD`, logged.
+- Any other 4xx (including `TRANSACTION_ROLLED_BACK`) survives one replay, then → `DEAD`, logged.
 - Others → `PENDING` with exponential backoff.
+
+`SESSION_CLOSED`/expiry cannot strand a settlement from the bingo side: bingo accepts `win` and `rollback` for closed or expired sessions (see §7 item 7). A `DEAD` row therefore means contract drift, and the worker logs it for an operator every tick.
 
 ---
 
@@ -173,11 +180,11 @@ Round ids come from the DB sequence, not the prototype's in-memory fallback.
 ### 5.2 Bet states
 
 ```
-PLACING ─→ ACTIVE ─→ CASHED      win enqueued in the same DB txn
+PLACING ─→ ACTIVE ─→ CASHED      win enqueued right after the CASHED commit
    │          ├──→ LOST
    │          └──→ CANCELLED    rollback enqueued
    ├──→ REJECTED
-   └──→ UNRESOLVED ─→ outbox replay → rollback enqueued if it landed
+   └──→ UNRESOLVED ─→ replay (boot + 60s sweep) → rollback enqueued if it landed
 ```
 
 - `PLACING` is committed before the wallet call.
@@ -193,6 +200,7 @@ Runs before the first round is announced:
 2. Any round left `BETTING`/`FLYING` → `ABANDONED`; enqueue `rollback` for every `ACTIVE` bet at stake value and attempt each once.
 3. Every `PLACING`/`UNRESOLVED` bet → replay its `bet` txnId, then roll back if it landed.
 4. Start the loop once every recovery rollback has been enqueued and attempted. Wins still `PENDING` keep retrying in the background and do not block new rounds — their money is already accounted for in the outbox.
+5. After boot, a 60s sweep (`reconcileUnresolvedBets`) repeats step 3 for `UNRESOLVED` bets only, so a runtime wallet failure resolves without a restart.
 
 Guarantee: after recovery every bet from an interrupted round is in a terminal wallet state — charged and refunded, or never charged.
 
@@ -243,6 +251,7 @@ Code paths stay behind `botCount`, default 0, forced to 0 by env in V1. When ena
 4. New web route `/games/play/[sessionId]` + iframe + Telegram theme/locale/haptic bridge on the parent side.
 5. Lobby card links to the new route.
 6. New `GET /api/games/sessions/:sessionId` — read-only session state (provider game, currency, limits, expiry) for the play page; authenticated to the embedding player.
+7. Settlement callbacks (`win`, `rollback`) are accepted for `CLOSED` sessions and past `expiresAt` via `movementRequiresOpenSession` (`apps/api/src/lib/providerContract.ts`); `balance` and `bet` still require an open session. Closing a launch must never forfeit money the round already committed.
 
 The three API changes above are optional fields: existing callers and tests are unaffected. The new GET route is additive and read-only.
 
@@ -282,10 +291,13 @@ The three API changes above are optional fields: existing callers and tests are 
 Implements the real schema and checks: full round place → cashout → win applied; same txnId replay → `replayed:true`; rollback path; cap rejection; session-closed mid-round; indeterminate bet resolution.
 
 **Recovery test**
-Seed an interrupted `BETTING` round with `ACTIVE` bets, boot, assert `ABANDONED`, refunds issued, next round gated on an empty outbox.
+Seed an interrupted `BETTING` round with `ACTIVE` bets, boot, assert `ABANDONED`, refunds issued; an `UNRESOLVED` bet is replayed at boot and by the runtime sweep (idempotent, one rollback), and is refunded even when its round crashed.
+
+**Provably-fair vector**
+One hard-coded seed/hash/crash-point vector is asserted by both `tests/provablyFair.test.ts` and `tests/clientFair.test.ts`, so the server and browser verifiers cannot drift apart.
 
 **Bingo side**
-Unit tests for the three additive changes; existing provider callback suite stays green.
+Unit tests for the additive changes including `movementRequiresOpenSession` (settlements allowed on closed sessions, debits/reads not); existing provider callback suite stays green.
 
 **Manual E2E in Telegram**
 Real session: one win, one loss, balance matches bingo history, close/reopen restores, provider killed mid-flight produces refunds, proof page verifies.
@@ -323,6 +335,7 @@ No V2 feature is implemented, scaffolded or stubbed during V1.
 - Every placement, cashout, cancel and crash produces exactly one bingo ledger effect; replaying any call never double-charges or double-credits.
 - Balance in bingo's history matches the game's displayed balance after each round.
 - Killing the provider during a round leaves no money ambiguous: refunds appear in bingo history after restart.
+- A win or refund enqueued while bingo was unreachable still lands after the launch session closed or expired.
 - Telegram theme, haptics and EN/AM switching work inside the iframe; the game is usable at 360px width.
 - `GET /api/rounds/:id/proof` verifies a finished round in the browser.
 - Provider suite, contract test, recovery test and bingo's existing callback tests all pass; both apps typecheck clean.
