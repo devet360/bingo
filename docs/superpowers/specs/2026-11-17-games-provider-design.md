@@ -1,6 +1,6 @@
 # Games Provider — V1 Design
 
-**Status:** awaiting review
+**Status:** implemented (V1)
 **Date:** 2026-11-17
 **Scope:** A new monorepo app `apps/games-provider` that hosts a real-time crash game and sells it to bingo251 (and later other operators) over the existing HMAC callback seam.
 
@@ -242,8 +242,9 @@ Code paths stay behind `botCount`, default 0, forced to 0 by env in V1. When ena
 3. `bet`/`win` replies gain optional post-movement `balance` (string, minor units).
 4. New web route `/games/play/[sessionId]` + iframe + Telegram theme/locale/haptic bridge on the parent side.
 5. Lobby card links to the new route.
+6. New `GET /api/games/sessions/:sessionId` — read-only session state (provider game, currency, limits, expiry) for the play page; authenticated to the embedding player.
 
-All three API changes are optional fields: existing callers and tests are unaffected.
+The three API changes above are optional fields: existing callers and tests are unaffected. The new GET route is additive and read-only.
 
 ---
 
