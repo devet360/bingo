@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import express from 'express';
@@ -16,6 +17,7 @@ export interface AppDeps {
 // The client is emitted to `dist/client` next to this module's build output,
 // while the process runs from the repo root.
 const clientDir = path.resolve(fileURLToPath(new URL('../../dist/client', import.meta.url)));
+const clientIndex = path.join(clientDir, 'index.html');
 const SESSION_TTL_MS = 2 * 3600_000;
 const SessionBody = z.object({ token: z.string().uuid() });
 
@@ -91,7 +93,8 @@ export function createApp(deps: AppDeps): express.Express {
   app.get('/api/rounds/:id/proof', async (req, res, next) => {
     try {
       const id = roundId(req.params.id);
-      const round = id === null ? null : await deps.store.getRound(id);
+      // Only the canonical decimal form resolves: /rounds/0007 is not round 7.
+      const round = id === null || String(id) !== req.params.id ? null : await deps.store.getRound(id);
       if (round === null) {
         res.status(404).json({ error: { code: 'ROUND_NOT_FOUND' } });
         return;
@@ -122,7 +125,15 @@ export function createApp(deps: AppDeps): express.Express {
   });
 
   app.use('/play', express.static(clientDir));
-  app.get(['/play', '/play/*'], (_req, res) => res.sendFile(path.join(clientDir, 'index.html')));
+  app.get(['/play', '/play/*'], (_req, res) => {
+    // The client bundle is emitted by a later task. Until it exists, sending the
+    // missing file would surface ENOENT as a 500; answer a plain 404 instead.
+    if (!fs.existsSync(clientIndex)) {
+      res.status(404).json({ error: { code: 'NOT_FOUND' } });
+      return;
+    }
+    res.sendFile(clientIndex);
+  });
 
   app.use((error: unknown, _req: express.Request, res: express.Response, next: express.NextFunction) => {
     if (res.headersSent) {
@@ -137,6 +148,7 @@ export function createApp(deps: AppDeps): express.Express {
       res.status(400).json({ error: { code: 'VALIDATION_ERROR' } });
       return;
     }
+    console.error('http: unhandled request error', error);
     res.status(500).json({ error: { code: 'INTERNAL_ERROR' } });
   });
 

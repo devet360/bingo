@@ -20,9 +20,13 @@ async function boot(fake: Awaited<ReturnType<typeof createFakeBingo>>) {
   return { server, base, store };
 }
 
-test('handshake stores the session and returns signed limits', async () => {
+test('handshake stores the session and returns signed limits', async (t) => {
   const fake = await createFakeBingo({ hmacSecret: 'test-hmac-secret-value', balance: 50_000n, currency: 'ETB' });
   const { server, base, store } = await boot(fake);
+  t.after(async () => {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await fake.close();
+  });
   const response = await fetch(`${base}/api/sessions/handshake`, {
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ token: fake.token }),
@@ -32,23 +36,29 @@ test('handshake stores the session and returns signed limits', async () => {
   assert.equal(body.data.balance, '50000');
   assert.equal(body.data.limits.minStake, '100');
   assert.equal(store.dump().sessions.length, 1);
-  server.close(); await fake.close();
 });
 
-test('a closed bingo session answers 410', async () => {
+test('a closed bingo session answers 410', async (t) => {
   const fake = await createFakeBingo({ hmacSecret: 'test-hmac-secret-value', balance: 0n, currency: 'ETB', sessionOpen: false });
   const { server, base } = await boot(fake);
+  t.after(async () => {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await fake.close();
+  });
   const response = await fetch(`${base}/api/sessions/handshake`, {
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ token: fake.token }),
   });
   assert.equal(response.status, 410);
-  server.close(); await fake.close();
 });
 
-test('proof is available only after the round crashed', async () => {
+test('proof is available only after the round crashed', async (t) => {
   const fake = await createFakeBingo({ hmacSecret: 'test-hmac-secret-value', balance: 0n, currency: 'ETB' });
   const { server, base, store } = await boot(fake);
+  t.after(async () => {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await fake.close();
+  });
   const round = await store.createRound({ serverSeed: 's', serverSeedHash: 'h', startedAt: new Date() });
   const flying = await fetch(`${base}/api/rounds/${round.id}/proof`);
   assert.equal(flying.status, 409);
@@ -58,12 +68,15 @@ test('proof is available only after the round crashed', async () => {
   const obj = await ok.json();
   assert.equal(obj.data.serverSeed, 's');
   assert.equal(obj.data.crashPoint, 2.5);
-  server.close(); await fake.close();
 });
 
-test('closing a session is idempotent and flips the stored status', async () => {
+test('closing a session is idempotent and flips the stored status', async (t) => {
   const fake = await createFakeBingo({ hmacSecret: 'test-hmac-secret-value', balance: 0n, currency: 'ETB' });
   const { server, base, store } = await boot(fake);
+  t.after(async () => {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await fake.close();
+  });
   await fetch(`${base}/api/sessions/handshake`, {
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ token: fake.token }),
@@ -77,12 +90,15 @@ test('closing a session is idempotent and flips the stored status', async () => 
     assert.deepEqual(await response.json(), { data: { closed: true } });
   }
   assert.equal(store.dump().sessions[0]!.status, 'CLOSED');
-  server.close(); await fake.close();
 });
 
-test('proof answers 404 for an unknown round and 409 for an abandoned one', async () => {
+test('proof answers 404 for an unknown round and 409 for an abandoned one', async (t) => {
   const fake = await createFakeBingo({ hmacSecret: 'test-hmac-secret-value', balance: 0n, currency: 'ETB' });
   const { server, base, store } = await boot(fake);
+  t.after(async () => {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await fake.close();
+  });
   const missing = await fetch(`${base}/api/rounds/999999/proof`);
   assert.equal(missing.status, 404);
   assert.equal((await missing.json()).error.code, 'ROUND_NOT_FOUND');
@@ -91,12 +107,15 @@ test('proof answers 404 for an unknown round and 409 for an abandoned one', asyn
   const abandoned = await fetch(`${base}/api/rounds/${round.id}/proof`);
   assert.equal(abandoned.status, 409);
   assert.equal((await abandoned.json()).error.code, 'ROUND_ABANDONED');
-  server.close(); await fake.close();
 });
 
-test('a 5xx wallet answers 502 instead of declaring the session dead', async () => {
+test('a 5xx wallet answers 502 instead of declaring the session dead', async (t) => {
   const fake = await createFakeBingo({ hmacSecret: 'test-hmac-secret-value', balance: 0n, currency: 'ETB' });
   const { server, base } = await boot(fake);
+  t.after(async () => {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await fake.close();
+  });
   fake.respondNextWith('{"error":{"code":"INTERNAL_ERROR","message":"boom"}}', { status: 500 });
   const response = await fetch(`${base}/api/sessions/handshake`, {
     method: 'POST', headers: { 'content-type': 'application/json' },
@@ -104,17 +123,35 @@ test('a 5xx wallet answers 502 instead of declaring the session dead', async () 
   });
   assert.equal(response.status, 502);
   assert.equal((await response.json()).error.code, 'WALLET_UNAVAILABLE');
-  server.close(); await fake.close();
 });
 
-test('a malformed handshake body answers 400 rather than 500', async () => {
+test('a 2xx wallet reply without a signature answers 502 rather than declaring the session dead', async (t) => {
   const fake = await createFakeBingo({ hmacSecret: 'test-hmac-secret-value', balance: 0n, currency: 'ETB' });
   const { server, base } = await boot(fake);
+  t.after(async () => {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await fake.close();
+  });
+  fake.respondNextWith('{"data":{"currency":"ETB","balance":"100","timestamp":1700000000}}');
+  const response = await fetch(`${base}/api/sessions/handshake`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ token: fake.token }),
+  });
+  assert.equal(response.status, 502);
+  assert.equal((await response.json()).error.code, 'WALLET_UNAVAILABLE');
+});
+
+test('a malformed handshake body answers 400 rather than 500', async (t) => {
+  const fake = await createFakeBingo({ hmacSecret: 'test-hmac-secret-value', balance: 0n, currency: 'ETB' });
+  const { server, base } = await boot(fake);
+  t.after(async () => {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await fake.close();
+  });
   const response = await fetch(`${base}/api/sessions/handshake`, {
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ token: 'not-a-uuid' }),
   });
   assert.equal(response.status, 400);
   assert.equal((await response.json()).error.code, 'VALIDATION_ERROR');
-  server.close(); await fake.close();
 });
