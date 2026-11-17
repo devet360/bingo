@@ -259,6 +259,20 @@ export async function launchGame(input: {
   });
 }
 
+export async function getOpenSessionForUser(
+  userId: string,
+  sessionId: string,
+): Promise<ProviderSession> {
+  const session = await prisma.providerSession.findFirst({
+    where: { id: sessionId, userId },
+  });
+  if (!session) throw Errors.notFound('Game session');
+  if (session.expiresAt <= new Date()) {
+    throw Errors.gone('Game session has expired', 'SESSION_EXPIRED');
+  }
+  return session;
+}
+
 export async function closeSession(userId: string, sessionId: string): Promise<void> {
   const closed = await prisma.providerSession.updateMany({
     where: { id: sessionId, userId, status: 'OPEN' },

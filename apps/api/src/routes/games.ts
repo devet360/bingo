@@ -5,6 +5,7 @@ import { asyncHandler } from '../lib/async';
 import { authenticate, requireVerifiedPhone } from '../middleware/auth';
 import {
   closeSession,
+  getOpenSessionForUser,
   handleProviderCallback,
   launchGame,
   listPlayableGames,
@@ -41,6 +42,14 @@ gamesRouter.get(
   asyncHandler(async (_req, res) => {
     const providers = await listPlayableGames();
     res.json({ data: providers });
+  }),
+);
+
+gamesRouter.get(
+  '/sessions/:sessionId',
+  asyncHandler(async (req, res) => {
+    const session = await getOpenSessionForUser(req.auth!.userId, req.params.sessionId);
+    res.json({ data: serializeSession(session) });
   }),
 );
 
