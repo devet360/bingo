@@ -241,6 +241,43 @@ test('a 429 stays retryable', async () => {
   assert.equal(row.attempts, 2);
 });
 
+test('an unreadable 4xx body with WALLET_HTTP_ERROR stays retryable', async () => {
+  const { store, seed, script, worker } = fixture();
+  await seed({ txnId: 'win-mangled-4xx' });
+  // A proxy/WAF 4xx HTML page: the status is 4xx but the refusal is unreadable.
+  script('win-mangled-4xx', fail(404, 'WALLET_HTTP_ERROR'));
+
+  assert.equal((await worker.drainOnce(NOW)).retried, 1);
+  const pending = rowOf(store, 'win-mangled-4xx');
+  assert.equal(pending.status, 'PENDING');
+  assert.equal(pending.lastError, 'WALLET_HTTP_ERROR');
+  assert.equal(pending.nextAttemptAt.getTime(), NOW.getTime() + 1_000);
+
+  assert.equal((await worker.drainOnce(pending.nextAttemptAt)).retried, 1);
+  const row = rowOf(store, 'win-mangled-4xx');
+  assert.equal(row.status, 'PENDING');
+  assert.notEqual(row.status, 'DEAD');
+  assert.equal(row.attempts, 2);
+});
+
+test('a 408 stays retryable', async () => {
+  const { store, seed, script, worker } = fixture();
+  await seed({ txnId: 'win-timeout' });
+  script('win-timeout', fail(408, 'TIMEOUT'));
+
+  assert.equal((await worker.drainOnce(NOW)).retried, 1);
+  const pending = rowOf(store, 'win-timeout');
+  assert.equal(pending.status, 'PENDING');
+  assert.equal(pending.attempts, 1);
+  assert.equal(pending.lastError, 'TIMEOUT');
+
+  assert.equal((await worker.drainOnce(pending.nextAttemptAt)).retried, 1);
+  const row = rowOf(store, 'win-timeout');
+  assert.equal(row.status, 'PENDING');
+  assert.notEqual(row.status, 'DEAD');
+  assert.equal(row.attempts, 2);
+});
+
 test('a 2xx reply that does not accept the movement retries as NOT_ACCEPTED, never SENT', async () => {
   const { store, seed, script, worker } = fixture();
   await seed({ txnId: 'win-declined' });

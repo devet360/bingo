@@ -31,9 +31,10 @@ const DETERMINISTIC_RETRY_LIMIT = 1;
  *
  * The outbox row was committed with the bet, so this worker only classifies
  * bingo's answer: a 2xx is `SENT`, a cap breach is `CAP_REJECTED`, and a 4xx that
- * is not `WALLET_RESPONSE_INVALID` or 408/429 is a deterministic refusal that
- * gets one replay before `DEAD`. Everything indeterminate (timeout, 5xx,
- * `WALLET_RESPONSE_INVALID`, unreadable 2xx, 408/429) stays `PENDING` with
+ * is not `WALLET_RESPONSE_INVALID`, `WALLET_HTTP_ERROR` or 408/429 is a
+ * deterministic refusal that gets one replay before `DEAD`. Everything
+ * indeterminate (timeout, 5xx, `WALLET_RESPONSE_INVALID`, `WALLET_HTTP_ERROR`,
+ * unreadable 2xx, 408/429) stays `PENDING` with
  * exponential backoff. A bet must always reach a terminal wallet state, so DEAD
  * rows are the audit trail: the refusing code is kept in `lastError`. Rows are
  * drained sequentially so the wallet call order bingo sees is deterministic.
@@ -142,14 +143,19 @@ export class OutboxWorker {
       return;
     }
 
-    // Any other 4xx is a deterministic refusal, except the cases that are not
-    // actually refusals: `WALLET_RESPONSE_INVALID` because an intermediary can
-    // return a 4xx status with an unreadable body, and 408/429 because they are
-    // timeout/throttling signals. Those stay on the retry path. A refusal gets
+    // Any other 4xx is a deterministic refusal, minus the codes that mean the
+    // refusal could not be read (`WALLET_RESPONSE_INVALID` for a 2xx body,
+    // `WALLET_HTTP_ERROR` for an unreadable or codeless non-2xx body, where an
+    // intermediary such as a proxy can answer with a 4xx HTML page) plus 408/429
+    // as timeout/throttling signals. Those stay on the retry path. A refusal gets
     // exactly one replay (a rollback can race the win it refunds) and then DEAD,
     // because a bet must always end in a terminal wallet state.
     const isDeterministicRefusal =
-      isClientError && code !== 'WALLET_RESPONSE_INVALID' && status !== 408 && status !== 429;
+      isClientError &&
+      code !== 'WALLET_RESPONSE_INVALID' &&
+      code !== 'WALLET_HTTP_ERROR' &&
+      status !== 408 &&
+      status !== 429;
     if (isDeterministicRefusal) {
       await this.settleOrRetry(row, now, summary, code);
       return;
@@ -158,7 +164,11 @@ export class OutboxWorker {
     await this.retry(row, now, summary, code);
   }
 
-  /** One replay, then DEAD for a deterministic refusal: `attempts` was incremented by the previous retry. */
+  /**
+   * One replay, then DEAD for a deterministic refusal: `attempts` was incremented by the previous retry.
+   * `attempts` counts every replay, so a row that already burned transient retries dies on its first
+   * deterministic refusal without a fresh replay — intended, since the refusal is terminal anyway.
+   */
   private async settleOrRetry(
     row: OutboxRecord,
     now: Date,
