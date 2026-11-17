@@ -384,7 +384,9 @@ function DepositConfirmation({
   onViewHistory: () => void;
 }) {
   const { t } = useI18n();
-  const credited = deposit.status === 'CREDITED' || deposit.verificationStatus === 'VERIFIED';
+  // A verified receipt can still be waiting for the agent to credit it, so
+  // only a CREDITED deposit may claim the money reached the balance.
+  const credited = deposit.status === 'CREDITED';
   const amount = formatStake(deposit.amount);
   const agent = deposit.agent ?? null;
   const agentName = agent?.displayName ?? agent?.agentCode ?? null;
@@ -463,29 +465,6 @@ function bytesToBase64(bytes: Uint8Array): string {
 }
 
 const MAX_RECEIPT_BYTES = 4_500_000;
-
-/** The bank receipt page, fetched by the payer's device because of geo-blocks. */
-async function fetchBankReceipt(url: string): Promise<{ contentType?: string; bodyBase64: string }> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 20_000);
-  try {
-    const response = await fetch(url, {
-      signal: controller.signal,
-      credentials: 'omit',
-      referrerPolicy: 'no-referrer',
-      cache: 'no-store',
-    });
-    if (!response.ok) throw new Error(`Bank responded ${response.status}`);
-    const body = await response.arrayBuffer();
-    if (body.byteLength > MAX_RECEIPT_BYTES) throw new Error('Receipt page is too large');
-    return {
-      contentType: response.headers.get('content-type') ?? undefined,
-      bodyBase64: bytesToBase64(new Uint8Array(body)),
-    };
-  } finally {
-    clearTimeout(timer);
-  }
-}
 
 function DepositPanel({
   onChanged,
@@ -608,22 +587,9 @@ function DepositPanel({
       ? { proofBase64: proof.base64, proofContentType: proof.contentType }
       : {};
     try {
-      // Client-side rails first ask for the bank page on this phone; there is
-      // nothing to fetch without a reference, so a screenshot goes straight in
-      // and the agent confirms it.
-      let result = await verifyDepositReceipt(
-        created.code,
-        createdProvider?.clientSide && reference.trim() ? body : { ...body, ...proofBody },
-      );
-      if (result.needsClientFetch && result.data.clientReceiptUrl) {
-        try {
-          const bank = await fetchBankReceipt(result.data.clientReceiptUrl);
-          result = await verifyDepositReceipt(created.code, { ...body, ...bank });
-        } catch {
-          if (!proof) throw new Error('BANK_FETCH_FAILED');
-          result = await verifyDepositReceipt(created.code, { ...body, ...proofBody });
-        }
-      }
+      // A reference, a screenshot, or both: one is enough. The API checks the
+      // reference with the issuer and keeps the screenshot for the agent.
+      const result = await verifyDepositReceipt(created.code, { ...body, ...proofBody });
       setCreated(result.data);
       setSubmitted(result.data.verificationStatus !== 'FAILED');
       setNotice(result.autoCredited ? t('wallet.depositCredited') : result.verification.message);
@@ -633,11 +599,7 @@ function DepositPanel({
     } catch (cause) {
       haptic('error');
       if (cause instanceof ApiError) setError(cause.message);
-      else if (cause instanceof Error && cause.message === 'BANK_FETCH_FAILED') {
-        setError(t('wallet.bankFetchFailed'));
-      } else {
-        setError(t('wallet.bankFetchFailed'));
-      }
+      else setError(t('wallet.bankFetchFailed'));
     } finally {
       setVerifying(false);
     }

@@ -133,17 +133,20 @@ The player flow is two-step:
 1. `POST /wallet/deposits` with the rail and amount; the app shows the agent name, the
    account to pay, and the receipt inputs.
 2. After paying, the app calls `POST /wallet/deposits/:code/verify-receipt` with the
-   reference (and optionally a proof screenshot). Manual rails and screenshots without a
-   fetchable receipt park the deposit in `MANUAL` for the agent.
+   reference, a proof screenshot, or both — one of the two is enough. A screenshot
+   without a reference parks the deposit in `MANUAL`; so does a reference the bank
+   refuses to answer (Telebirr and M-Pesa only accept Ethiopian IPs), because a refusal
+   is not a failed payment.
 
 Two verification paths exist for supported rails:
 
 - **Server-side** (`clientSide: false`): the API fetches the bank page itself after the
   reference is submitted, and the player app can poll `GET /wallet/deposits/:id`.
-- **Client-side** (`clientSide: true`, e.g. Telebirr, M-Pesa): the bank blocks foreign
-  IPs, so `verify-receipt` answers `needsClientFetch: true` with a `clientReceiptUrl`.
-  The Mini App fetches that URL (an Ethiopian phone does resolve it), then posts the raw
-  response back as `{ receiptReference, contentType, bodyBase64 }`.
+- **Client-side** (`clientSide: true`, e.g. Telebirr, M-Pesa): the bank only answers
+  Ethiopian IPs. The API still attempts the fetch (the deployment is in Ethiopia) and
+  verifies when it gets through; otherwise the deposit goes to the agent as `MANUAL`.
+  The Mini App no longer fetches the bank page in the browser — neither issuer sends
+  CORS headers, so a browser read can never succeed.
 
 The payload from the phone is **untrusted**. The server re-parses it against the
 code-owned parser, ignores any amount/status the client might claim, stores one

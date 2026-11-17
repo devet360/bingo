@@ -65,8 +65,10 @@ function normalizeReceiptText(text: string): string {
 }
 
 /**
- * Mobile "Select All" groups all invoice labels together and dumps the values
- * after the last label. Restructure the lines so each label has its value.
+ * Mobile "Select All" keeps every invoice label on its own line and joins the
+ * three values in one tab-separated row after them; other layouts interleave a
+ * label and its value, or glue the values together. Normalize all three into
+ * "label then value" lines so the readers below see one shape.
  */
 function restructureInvoiceSection(text: string): string {
   const lines = text.split('\n');
@@ -77,56 +79,60 @@ function restructureInvoiceSection(text: string): string {
   if (invoiceNoIdx === -1 || settledIdx === -1 || stampIdx === -1) return text;
   if (settledIdx >= stampIdx) return text;
 
-  // Settled Amount{REF}{DD-MM-YYYY HH:MM:SS}{AMOUNT} Birr ...
-  const settledLine = lines[settledIdx];
-  const valueText = settledLine.replace(/Settled\s*Amount/i, '').trim();
-
-  const match = valueText.match(
-    /^([A-Z]{2,3}[A-Z0-9]{6,8})(\d{2}-\d{2}-\d{4}\s+\d{2}:\d{2}:\d{2})(\d[\d,]{0,30}(?:\.\d{1,2})?)\s*Birr/,
-  );
-
-  if (match) {
-    const [, ref, date, amount] = match;
-    const section = ['Invoice No.', ref, 'Payment date', date, 'Settled Amount', `${amount} Birr`];
-    const newLines = [...lines];
-    newLines.splice(invoiceNoIdx, settledIdx - invoiceNoIdx + 1, ...section);
-    return newLines.join('\n');
-  }
-
-  // Two-column layout: labels first, then their values.
-  const knownLabels = new Set([
+  const knownLabels = [
     'Invoice No.',
     'Payment date',
     'Settled Amount',
     'Stamp Duty',
+    'Excise Tax',
     'Discount Amount',
     'Service fee',
     'Service fee VAT',
     'Total Paid Amount',
     'Total Amount in words',
-  ]);
+  ];
+  const dateRe = /^\d{2}-\d{2}-\d{4}\s+\d{2}:\d{2}:\d{2}$/;
+  const amountRe = /^\d[\d,]{0,30}(?:\.\d{1,2})?\s*Birr$/i;
+  const refRe = /^[A-Z0-9]{6,20}$/;
 
-  const values: string[] = [];
-  let valueEndIdx = settledIdx + 1;
-  for (let i = settledIdx + 1; i < stampIdx; i++) {
-    const line = lines[i]!;
-    if ([...knownLabels].some((label) => line.includes(label))) continue;
-    values.push(line);
-    if (values.length === 3) {
-      valueEndIdx = i + 1;
-      break;
+  // Splitting bilingual labels leaves the Amharic half ("የክፍያ ቁጥር/") on its own
+  // line, so values are picked by shape rather than by position.
+  const parts: string[] = [];
+  let lastValueIdx = invoiceNoIdx;
+  for (let i = invoiceNoIdx; i < stampIdx; i++) {
+    const line = lines[i]!.trim();
+    if (!line) continue;
+    if (knownLabels.some((label) => line.includes(label))) continue;
+    for (const part of line.split('\t').map((v) => v.trim()).filter(Boolean)) {
+      if (/[\u1200-\u137F]/.test(part)) continue;
+      parts.push(part);
+      lastValueIdx = i;
     }
   }
+  if (!parts.length) return text;
 
-  if (values.length < 3) return text;
-  const [ref, date, amount] = values as [string, string, string];
-  if (!/^\d{2}-\d{2}-\d{4}\s+\d{2}:\d{2}:\d{2}$/.test(date)) return text;
-  if (!/^\d[\d,]{0,30}(?:\.\d{1,2})?\s*Birr$/i.test(amount)) return text;
+  const spliceSection = (ref: string, date: string, amount: string): string => {
+    const section = ['Invoice No.', ref, 'Payment date', date, 'Settled Amount', amount];
+    const newLines = [...lines];
+    newLines.splice(
+      invoiceNoIdx,
+      Math.max(lastValueIdx, settledIdx) + 1 - invoiceNoIdx,
+      ...section,
+    );
+    return newLines.join('\n');
+  };
 
-  const section = ['Invoice No.', ref, 'Payment date', date, 'Settled Amount', amount];
-  const newLines = [...lines];
-  newLines.splice(invoiceNoIdx, valueEndIdx - invoiceNoIdx, ...section);
-  return newLines.join('\n');
+  const date = parts.find((p) => dateRe.test(p));
+  const amount = parts.find((p) => amountRe.test(p));
+  const ref = parts.find((p) => p !== date && p !== amount && refRe.test(p));
+  if (ref && date && amount) return spliceSection(ref, date, amount);
+
+  // Settled Amount{REF}{DD-MM-YYYY HH:MM:SS}{AMOUNT} Birr, glued together.
+  const glued = parts.join(' ').match(
+    /^([A-Z]{2,3}[A-Z0-9]{6,8})(\d{2}-\d{2}-\d{4}\s+\d{2}:\d{2}:\d{2})(\d[\d,]{0,30}(?:\.\d{1,2})?)\s*Birr/,
+  );
+  if (!glued) return text;
+  return spliceSection(glued[1]!, glued[2]!, `${glued[3]} Birr`);
 }
 
 export class TelebirrParser extends BankParser {
@@ -223,7 +229,9 @@ export class TelebirrParser extends BankParser {
       }
     }
 
-    let amount = settledAmount;
+    // What the payer sent is what the deposit is for; the settled amount is
+    // net of the service fee and VAT (106 paid, 104 settled).
+    let amount = totalPaid ?? settledAmount;
     if (amount === undefined) {
       for (const line of text) {
         const m = birrAmountIn(line);
@@ -241,6 +249,7 @@ export class TelebirrParser extends BankParser {
       receiverName,
       receiverAccount,
       amount,
+      settledAmount,
       currency: 'ETB',
       date,
       reference: invoiceNumber,

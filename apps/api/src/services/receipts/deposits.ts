@@ -2,16 +2,19 @@
  * Receipt verification tied to a deposit request.
  *
  * Flow:
- *   1. The player creates a deposit with a provider and a receipt reference.
- *   2. The API verifies server-side, or the Mini App submits the bank's own
- *      response (Telebirr / M-Pesa only answer Ethiopian IPs) and the API
- *      verifies those bytes.
- *   3. The outcome is stored in ReceiptVerification, one reference per
- *      provider, so the same receipt can never fund two deposits.
+ *   1. The player creates a deposit with a provider and pays.
+ *   2. "I have paid" submits the receipt reference, a screenshot, or both.
+ *   3. A reference is checked against the issuer (server-side, or over bytes
+ *      the payer's device captured). The outcome is stored in
+ *      ReceiptVerification, one reference per provider, so the same receipt
+ *      can never fund two deposits.
  *   4. When the assigned agent has auto-verification on and the deposit is at
  *      or below the agent's threshold, a verified receipt credits the deposit
  *      immediately. The ledger still runs in a transaction with row locks and
  *      the `deposit:<id>` idempotency key.
+ *   5. A screenshot without a reference, a rail the bank refuses to answer, or
+ *      a reference the bank cannot confirm alongside a screenshot, goes to the
+ *      assigned agent as MANUAL.
  */
 import {
   DepositStatus,
@@ -28,15 +31,13 @@ import { serializeDeposit, serializePaymentAccount } from '../../lib/serializers
 import { isUniqueViolation } from '../../lib/tx';
 import { creditDeposit } from '../deposits';
 import { verifyClientPayload, verifyReceipt } from './verify';
-import { createParser } from './parsers';
-import { deriveReceiptAccount, normalizeInput } from './reference';
+import { deriveReceiptAccount, mergeReceiptSubmission } from './reference';
 import { ReferenceError, type ReceiptProvider, type VerifyOutcome } from './types';
 
 type DepositWithProvider = DepositRequest & { provider: DepositProvider | null };
 
 /**
- * Wire shape for the player: the assigned agent and the exact account to pay,
- * plus the bank URL their phone can fetch when the rail is client-side.
+ * Wire shape for the player: the assigned agent and the exact account to pay.
  */
 export async function serializePlayerDeposit(deposit: DepositWithProvider) {
   const [agent, account] = await Promise.all([
@@ -72,7 +73,6 @@ export async function serializePlayerDeposit(deposit: DepositWithProvider) {
         }
       : null,
     paymentAccount: account ? serializePaymentAccount(account) : null,
-    clientReceiptUrl: await buildClientReceiptUrl(deposit),
   };
 }
 
@@ -119,8 +119,7 @@ export function receiverAccountMatches(
   return agent.endsWith(visible.slice(-len));
 }
 
-/**
- * The receiving-account suffix for a deposit: what was stored with it, or the
+/** The receiving-account suffix for a deposit: what was stored with it, or the
  * tail of the account the server assigned. The player never types the agent's
  * number.
  */
@@ -134,24 +133,6 @@ async function resolveReceiptAccount(deposit: DepositWithProvider): Promise<stri
     select: { accountNumber: true },
   });
   return deriveReceiptAccount(undefined, account?.accountNumber, digits);
-}
-
-/** The bank URL the Mini App can fetch from an Ethiopian IP, when the provider is client-side. */
-export async function buildClientReceiptUrl(deposit: DepositWithProvider): Promise<string | undefined> {
-  if (!deposit.provider?.clientSide || !deposit.provider.enabled || !deposit.receiptReference) return undefined;
-  const parser = createParser(deposit.provider);
-  if (!parser) return undefined;
-  try {
-    const input = normalizeInput(deposit.provider, {
-      reference: deposit.receiptReference,
-      accountNumber: await resolveReceiptAccount(deposit),
-      phoneNumber: deposit.receiptPhone ?? undefined,
-    });
-    return parser.buildUrl(input);
-  } catch (e) {
-    if (e instanceof ReferenceError) return undefined;
-    return undefined;
-  }
 }
 
 export interface ReceiptSubmission {
@@ -178,7 +159,6 @@ export async function verifyDepositReceipt(params: {
   outcome: VerifyOutcome;
   deposit: DepositRequest;
   autoCredited: boolean;
-  needsClientFetch: boolean;
 }> {
   const deposit = await prisma.depositRequest.findUnique({
     where: { id: params.depositId },
@@ -200,26 +180,24 @@ export async function verifyDepositReceipt(params: {
   let receiptPhone = deposit.receiptPhone;
 
   if (params.receipt) {
-    if (provider.supported) {
-      try {
-        const normalized = normalizeInput(provider, {
-          reference: params.receipt.reference ?? deposit.receiptReference ?? undefined,
-          accountNumber: params.receipt.accountNumber ?? receiptAccount ?? undefined,
-          phoneNumber: params.receipt.phoneNumber ?? deposit.receiptPhone ?? undefined,
-        });
-        receiptReference = normalized.reference;
-        receiptAccount = normalized.accountNumber ?? null;
-        receiptPhone = normalized.phoneNumber ?? null;
-      } catch (error) {
-        if (error instanceof ReferenceError) {
-          throw Errors.badRequest(error.message, 'INVALID_RECEIPT_REFERENCE');
-        }
-        throw error;
+    try {
+      const merged = mergeReceiptSubmission(
+        provider,
+        {
+          reference: deposit.receiptReference,
+          accountNumber: receiptAccount,
+          phoneNumber: deposit.receiptPhone,
+        },
+        params.receipt,
+      );
+      receiptReference = merged.reference;
+      receiptAccount = merged.accountNumber;
+      receiptPhone = merged.phoneNumber;
+    } catch (error) {
+      if (error instanceof ReferenceError) {
+        throw Errors.badRequest(error.message, 'INVALID_RECEIPT_REFERENCE');
       }
-    } else {
-      receiptReference = params.receipt.reference?.trim() || receiptReference;
-      receiptAccount = params.receipt.accountNumber?.trim() || receiptAccount;
-      receiptPhone = params.receipt.phoneNumber?.trim() || receiptPhone;
+      throw error;
     }
   }
 
@@ -250,39 +228,24 @@ export async function verifyDepositReceipt(params: {
       outcome: { status: 'NOT_VERIFIED' as const, message, source },
       deposit: manual,
       autoCredited: false,
-      needsClientFetch: false,
     };
   };
 
-  // Manual rails, screenshots without a reference, and client-side rails whose
-  // bank page was not fetched: the agent confirms the money arrived.
-  if (
-    !provider.supported ||
-    (params.proof && (!receiptReference || (provider.clientSide && !params.payload)))
-  ) {
+  // Manual rails: the agent confirms the money arrived.
+  if (!provider.supported) {
     return markManual('Payment submitted. The assigned agent will confirm it.');
   }
 
   if (!receiptReference) {
+    // A screenshot has no reference to look up at the issuer, so the agent
+    // confirms it by hand. One of the two is enough.
+    if (params.proof) {
+      return markManual('Payment submitted. The assigned agent will confirm it.');
+    }
     throw Errors.badRequest(
-      'Enter the receipt reference from your payment.',
+      'Enter the receipt reference from your payment, or attach the receipt.',
       'RECEIPT_REFERENCE_REQUIRED',
     );
-  }
-
-  // Telebirr/M-Pesa block non-Ethiopian IPs: the payer's phone fetches the
-  // receipt page and posts the bytes back in a second call.
-  if (provider.clientSide && !params.payload) {
-    return {
-      outcome: {
-        status: 'NOT_VERIFIED',
-        message: 'Fetch the bank receipt on this phone to finish verifying.',
-        source,
-      },
-      deposit: current,
-      autoCredited: false,
-      needsClientFetch: true,
-    };
   }
 
   const input = {
@@ -291,30 +254,46 @@ export async function verifyDepositReceipt(params: {
     phoneNumber: receiptPhone ?? undefined,
   };
 
+  // Telebirr and M-Pesa only answer Ethiopian IPs. The API tries anyway (the
+  // deployment is in Ethiopia); a refusal is not a failed payment.
   const outcome = params.payload
     ? await verifyClientPayload(provider, input, params.payload, source)
     : await verifyReceipt(provider, input, source);
 
+  if (outcome.status === 'UNREACHABLE') {
+    return markManual('The bank did not answer, so your assigned agent will confirm this payment.');
+  }
+
   await storeOutcome(current, outcome, source);
+  const verified = outcome.status === 'VERIFIED';
+  // A reference the bank cannot confirm still leaves a screenshot as evidence,
+  // so the agent decides instead of failing the submission outright.
+  const skipped = !verified && !!params.proof;
   const updated = await prisma.depositRequest.update({
     where: { id: current.id },
     data: {
-      verificationStatus: outcome.status === 'VERIFIED' ? VerificationStatus.VERIFIED : VerificationStatus.FAILED,
-      verificationMessage: outcome.message,
+      verificationStatus: verified
+        ? VerificationStatus.VERIFIED
+        : skipped
+          ? VerificationStatus.MANUAL
+          : VerificationStatus.FAILED,
+      verificationMessage: skipped
+        ? `${outcome.message} The assigned agent will confirm your receipt.`
+        : outcome.message,
       verificationSource: source,
-      verifiedAt: outcome.status === 'VERIFIED' ? new Date() : null,
+      verifiedAt: verified ? new Date() : null,
     },
   });
 
   let autoCredited = false;
-  if (outcome.status === 'VERIFIED') {
+  if (verified) {
     autoCredited = await tryAutoCredit(current, outcome);
   }
 
   const final = autoCredited
     ? (await prisma.depositRequest.findUnique({ where: { id: current.id } })) ?? updated
     : updated;
-  return { outcome, deposit: final, autoCredited, needsClientFetch: false };
+  return { outcome, deposit: final, autoCredited };
 }
 
 async function storeOutcome(

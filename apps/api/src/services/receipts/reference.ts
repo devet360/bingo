@@ -217,6 +217,39 @@ export function normalizeOptionalReceipt(
 }
 
 /**
+ * Fold an "I have paid" submission into the fields the deposit already stores.
+ * A blank submitted field never overwrites a stored one, and a blank reference
+ * skips validation: the caller then parks the deposit as MANUAL (screenshot)
+ * or asks for the reference, instead of rejecting the whole submission.
+ */
+export function mergeReceiptSubmission(
+  provider: ReceiptProvider,
+  stored: { reference?: string | null; accountNumber?: string | null; phoneNumber?: string | null },
+  submitted: { reference?: string | null; accountNumber?: string | null; phoneNumber?: string | null },
+): { reference: string | null; accountNumber: string | null; phoneNumber: string | null } {
+  const pick = (next: string | null | undefined, prev: string | null | undefined) =>
+    (next ?? '').trim() || (prev ?? '').trim() || null;
+
+  const reference = pick(submitted.reference, stored.reference);
+  const accountNumber = pick(submitted.accountNumber, stored.accountNumber);
+  const phoneNumber = pick(submitted.phoneNumber, stored.phoneNumber);
+
+  if (provider.supported && reference) {
+    const normalized = normalizeInput(provider, {
+      reference,
+      accountNumber: accountNumber ?? undefined,
+      phoneNumber: phoneNumber ?? undefined,
+    });
+    return {
+      reference: normalized.reference,
+      accountNumber: normalized.accountNumber ?? null,
+      phoneNumber: normalized.phoneNumber ?? null,
+    };
+  }
+  return { reference, accountNumber, phoneNumber };
+}
+
+/**
  * Validate a provider's reference (and the extra inputs it needs) before any
  * request is made. Rejects traversal/attribute tricks, not just bad shapes.
  */

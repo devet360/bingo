@@ -367,11 +367,13 @@ Two shapes exist:
 
 - **Server-side** — the API fetches the bank page after creation and records a
   `ReceiptVerification` row.
-- **Client-side** (Telebirr, M-Pesa) — the bank blocks Ethiopian-IP-only traffic, so the
-  API returns `clientReceiptUrl`; the payer app fetches it and posts the raw body to
-  `/wallet/deposits/:code/verify-receipt`. That payload is untrusted: the server
-  re-parses it, dedupes by `(providerCode, reference)`, and compares the parsed amount
-  and receiver against the deposit before it may credit.
+- **Client-side** (Telebirr, M-Pesa) — the issuer only answers Ethiopian IPs. The API
+  attempts the fetch too (the deployment is in Ethiopia) and verifies when it gets
+  through; when the issuer refuses, the deposit is parked `MANUAL` for the assigned
+  agent. A client-supplied body (`bodyBase64` on `verify-receipt`, or a configured
+  relay) is still accepted and is untrusted: the server re-parses it, dedupes by
+  `(providerCode, reference)`, and compares the parsed amount and receiver against the
+  deposit before it may credit.
 
 Auto-credit is a single locked transaction and requires: assigned agent `ACTIVE`, agent
 automation on, amount ≤ agent threshold, rail enabled/supported, gate `VERIFIED`, parsed

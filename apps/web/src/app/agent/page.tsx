@@ -113,6 +113,7 @@ export default function AgentPage() {
   const [code, setCode] = useState('');
   const [payoutCode, setPayoutCode] = useState('');
   const [creditTarget, setCreditTarget] = useState<Deposit | null>(null);
+  const [receiptTarget, setReceiptTarget] = useState<Deposit | null>(null);
   const [creditAmount, setCreditAmount] = useState('');
   const [redeemTarget, setRedeemTarget] = useState<Withdrawal | null>(null);
   const [actionNote, setActionNote] = useState('');
@@ -548,6 +549,15 @@ export default function AgentPage() {
                       </div>
                     </div>
                     <div className="mt-2 flex flex-wrap gap-2">
+                      {deposit.receiptUrl ? (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => setReceiptTarget(deposit)}
+                        >
+                          View receipt
+                        </Button>
+                      ) : null}
                       {unassigned ? (
                         <Button
                           size="sm"
@@ -780,6 +790,37 @@ export default function AgentPage() {
             <Button className="w-full" loading={actionBusy} onClick={() => void submitCredit()}>
               Credit player
             </Button>
+          </div>
+        ) : null}
+      </Sheet>
+
+      <Sheet open={receiptTarget !== null} title="Deposit receipt" onClose={() => setReceiptTarget(null)}>
+        {receiptTarget ? (
+          <div className="max-h-[70vh] space-y-3 overflow-y-auto pr-1">
+            <div className="rounded-xl bg-ink/50 p-3 text-xs">
+              <p>
+                Deposit{' '}
+                <span className="font-display font-bold tracking-[0.2em] text-gold">
+                  {receiptTarget.code}
+                </span>
+              </p>
+              <p className="mt-1 text-muted">
+                {formatCredits(receiptTarget.amount)} ETB ·{' '}
+                {PAYMENT_METHODS.find((item) => item.value === receiptTarget.method)?.label}
+                {receiptTarget.receiptReference ? ` · ref ${receiptTarget.receiptReference}` : ''}
+              </p>
+              {receiptTarget.verificationMessage ? (
+                <p className="mt-1 text-muted">{receiptTarget.verificationMessage}</p>
+              ) : null}
+            </div>
+            {receiptTarget.receiptUrl ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={receiptTarget.receiptUrl}
+                alt="Deposit receipt"
+                className="max-h-[55vh] w-full rounded-xl object-contain"
+              />
+            ) : null}
           </div>
         ) : null}
       </Sheet>

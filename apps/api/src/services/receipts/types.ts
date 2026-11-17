@@ -28,6 +28,8 @@ export interface ParsedReceipt {
   reason?: string;
   /** Extra detail kept for the audit record, never used by the gate. */
   invoiceNumber?: string;
+  /** What the receiver got, when the bank deducts its fee from the payment. */
+  settledAmount?: number;
   orderId?: string;
   branch?: string;
   paymentChannel?: string;

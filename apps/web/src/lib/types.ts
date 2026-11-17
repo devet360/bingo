@@ -136,7 +136,6 @@ export interface VerifyReceiptResult {
   data: Deposit;
   verification: { status: VerificationStatus | string; message: string };
   autoCredited: boolean;
-  needsClientFetch?: boolean;
 }
 
 export interface PayoutAccount {
@@ -378,8 +377,6 @@ export interface Deposit {
   claimedAt: string | null;
   settledAt: string | null;
   createdAt: string;
-  /** Present on player-facing responses when the payer's phone can fetch the bank page. */
-  clientReceiptUrl?: string;
   agent?: {
     id: string;
     agentCode: string;

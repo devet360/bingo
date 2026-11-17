@@ -179,11 +179,6 @@ export const openApiDocument = {
           autoVerified: { type: 'boolean' },
           verifiedAt: { type: 'string', format: 'date-time', nullable: true },
           externalRef: { type: 'string', nullable: true },
-          clientReceiptUrl: {
-            type: 'string',
-            nullable: true,
-            description: 'Bank page the payer app fetches for client-side rails (Telebirr, M-Pesa).',
-          },
           agent: {
             type: 'object',
             nullable: true,
@@ -1404,8 +1399,9 @@ export const openApiDocument = {
         tags: ['Player wallet'],
         summary: 'Enabled deposit rails and their receipt requirements',
         description:
-          'Client-side rails (`clientSide: true`, e.g. Telebirr, M-Pesa) return a `clientReceiptUrl` on the deposit ' +
-          'that the player app must fetch from an Ethiopian IP and POST back to `/wallet/deposits/{code}/verify-receipt`.',
+          'Every enabled rail returns the reference it expects. The same reference is checked server-side by ' +
+          '`/wallet/deposits/{code}/verify-receipt`; `clientSide` rails (Telebirr, M-Pesa) are only reachable from ' +
+          'an Ethiopian IP, so when the API cannot reach them the deposit is parked MANUAL for the agent.',
         parameters: [{ name: 'method', in: 'query', schema: { type: 'string' } }],
         responses: { '200': ok(dataArrayRef('DepositProvider')) },
       },
@@ -1464,12 +1460,13 @@ export const openApiDocument = {
     '/wallet/deposits/{code}/verify-receipt': {
       post: {
         tags: ['Player wallet'],
-        summary: '"I have paid": submit the receipt reference, proof, or the bank response',
+        summary: '"I have paid": submit the receipt reference, a screenshot, or both',
         description:
-          'Called after the player pays. For client-side rails the reply sets `needsClientFetch`; the app then fetches ' +
-          '`clientReceiptUrl` on the player phone and posts `bodyBase64` back. A screenshot without a fetchable receipt ' +
-          'parks the deposit in MANUAL for the agent. A verified receipt only credits automatically when the assigned ' +
-          'agent has auto-deposit on, the rail is enabled, the amount matches exactly and the agent threshold covers it.',
+          'Called after the player pays. One of `receiptReference` or `proofBase64` is required, not both. A reference ' +
+          'is checked with the issuer server-side; when the issuer refuses the API host (Telebirr and M-Pesa only ' +
+          'answer Ethiopian IPs) or a screenshot arrives without a reference, the deposit is parked in MANUAL for the ' +
+          'assigned agent. A verified receipt only credits automatically when the assigned agent has auto-deposit on, ' +
+          'the rail is enabled, the amount matches exactly and the agent threshold covers it.',
         security: [{ bearerAuth: [] }],
         parameters: [idParam('code')],
         requestBody: {
@@ -1489,10 +1486,6 @@ export const openApiDocument = {
                 },
               },
               autoCredited: { type: 'boolean' },
-              needsClientFetch: {
-                type: 'boolean',
-                description: 'True when the app should fetch clientReceiptUrl and post the bank bytes back.',
-              },
             },
           }),
           '404': errorResponse('Deposit not found'),

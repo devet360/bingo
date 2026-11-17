@@ -1,11 +1,20 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { PaymentMethod } from '@prisma/client';
-import { deriveReceiptAccount, normalizeInput, normalizeOptionalReceipt, referenceFromUrl } from '../src/services/receipts/reference';
+import {
+  deriveReceiptAccount,
+  mergeReceiptSubmission,
+  normalizeInput,
+  normalizeOptionalReceipt,
+  referenceFromUrl,
+} from '../src/services/receipts/reference';
 import { verificationGate, gateFailureMessage } from '../src/services/receipts/gate';
 import { classifyStatus } from '../src/services/receipts/status';
 import { parseMoney, birrAmountIn, htmlToLines } from '../src/services/receipts/text';
 import { ReferenceError, type ParsedReceipt, type ReceiptProvider } from '../src/services/receipts/types';
+import { TelebirrParser } from '../src/services/receipts/parsers/telebirr';
+import { MpesaParser } from '../src/services/receipts/parsers/mpesa';
+import { NotFoundError } from '../src/services/receipts/parsers/base';
 
 function provider(code: string, patch: Partial<ReceiptProvider> = {}): ReceiptProvider {
   return {
@@ -115,6 +124,48 @@ test('a deposit may be created before the player has paid', () => {
   });
 });
 
+test('a screenshot-only submission keeps a blank reference instead of failing', () => {
+  // The web sends receiptReference: '' when the player attaches only a
+  // screenshot; that must not throw before the proof can be stored.
+  assert.deepEqual(mergeReceiptSubmission(provider('telebirr'), {}, { reference: '' }), {
+    reference: null,
+    accountNumber: null,
+    phoneNumber: null,
+  });
+});
+
+test('submitted receipt fields merge with what the deposit already stores', () => {
+  // Blank submitted fields never overwrite stored ones.
+  const kept = mergeReceiptSubmission(
+    provider('telebirr'),
+    { reference: 'det0123456', accountNumber: null, phoneNumber: null },
+    { reference: '   ', accountNumber: '', phoneNumber: '' },
+  );
+  assert.equal(kept.reference, 'DET0123456');
+
+  // A real submitted reference still replaces and canonicalises the stored one.
+  const replaced = mergeReceiptSubmission(
+    provider('cbe'),
+    { reference: 'FT25ABCDEFGH' },
+    { reference: 'ft25 zzzzzz zz' },
+  );
+  assert.equal(replaced.reference, 'FT25ZZZZZZZZ');
+
+  // Manual-only rails trim without parsing.
+  assert.deepEqual(mergeReceiptSubmission(provider('boa', { supported: false }), {}, { reference: ' x ' }), {
+    reference: 'x',
+    accountNumber: null,
+    phoneNumber: null,
+  });
+});
+
+test('a submitted reference is still validated', () => {
+  assert.throws(
+    () => mergeReceiptSubmission(provider('cbe'), {}, { reference: '../../etc/passwd' }),
+    ReferenceError,
+  );
+});
+
 test('url reference extraction covers link pastes', () => {
   assert.equal(referenceFromUrl('telebirr', 'https://transactioninfo.ethiotelecom.et/receipt/ABC1234567'), 'ABC1234567');
   assert.equal(referenceFromUrl('awash', 'https://awashpay.awashbank.com:8225/-abcDEF123'), 'abcDEF123');
@@ -172,3 +223,131 @@ test('html conversion drops scripts and keeps line breaks', () => {
   const lines = htmlToLines('<div>Amount</div><script>alert(1)</script><div>250.00</div>');
   assert.deepEqual(lines, ['Amount', '250.00']);
 });
+
+// The real Telebirr page puts the three invoice labels in one header row and
+// the three values in the next row, with the disabled Excise Tax row inside an
+// HTML comment. These fixtures mirror that markup with invented data.
+const TELEBIRR_HTML = `<!doctype html><html><head><title>telebirr receipt</title></head><body>
+<table>
+  <tr><td>የከፋይ ስም/Payer Name</td><td>ABEBE KEBEDE</td></tr>
+  <tr><td>የከፋይ ተሌፎን ቁጥር/Payer telebirr no</td><td>2519****1111</td></tr>
+  <tr><td>የገንዘብ ተቀባይ ስም/Credited Party name</td><td>BINGO PLC</td></tr>
+  <tr><td>የገንዘብ ተቀባይ ተሌፎን ቁጥር/Credited party account no</td><td>2519****2222</td></tr>
+  <tr><td>የክፍያ ሁኔታ/transaction status</td><td>Completed</td></tr>
+</table>
+<table>
+  <tr><td colspan="3">የክፍያ ዝርዝር/ Invoice details</td></tr>
+  <tr>
+    <td>የክፍያ ቁጥር/Invoice No.</td>
+    <td>የክፍያ ቀን/Payment date</td>
+    <td>የተከፈለው መጠን/Settled Amount</td>
+  </tr>
+  <tr><td>ABC1234567</td><td>01-02-2026 10:11:12</td><td>104 Birr</td></tr>
+  <!-- <tr><td>የኤክሳይዝ ታክስ/Excise Tax (5%)</td><td>0.0 Birr</td></tr> -->
+  <tr><td></td><td>የማህተም ክፍያ/Stamp Duty</td><td>0.00 Birr</td></tr>
+  <tr><td></td><td>የአገልግሎት ክፍያ/Service fee</td><td>1.74 Birr</td></tr>
+  <tr><td></td><td>የአገልግሎት ተጨማሪ እሴት ታክስ/Service fee VAT</td><td>0.26 Birr</td></tr>
+  <tr><td></td><td>ጠቅላላ የተከፈለው መጠን/Total Paid Amount</td><td>106 Birr</td></tr>
+</table>
+</body></html>`;
+
+function textResponse(text: string) {
+  return { status: 200, contentType: 'text/html', body: Buffer.from(text, 'utf8'), url: '' };
+}
+
+test('telebirr reads the three-column invoice row', async () => {
+  const parser = new TelebirrParser();
+  const parsed = await parser.parse(textResponse(TELEBIRR_HTML), { reference: 'ABC1234567' });
+
+  assert.equal(parsed.verified, true);
+  assert.equal(parsed.reference, 'ABC1234567');
+  assert.equal(parsed.invoiceNumber, 'ABC1234567');
+  assert.equal(parsed.date, '01-02-2026 10:11:12');
+  // The deposit is for what the payer sent; the receiver is credited net of fees.
+  assert.equal(parsed.amount, 106);
+  assert.equal(parsed.totalPaid, 106);
+  assert.equal(parsed.settledAmount, 104);
+  assert.equal(parsed.serviceFee, 1.74);
+  assert.equal(parsed.senderName, 'ABEBE KEBEDE');
+  assert.equal(parsed.receiverName, 'BINGO PLC');
+  assert.equal(parsed.senderAccount, '2519****1111');
+  assert.equal(parsed.transactionStatus, 'Completed');
+
+  const gate = verificationGate(parsed, {
+    provider: provider('telebirr', { refPattern: '^[A-Z0-9]{10}$' }),
+    requestedReference: 'abc1234567',
+  });
+  assert.deepEqual(gate, { ok: true });
+
+  const mismatch = verificationGate(parsed, {
+    provider: provider('telebirr'),
+    requestedReference: 'ZZZZZZZZZZ',
+  });
+  assert.equal(mismatch.ok, false);
+  if (!mismatch.ok) assert.equal(mismatch.reason, 'reference');
+});
+
+test('telebirr reports "no such receipt" as not found', () => {
+  const parser = new TelebirrParser();
+  assert.throws(
+    () => parser.parse(textResponse('<html><body>This request is not correct</body></html>'), { reference: 'ABC1234567' }),
+    NotFoundError,
+  );
+});
+
+test('mpesa joins labels and values that the PDF puts on separate lines', () => {
+  // The PDF flattens two columns, so a label often sits above its value and
+  // several labels can share a block before the values.
+  const parsed = MpesaParser.parseLines([
+    'PAYER NAME',
+    'SERVICE FEE',
+    '+ 15% VAT',
+    'ABEBE KEBEDE',
+    'RECEIVER NAME',
+    'BINGO PLC',
+    'PAYER PHONE NUMBER',
+    '2519****1111',
+    'TRANSACTION ID',
+    'ABC1234567',
+    'TOTAL',
+    '600 Birr',
+    'TRANSACTION STATUS',
+    'Completed',
+  ]);
+
+  assert.equal(parsed.verified, true);
+  assert.equal(parsed.reference, 'ABC1234567');
+  assert.equal(parsed.amount, 600);
+  assert.equal(parsed.totalPaid, 600);
+  assert.equal(parsed.senderName, 'ABEBE KEBEDE');
+  assert.equal(parsed.receiverName, 'BINGO PLC');
+  assert.equal(parsed.senderAccount, '2519****1111');
+  assert.equal(parsed.transactionStatus, 'Completed');
+
+  const gate = verificationGate(parsed, {
+    provider: provider('mpesa'),
+    requestedReference: 'ABC1234567',
+  });
+  assert.deepEqual(gate, { ok: true });
+});
+
+test('mpesa reads the JSON envelope: code 0 carries the PDF, 2032 is not found', () => {
+  const success = MpesaParser.decodeEnvelope(
+    Buffer.from(JSON.stringify({ responseCode: '0', responseDescription: 'Success', base64Data: 'JVBERi0=' })),
+  );
+  assert.equal(success.ok, true);
+
+  const missing = MpesaParser.decodeEnvelope(
+    Buffer.from(
+      JSON.stringify({
+        responseCode: '2032',
+        responseDescription: 'The transaction receipt number does not exist.',
+      }),
+    ),
+  );
+  assert.equal(missing.ok, false);
+  if (missing.ok) throw new Error('unreachable');
+  assert.equal(missing.reason, 'upstream-error');
+  assert.equal(missing.description, 'The transaction receipt number does not exist.');
+});
+

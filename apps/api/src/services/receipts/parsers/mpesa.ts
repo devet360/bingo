@@ -14,6 +14,7 @@ import { BankParser, NotFoundError } from './base';
 import type { NormalizedInput } from '../reference';
 import type { ParsedReceipt } from '../types';
 import { extractPdfText, isPdf, parseMoney } from '../text';
+import { classifyStatus } from '../status';
 import { MAX_PDF_BYTES, MAX_ENVELOPE_BYTES } from '../http';
 
 const MAX_BASE64_CHARS = Math.ceil(MAX_PDF_BYTES / 3) * 4;
@@ -196,12 +197,20 @@ export class MpesaParser extends BankParser {
 
   protected async parseBody(body: Buffer): Promise<ParsedReceipt> {
     const envelope = MpesaParser.decodeEnvelope(body);
-    if (!envelope.ok) throw new NotFoundError(`M-Pesa has no receipt for this reference (${envelope.reason}).`);
+    if (!envelope.ok) {
+      throw new NotFoundError(
+        envelope.description
+          ? `M-Pesa has no receipt for this reference: ${envelope.description}`
+          : `M-Pesa has no receipt for this reference (${envelope.reason}).`,
+      );
+    }
     return MpesaParser.parseLines((await extractPdfText(envelope.pdf)).split('\n'));
   }
 
   /** Fail closed on a non-"0" code, bad base64 or a body that is not a PDF. */
-  static decodeEnvelope(data: Buffer): { ok: true; pdf: Buffer } | { ok: false; reason: string } {
+  static decodeEnvelope(
+    data: Buffer,
+  ): { ok: true; pdf: Buffer } | { ok: false; reason: string; description?: string } {
     if (data.length > MAX_ENVELOPE_BYTES) return { ok: false, reason: 'too-large' };
     let payload: unknown;
     try {
@@ -211,7 +220,16 @@ export class MpesaParser extends BankParser {
     }
     if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return { ok: false, reason: 'not-object' };
     const p = payload as Record<string, unknown>;
-    if (String(p.responseCode ?? '') !== '0') return { ok: false, reason: 'upstream-error' };
+    // A non-"0" code means there is no receipt (2032: unknown transaction);
+    // the bank's own wording is clearer to the player than the code.
+    if (String(p.responseCode ?? '') !== '0') {
+      const raw = typeof p.responseDescription === 'string' ? p.responseDescription.trim() : '';
+      return {
+        ok: false,
+        reason: 'upstream-error',
+        description: raw ? raw.replace(/\s+/g, ' ').slice(0, 160) : undefined,
+      };
+    }
     if (typeof p.base64Data !== 'string' || p.base64Data.length === 0) return { ok: false, reason: 'missing-pdf' };
 
     const b64 = p.base64Data.replace(/[\r\n]/g, '');
@@ -246,6 +264,52 @@ export class MpesaParser extends BankParser {
         if (values[field] === undefined && !blank(value)) values[field] = value;
       }
     });
+
+    const indexOfField = (field: Field): number => {
+      for (let i = 0; i < lines.length; i++) {
+        if (splitAtLabels(lines[i]!).some(([f]) => f === field)) return i;
+      }
+      return -1;
+    };
+
+    /**
+     * The receipt PDF flattens its two columns: a label can end up on one line
+     * and its value on the next, or several labels together with the values
+     * after them. Fill a field the inline scan missed from the nearest
+     * following line that has the field's shape, so an adjacency mistake
+     * cannot invent a value.
+     */
+    const fill = (field: Field, accept: (line: string) => string | undefined): void => {
+      if (values[field] !== undefined) return;
+      const at = indexOfField(field);
+      if (at === -1) return;
+      const end = Math.min(lines.length, at + 13);
+      for (let i = at + 1; i < end; i++) {
+        const line = lines[i]!;
+        if (splitAtLabels(line).length > 0) continue;
+        const value = accept(line);
+        if (value !== undefined) {
+          values[field] = value;
+          return;
+        }
+      }
+    };
+
+    const asPhone = (line: string): string | undefined => {
+      const account = cleanAccount(line);
+      return account && account.replace(/\*/g, '').length >= 7 ? account : undefined;
+    };
+    const asAmount = (line: string): string | undefined => (money(line) !== undefined ? line : undefined);
+
+    fill('payerName', cleanName);
+    fill('receiverName', cleanName);
+    fill('receiverBusinessName', cleanName);
+    fill('payerAccount', asPhone);
+    fill('receiverAccount', asPhone);
+    fill('transactionId', cleanId);
+    fill('total', asAmount);
+    // The status row decides the gate, so read it even when it wrapped.
+    fill('status', (line) => (line.length <= 40 && classifyStatus(line) !== 'unknown' ? line : undefined));
 
     const reference = cleanId(values.transactionId) ?? header.receiptNo;
     const total = money(values.total);

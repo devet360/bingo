@@ -284,7 +284,6 @@ walletRouter.post(
         message: result.outcome.message,
       },
       autoCredited: result.autoCredited,
-      needsClientFetch: result.needsClientFetch,
     });
   }),
 );

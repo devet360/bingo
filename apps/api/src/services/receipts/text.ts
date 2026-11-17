@@ -35,6 +35,27 @@ export function removeScriptsAndStyles(html: string): string {
   return out;
 }
 
+/**
+ * Remove <!-- ... --> blocks. Telebirr keeps disabled rows (Excise Tax) inside
+ * a comment; a mobile "Select All" then copies the markers as text lines.
+ */
+function removeComments(html: string): string {
+  let out = '';
+  let pos = 0;
+  for (;;) {
+    const start = html.indexOf('<!--', pos);
+    if (start === -1) {
+      out += html.slice(pos);
+      break;
+    }
+    out += html.slice(pos, start);
+    const end = html.indexOf('-->', start + 4);
+    if (end === -1) break;
+    pos = end + 3;
+  }
+  return out;
+}
+
 /** Decode the entities the bank pages actually use. */
 export function decodeEntities(text: string): string {
   return text
@@ -49,7 +70,7 @@ export function decodeEntities(text: string): string {
 /** HTML to non-empty, trimmed text lines (one element per tag boundary). */
 export function htmlToLines(html: string): string[] {
   return decodeEntities(
-    removeScriptsAndStyles(html)
+    removeComments(removeScriptsAndStyles(html))
       .replace(/<br\s*\/?>/gi, '\n')
       .replace(/<\/t[dh]>\s*<t[dh][^<>]*>/gi, '\t')
       .replace(/<\/tr>/gi, '\n')

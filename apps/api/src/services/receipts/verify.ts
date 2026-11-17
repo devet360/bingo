@@ -155,7 +155,7 @@ export async function verifyReceipt(
   }
 
   const message = parser.geoBlocked
-    ? `${provider.name} only answers Ethiopian IPs, so our server cannot check it. Open the receipt from your phone and submit it there.`
+    ? `${provider.name} only answers Ethiopian IPs, so it could not be checked from our server.`
     : lastRetryable
       ? `${provider.name} did not answer. ${lastReason}`.trim()
       : lastReason || `${provider.name} did not answer.`;

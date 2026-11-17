@@ -202,6 +202,7 @@ export function DepositsTab() {
   const [meta, setMeta] = useState<PageMeta | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  const [receiptTarget, setReceiptTarget] = useState<StaffDeposit | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -281,6 +282,16 @@ export function DepositsTab() {
               </div>
               <div className="flex items-center gap-2">
                 <StatusPill status={deposit.status} />
+                {deposit.verificationStatus !== 'NOT_REQUIRED' ? (
+                  <Pill tone={PROOF_TONE[deposit.verificationStatus] ?? 'neutral'}>
+                    receipt {deposit.verificationStatus.toLowerCase()}
+                  </Pill>
+                ) : null}
+                {deposit.receiptUrl ? (
+                  <Button size="sm" variant="outline" onClick={() => setReceiptTarget(deposit)}>
+                    View receipt
+                  </Button>
+                ) : null}
                 {deposit.status === 'PENDING' || deposit.status === 'PROCESSING' ? (
                   <Button
                     size="sm"
@@ -299,6 +310,40 @@ export function DepositsTab() {
       <div className="px-4 pb-3">
         <Pager page={meta} onPage={setPage} />
       </div>
+      <Sheet open={receiptTarget !== null} title="Deposit receipt" onClose={() => setReceiptTarget(null)}>
+        {receiptTarget ? (
+          <div className="max-h-[70vh] space-y-3 overflow-y-auto pr-1">
+            <div className="rounded-xl bg-ink/50 p-3 text-xs">
+              <p>
+                Deposit{' '}
+                <span className="font-display font-bold tracking-[0.2em] text-gold">
+                  {receiptTarget.code}
+                </span>
+              </p>
+              <p className="mt-1 text-muted">
+                {receiptTarget.player.displayName}
+                {receiptTarget.player.phone ? ` · ${receiptTarget.player.phone}` : ''}
+                {receiptTarget.agentCode ? ` · agent ${receiptTarget.agentCode}` : ''}
+              </p>
+              <p className="mt-1 text-muted">
+                {formatCredits(receiptTarget.amount)} · {receiptTarget.method.toLowerCase().replaceAll('_', ' ')}
+                {receiptTarget.receiptReference ? ` · ref ${receiptTarget.receiptReference}` : ''}
+              </p>
+              {receiptTarget.verificationMessage ? (
+                <p className="mt-1 text-muted">{receiptTarget.verificationMessage}</p>
+              ) : null}
+            </div>
+            {receiptTarget.receiptUrl ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={receiptTarget.receiptUrl}
+                alt="Deposit receipt"
+                className="max-h-[55vh] w-full rounded-xl object-contain"
+              />
+            ) : null}
+          </div>
+        ) : null}
+      </Sheet>
     </Panel>
   );
 }
