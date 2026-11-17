@@ -4,6 +4,7 @@ import path from 'node:path';
 import { defineConfig } from 'vite';
 
 export default defineConfig({
+  base: '/play/',
   plugins: [react(), tailwindcss()],
   resolve: { alias: { '@': path.resolve(import.meta.dirname) } },
   build: { outDir: 'dist/client', emptyOutDir: true },

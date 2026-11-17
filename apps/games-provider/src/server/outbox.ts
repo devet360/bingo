@@ -5,6 +5,8 @@ import { WalletError, type MovementReply, type WalletClient } from './wallet';
 export interface OutboxWorkerDeps {
   store: Store;
   wallet: WalletClient;
+  /** Called after a delivered movement moved the local balance mirror. */
+  onDelivered?: (input: { sessionToken: string; balance: bigint }) => void;
 }
 
 export interface DrainSummary {
@@ -46,12 +48,14 @@ const DETERMINISTIC_RETRY_LIMIT = 1;
 export class OutboxWorker {
   private readonly store: Store;
   private readonly wallet: WalletClient;
+  private readonly onDelivered: ((input: { sessionToken: string; balance: bigint }) => void) | null;
   private timer: ReturnType<typeof setInterval> | null = null;
   private running = false;
 
   constructor(deps: OutboxWorkerDeps) {
     this.store = deps.store;
     this.wallet = deps.wallet;
+    this.onDelivered = deps.onDelivered ?? null;
   }
 
   async drainOnce(now: Date): Promise<DrainSummary> {
@@ -126,7 +130,10 @@ export class OutboxWorker {
       return;
     }
 
-    if (reply.balance !== null) await this.store.setSessionBalance(row.sessionToken, reply.balance);
+    if (reply.balance !== null) {
+      await this.store.setSessionBalance(row.sessionToken, reply.balance);
+      this.onDelivered?.({ sessionToken: row.sessionToken, balance: reply.balance });
+    }
     await this.store.markOutbox(row.id, 'SENT');
     summary.sent += 1;
   }

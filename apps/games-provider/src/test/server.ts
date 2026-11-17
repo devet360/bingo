@@ -8,12 +8,24 @@ import { attachSocket, type SocketHandle } from '../server/socket';
 import type { Store } from '../server/store';
 import type { WalletClient } from '../server/wallet';
 
-export interface TestServer { url: string; wsUrl: string; engine: RoundEngine; close(): Promise<void> }
+export interface TestServer {
+  url: string;
+  wsUrl: string;
+  engine: RoundEngine;
+  store: Store;
+  socket: SocketHandle;
+  close(): Promise<void>;
+}
 
 export async function startTestServer(input: { config: AppConfig; store: Store; wallet: WalletClient }): Promise<TestServer> {
   const limits: EngineLimits = { ...input.config.limits, maxBetsPerRound: 4 };
-  const betManager = new BetManager({ store: input.store, wallet: input.wallet, limits });
   let socket: SocketHandle | null = null;
+  const betManager = new BetManager({
+    store: input.store,
+    wallet: input.wallet,
+    limits,
+    onSettled: (bet) => socket?.notifyBet(bet),
+  });
   const engine = new RoundEngine({
     store: input.store, wallet: input.wallet, limits,
     operatorCode: input.config.operator.code,
@@ -26,11 +38,13 @@ export async function startTestServer(input: { config: AppConfig; store: Store; 
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const { port } = server.address() as AddressInfo;
   socket = attachSocket({ server, store: input.store, engine });
-  const attached = socket;
+  const attached: SocketHandle = socket;
   return {
     url: `http://127.0.0.1:${port}`,
     wsUrl: `ws://127.0.0.1:${port}/ws`,
     engine,
+    store: input.store,
+    socket: attached,
     async close() {
       await attached.close();
       engine.stop();

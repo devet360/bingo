@@ -1,5 +1,6 @@
 import type { Server } from 'node:http';
 import { WebSocketServer, WebSocket } from 'ws';
+import type { BetRecord } from '../domain/types';
 import type { RoundEngine, RoundEngineEvent } from './roundEngine';
 import type { Store } from './store';
 import { WalletError } from './wallet';
@@ -11,8 +12,20 @@ type EngineView = Pick<RoundEngine, 'snapshot' | 'placeBet' | 'cancelBet' | 'cas
 
 export interface SocketHandle {
   broadcast(event: RoundEngineEvent): void;
+  notifyBet(bet: BetRecord): void;
+  notifyBalance(sessionToken: string, balance: bigint): void;
   close(): Promise<void>;
 }
+
+const betPayload = (bet: BetRecord) => ({
+  roundId: bet.roundId,
+  panel: bet.panel,
+  status: bet.status,
+  stake: bet.stake.toString(),
+  autoCashout: bet.autoCashout,
+  cashoutMultiplier: bet.cashoutMultiplier,
+  payout: bet.payout === null ? null : bet.payout.toString(),
+});
 
 interface ClientState { sessionToken: string | null; alive: boolean; tail: Promise<void> }
 
@@ -91,7 +104,16 @@ export function attachSocket(input: { server: Server; store: Store; engine: Engi
         return;
       }
       state.sessionToken = session.token;
-      send(ws, { type: 'snapshot', ...engine.snapshot(), balance: session.displayBalance.toString() });
+      const snapshot = engine.snapshot();
+      const ownBets = snapshot.roundId === null
+        ? [null, null]
+        : await Promise.all(PANELS.map((panel) => store.getBet(snapshot.roundId as number, session.token, panel)));
+      send(ws, {
+        type: 'snapshot',
+        ...snapshot,
+        balance: session.displayBalance.toString(),
+        bets: ownBets.map((bet) => (bet === null ? null : betPayload(bet))),
+      });
       return;
     }
 
@@ -152,13 +174,7 @@ export function attachSocket(input: { server: Server; store: Store; engine: Engi
     }
     if (roundId !== null) {
       const bet = await store.getBet(roundId, token, panel);
-      if (bet !== null) {
-        sendToSession(token, {
-          type: 'bet:update', roundId: bet.roundId, panel: bet.panel, status: bet.status,
-          stake: bet.stake.toString(), autoCashout: bet.autoCashout,
-          cashoutMultiplier: bet.cashoutMultiplier, payout: bet.payout === null ? null : bet.payout.toString(),
-        });
-      }
+      if (bet !== null) sendToSession(token, { type: 'bet:update', ...betPayload(bet) });
     }
     const fresh = await store.getSession(token);
     if (fresh !== null) sendToSession(token, { type: 'balance:update', balance: fresh.displayBalance.toString() });
@@ -179,6 +195,12 @@ export function attachSocket(input: { server: Server; store: Store; engine: Engi
         ? { type: 'round:tick', roundId: event.payload.roundId, multiplier: event.payload.multiplier, elapsedMs: event.payload.elapsedMs }
         : { type: event.type, ...event.payload };
       for (const [ws, state] of clients) if (state.sessionToken !== null) send(ws, frame);
+    },
+    notifyBet(bet) {
+      sendToSession(bet.sessionToken, { type: 'bet:update', ...betPayload(bet) });
+    },
+    notifyBalance(sessionToken, balance) {
+      sendToSession(sessionToken, { type: 'balance:update', balance: balance.toString() });
     },
     async close() {
       clearInterval(heartbeat);

@@ -13,6 +13,8 @@ export interface BetManagerDeps {
   now?: () => Date;
   /** Transaction id source. Defaults to `randomUUID`. */
   newId?: () => string;
+  /** Called after a bet is persisted as CASHED or LOST, so the gateway can push it. */
+  onSettled?: (bet: BetRecord) => void;
 }
 
 type Panel = 0 | 1;
@@ -31,6 +33,7 @@ export class BetManager implements RoundBetManager {
   private readonly limits: EngineLimits;
   private readonly now: () => Date;
   private readonly newId: () => string;
+  private readonly onSettled: ((bet: BetRecord) => void) | null;
   /** Per-bet tail promise; settlement for one bet never overlaps itself. */
   private readonly settling = new Map<string, Promise<void>>();
 
@@ -40,6 +43,7 @@ export class BetManager implements RoundBetManager {
     this.limits = deps.limits;
     this.now = deps.now ?? (() => new Date());
     this.newId = deps.newId ?? (() => randomUUID());
+    this.onSettled = deps.onSettled ?? null;
   }
 
   async place(input: {
@@ -197,6 +201,7 @@ export class BetManager implements RoundBetManager {
       // already terminal: only a leftover ACTIVE bet lost the round.
       if (bet.status !== 'ACTIVE') continue;
       await this.store.updateBet(bet.id, { status: 'LOST', settledAt });
+      this.onSettled?.({ ...bet, status: 'LOST', settledAt });
     }
   }
 
@@ -232,12 +237,13 @@ export class BetManager implements RoundBetManager {
 
       const payout = payoutFor(current.stake, multiplier, session.maxWin);
       const winTxnId = this.newId();
+      const settledAt = this.now();
       await this.store.updateBet(current.id, {
         status: 'CASHED',
         cashoutMultiplier: multiplier,
         payout,
         winTxnId,
-        settledAt: this.now(),
+        settledAt,
       });
       await this.store.enqueueOutbox({
         operatorCode: session.operatorCode,
@@ -246,6 +252,7 @@ export class BetManager implements RoundBetManager {
         sessionToken: session.token,
         amount: payout,
       });
+      this.onSettled?.({ ...current, status: 'CASHED', cashoutMultiplier: multiplier, payout, winTxnId, settledAt });
     });
   }
 

@@ -5,9 +5,12 @@ import { BetManager } from '../src/server/betManager';
 import { WalletError, type WalletClient, type MovementReply } from '../src/server/wallet';
 import { type RoundBetManager } from '../src/server/roundEngine';
 import { createMemoryStore } from '../src/test/memoryStore';
-import type { RoundRecord, SessionRecord } from '../src/domain/types';
+import type { BetRecord, RoundRecord, SessionRecord } from '../src/domain/types';
 
-async function fixture(walletOverrides: Partial<WalletClient> = {}) {
+async function fixture(
+  walletOverrides: Partial<WalletClient> = {},
+  hooks: { onSettled?: (bet: BetRecord) => void } = {},
+) {
   const store = createMemoryStore();
   const calls: Array<{ kind: string; amount: bigint; txnId: string }> = [];
   const wallet: WalletClient = {
@@ -41,7 +44,7 @@ async function fixture(walletOverrides: Partial<WalletClient> = {}) {
   // Typed as the seam interface so a missing method fails the typecheck, not just a test.
   const manager: RoundBetManager = new BetManager({
     store, wallet, limits: { minStake: 100n, maxStake: 100_000n, maxWin: 3_000_000n, maxBetsPerRound: 2 },
-    now: () => new Date(1_000), newId: () => randomUUID(),
+    now: () => new Date(1_000), newId: () => randomUUID(), onSettled: hooks.onSettled,
   });
   return { store, wallet, calls, round, session, manager };
 }
@@ -273,4 +276,34 @@ test('the sweep only touches the current round', async () => {
   assert.equal(other.status, 'ACTIVE');
   assert.equal(other.payout, null);
   assert.equal(store.dump().outbox.filter((row) => row.txnId === other.betTxnId).length, 0);
+});
+
+test('an auto cashout pushes the settled bet once, at the target multiplier', async () => {
+  const settled: BetRecord[] = [];
+  const { manager, store, round, session } = await fixture({}, { onSettled: (bet) => settled.push(bet) });
+  await manager.place({ round, session, panel: 0, stake: 1_000n, autoCashout: 1.2 });
+  const flying = { ...round, status: 'FLYING' as const, crashPoint: 2 };
+  await manager.processAutoCashouts({ round: flying, multiplier: 1.5, elapsedMs: 1_000 });
+
+  assert.equal(settled.length, 1);
+  const [pushed] = settled;
+  assert.equal(pushed!.status, 'CASHED');
+  assert.equal(pushed!.cashoutMultiplier, 1.2);
+  assert.equal(pushed!.payout, 1_200n);
+  // The pushed frame carries exactly what the row persisted.
+  const row = store.dump().bets[0]!;
+  assert.equal(pushed!.payout, row.payout);
+  assert.equal(pushed!.winTxnId, row.winTxnId);
+});
+
+test('settling a crashed round pushes LOST for every active bet', async () => {
+  const settled: BetRecord[] = [];
+  const { manager, round, session } = await fixture({}, { onSettled: (bet) => settled.push(bet) });
+  await manager.place({ round, session, panel: 0, stake: 1_000n, autoCashout: null });
+  await manager.place({ round, session, panel: 1, stake: 500n, autoCashout: null });
+  await manager.settleRound({ round: { ...round, status: 'CRASHED', crashPoint: 1 }, maxWin: 3_000_000n });
+
+  assert.equal(settled.length, 2);
+  assert.deepEqual(settled.map((bet) => bet.status), ['LOST', 'LOST']);
+  assert.deepEqual(settled.map((bet) => bet.panel).sort(), [0, 1]);
 });

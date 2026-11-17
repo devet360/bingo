@@ -29,7 +29,12 @@ const wallet = new HttpWalletClient({
   callbackUrl: config.operator.callbackUrl,
   hmacSecret: config.operator.hmacSecret,
 });
-const outbox = new OutboxWorker({ store, wallet });
+let socket: SocketHandle | undefined;
+const outbox = new OutboxWorker({
+  store,
+  wallet,
+  onDelivered: ({ sessionToken, balance }) => socket?.notifyBalance(sessionToken, balance),
+});
 
 // Design §5.3: attempt every pending win once before deciding anything else.
 console.log('games-provider: boot drain', await outbox.drainOnce(new Date()));
@@ -45,12 +50,12 @@ if (stranded.dead + stranded.capped > 0) {
   console.error('games-provider: wallet rows need operator attention', stranded);
 }
 
-let socket: SocketHandle | undefined;
 const betManager = new BetManager({
   store,
   wallet,
   limits: config.limits,
   newId: () => randomUUID(),
+  onSettled: (bet) => socket?.notifyBet(bet),
 });
 const engine = new RoundEngine({
   store,

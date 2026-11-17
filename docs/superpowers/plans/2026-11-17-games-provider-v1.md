@@ -1939,12 +1939,17 @@ git commit -m "feat(games-provider): add durable wallet outbox worker"
 
 **Files:**
 - Create: `apps/games-provider/src/server/recovery.ts`
+- Modify: `apps/games-provider/src/server/store.ts` (add `listSettledBetsMissingOutbox()`)
+- Modify: `apps/games-provider/src/db/storePostgres.ts` (implement it)
+- Modify: `apps/games-provider/src/test/memoryStore.ts` (implement it)
 - Test: `apps/games-provider/tests/recovery.test.ts`
 
 **Interfaces:**
-- Produces: `runRecovery({ store, wallet, now })` → `{ abandonedRoundId, refundedBets, resolvedIndeterminate }`. Consumed by boot (Task 15) before `engine.start()`.
+- Produces: `runRecovery({ store, wallet, now? })` → `{ abandonedRoundIds, refundedBets, lostBets, resolvedIndeterminate, repairedSettlements }`. Consumed by boot (Task 15) before `engine.start()`.
+- Consumes: `Store.lastUnfinishedRound()`, `Store.listBetsForRound()`, `Store.listUnsettledBets()`, `Store.listSettledBetsMissingOutbox()`, `Store.enqueueOutbox()` (keyed by operator+type+txnId, so re-enqueueing is a no-op), `wallet.bet()`.
+- Produces for the store: `listSettledBetsMissingOutbox(): Promise<BetRecord[]>` — every `CASHED` bet whose `winTxnId` has no `WIN` outbox row plus every `CANCELLED` bet whose `betTxnId` has no `ROLLBACK` outbox row.
 
-- [ ] **Step 1: Write the failing test** — seed the memory store with: a `FLYING` round with two `ACTIVE` bets, one `CASHED` bet with a `PENDING` win, and one `UNRESOLVED` bet. Assert: round becomes `ABANDONED`; two `ROLLBACK` outbox rows exist for the active bets; the cashout's win row is untouched; the unresolved bet's `bet` call is replayed (fake wallet records it) and a rollback is enqueued only when the replay reports accepted.
+- [ ] **Step 1: Write the failing test** — seed the memory store with: a `FLYING` round with two `ACTIVE` bets, one `CASHED` bet with a `PENDING` win, one `CASHED` bet whose win row is missing, one `CANCELLED` bet whose rollback row is missing, and one `UNRESOLVED` bet. Assert: the round becomes `ABANDONED`; a `ROLLBACK` row exists for each active bet with its `betTxnId` and stake; the existing win row is untouched and not duplicated; the two orphaned terminal bets get their `WIN` (winTxnId, payout) / `ROLLBACK` (betTxnId, stake) rows; the unresolved bet's `bet` call is replayed with the original txnId and a rollback enqueued only when the reply reports accepted/replayed; a 2xx `accepted:false` reply and a 5xx leave the row `UNRESOLVED`. Additional cases: an `ACTIVE` bet in an already-`ABANDONED` round (a pass that died mid-refund) is refunded; an `ACTIVE` bet in a `CRASHED` round is marked `LOST` with no outbox row; a 500 whose body carries `TRANSACTION_ROLLED_BACK` stays `UNRESOLVED` (only 4xx is definitive); a 409 `TRANSACTION_ROLLED_BACK` cancels the bet and writes a `SENT` tombstone (status SENT, `lastError` `ALREADY_ROLLED_BACK`) so a second `runRecovery` is a clean no-op.
 
 - [ ] **Step 2: Run to verify failure**
 
@@ -1954,56 +1959,147 @@ Expected: FAIL.
 - [ ] **Step 3: Implement**
 
 ```ts
-export async function runRecovery({ store, wallet, now }: RecoveryDeps) {
-  const summary = { abandonedRoundId: null as number | null, refundedBets: 0, resolvedIndeterminate: 0 };
+export interface RecoverySummary {
+  abandonedRoundIds: number[];
+  refundedBets: number;
+  lostBets: number;
+  resolvedIndeterminate: number;
+  repairedSettlements: number;
+}
 
-  const unfinished = await store.lastUnfinishedRound();
-  if (unfinished) {
-    await store.finishRound(unfinished.id, { status: 'ABANDONED', at: now() });
-    summary.abandonedRoundId = unfinished.id;
-    for (const bet of await store.listBetsForRound(unfinished.id)) {
-      if (bet.status !== 'ACTIVE') continue;
-      await store.updateBet(bet.id, { status: 'CANCELLED', settledAt: now() });
-      await store.enqueueOutbox({
-        operatorCode: bet.operatorCode, type: 'ROLLBACK', txnId: bet.betTxnId,
-        sessionToken: bet.sessionToken, amount: bet.stake,
-      });
-      summary.refundedBets += 1;
-    }
+export async function runRecovery(deps: RecoveryDeps): Promise<RecoverySummary> {
+  const now = deps.now ?? (() => new Date());
+  const { store, wallet } = deps;
+  const summary: RecoverySummary = {
+    abandonedRoundIds: [], refundedBets: 0, lostBets: 0, resolvedIndeterminate: 0, repairedSettlements: 0,
+  };
+
+  // Snapshot before any repair: a bet this pass cancels without a rollback (the
+  // wallet reports it already rolled back) is not an orphan.
+  const orphanedSettlements = await store.listSettledBetsMissingOutbox();
+
+  // Abandon every unfinished round (normally at most one; the loop heals a
+  // previous pass that died before it recorded the abandonment).
+  for (let round = await store.lastUnfinishedRound(); round !== null; round = await store.lastUnfinishedRound()) {
+    await store.finishRound(round.id, { status: 'ABANDONED', at: now() });
+    summary.abandonedRoundIds.push(round.id);
   }
 
   for (const bet of await store.listUnsettledBets()) {
-    if (bet.status !== 'UNRESOLVED' && bet.status !== 'PLACING') continue;
-    try {
-      await wallet.bet({ sessionToken: bet.sessionToken, txnId: bet.betTxnId, amount: bet.stake, roundId: String(bet.roundId) });
+    if (bet.status === 'ACTIVE') {
+      // A crash between `finishRound(ABANDONED)` and this refund (or a crash
+      // before settleRound swept a CRASHED round) leaves the bet ACTIVE; the
+      // round's status, not the previous pass's progress, decides its fate.
+      const round = await store.getRound(bet.roundId);
+      if (round !== null && round.status === 'CRASHED') {
+        await store.updateBet(bet.id, { status: 'LOST', settledAt: now() });
+        summary.lostBets += 1;
+      } else {
+        // Abandoned or unknown round: the stake was charged and there is no
+        // outcome, so refund it.
+        await refundBet(store, bet, now);
+        summary.refundedBets += 1;
+      }
+      continue;
+    }
+    if (await resolveIndeterminate(store, wallet, bet, now)) summary.resolvedIndeterminate += 1;
+  }
+
+  for (const bet of orphanedSettlements) {
+    if (bet.status === 'CASHED') {
+      if (bet.winTxnId === null || bet.payout === null) {
+        console.error('recovery: cashed bet without win txn', bet.id);
+        continue;
+      }
+      await store.enqueueOutbox({
+        operatorCode: bet.operatorCode, type: 'WIN', txnId: bet.winTxnId,
+        sessionToken: bet.sessionToken, amount: bet.payout,
+      });
+    } else {
       await store.enqueueOutbox({
         operatorCode: bet.operatorCode, type: 'ROLLBACK', txnId: bet.betTxnId,
         sessionToken: bet.sessionToken, amount: bet.stake,
       });
-      await store.updateBet(bet.id, { status: 'CANCELLED', settledAt: now() });
-    } catch (error) {
-      const err = error as WalletError;
-      if (err.code === 'TRANSACTION_ROLLED_BACK') {
-        // The bet landed and was already refunded before the restart; no second rollback.
-        await store.updateBet(bet.id, { status: 'CANCELLED', settledAt: now() });
-      } else if (err.status !== null && err.status >= 400 && err.status < 500) {
-        await store.updateBet(bet.id, { status: 'REJECTED', settledAt: now() });
-      }
-      // transport errors leave the row UNRESOLVED; the next boot retries
     }
-    summary.resolvedIndeterminate += 1;
+    summary.repairedSettlements += 1;
   }
 
   return summary;
 }
+
+async function refundBet(store: Store, bet: BetRecord, now: () => Date): Promise<void> {
+  await store.updateBet(bet.id, { status: 'CANCELLED', settledAt: now() });
+  await store.enqueueOutbox({
+    operatorCode: bet.operatorCode, type: 'ROLLBACK', txnId: bet.betTxnId,
+    sessionToken: bet.sessionToken, amount: bet.stake,
+  });
+}
+
+async function resolveIndeterminate(store: Store, wallet: WalletClient, bet: BetRecord, now: () => Date): Promise<boolean> {
+  try {
+    const reply = await wallet.bet({
+      sessionToken: bet.sessionToken, txnId: bet.betTxnId,
+      amount: bet.stake, roundId: String(bet.roundId),
+    });
+    // A 2xx that accepts nothing is still ambiguous: leave it for the next boot.
+    if (!reply.accepted && !reply.replayed) return false;
+    await refundBet(store, bet, now);
+    return true;
+  } catch (error) {
+    if (error instanceof WalletError) {
+      // Only a 4xx status is definitive, whatever code the body carries.
+      const isClientError = error.status !== null && error.status >= 400 && error.status < 500;
+      if (isClientError && error.code === 'TRANSACTION_ROLLED_BACK') {
+        // The charge landed and was refunded before the restart: cancel it and
+        // leave a SENT tombstone so later boots do not mistake the CANCELLED bet
+        // for an orphan and fabricate a delivery.
+        await store.updateBet(bet.id, { status: 'CANCELLED', settledAt: now() });
+        const row = await store.enqueueOutbox({
+          operatorCode: bet.operatorCode, type: 'ROLLBACK', txnId: bet.betTxnId,
+          sessionToken: bet.sessionToken, amount: bet.stake,
+        });
+        if (row !== null) await store.markOutbox(row.id, 'SENT', 'ALREADY_ROLLED_BACK');
+        return true;
+      }
+      if (isClientError) {
+        await store.updateBet(bet.id, { status: 'REJECTED', settledAt: now() });
+        return true;
+      }
+    }
+    // Transport failures and 5xx leave the row UNRESOLVED; the next boot retries.
+    return false;
+  }
+}
 ```
+
+Store contract additions (both stores, same semantics):
+
+```ts
+// memory
+async listSettledBetsMissingOutbox() {
+  return [...bets.values()]
+    .filter((bet) => {
+      if (bet.status === 'CASHED') {
+        return bet.winTxnId !== null && !outboxIds.has(outboxKey(bet.operatorCode, 'WIN', bet.winTxnId));
+      }
+      if (bet.status === 'CANCELLED') {
+        return !outboxIds.has(outboxKey(bet.operatorCode, 'ROLLBACK', bet.betTxnId));
+      }
+      return false;
+    })
+    .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
+    .map(clone);
+}
+```
+
+Postgres: select `CASHED`/`CANCELLED` bets, collect `winTxnId`/`betTxnId`, select the matching `walletOutbox` `(operatorCode, type, txnId)` keys with `inArray(walletOutbox.txnId, ids)`, return the bets whose key is absent. No schema change.
 
 - [ ] **Step 4: Run tests, typecheck, commit**
 
 Run: `npm run games:test && npm run games:typecheck`
 
 ```bash
-git add apps/games-provider/src/server/recovery.ts apps/games-provider/tests/recovery.test.ts
+git add apps/games-provider/src/server/recovery.ts apps/games-provider/tests/recovery.test.ts apps/games-provider/src/server/store.ts apps/games-provider/src/db/storePostgres.ts apps/games-provider/src/test/memoryStore.ts
 git commit -m "feat(games-provider): refund interrupted rounds on boot"
 ```
 
@@ -2016,10 +2112,19 @@ git commit -m "feat(games-provider): refund interrupted rounds on boot"
 **Files:**
 - Create: `apps/games-provider/src/server/handshake.ts`
 - Modify: `apps/games-provider/src/server/http.ts`
+- Modify: `apps/games-provider/src/test/fakeBingo.ts` (add the `sessionOpen` option)
+- Modify: `apps/games-provider/server.ts` and `apps/games-provider/tests/health.test.ts` (new `AppDeps` shape)
 - Test: `apps/games-provider/tests/http.test.ts`
 
 **Interfaces:**
-- Produces: `POST /api/sessions/handshake` → `{ data: { sessionId, currency, balance, limits, expiresAt } }`; `POST /api/sessions/close`; `GET /api/rounds/:id/proof`. `AppDeps` becomes `{ config, store, wallet }` (the engine is attached at the socket layer in Task 14, not inside the HTTP app).
+- Produces: `POST /api/sessions/handshake` → `{ data: { sessionId, gameId: 'crash', currency, balance, limits, expiresAt } }`; `POST /api/sessions/close` → `{ data: { closed: true } }`; `GET /api/rounds/:id/proof`. `AppDeps` becomes `{ config, store, wallet }` (the engine is attached at the socket layer in Task 14, not inside the HTTP app).
+
+**Rulings applied (lead, 2026-11-17):**
+- `sessionOpen` does not exist on `createFakeBingo` yet — this section predates Task 7. Add `sessionOpen?: boolean` (default `true`); when false every callback answers `409 { error: { code: 'SESSION_CLOSED' } }` after signature validation, mirroring bingo's closed-session refusal.
+- Proof codes follow the spec (§5): unknown → `404 ROUND_NOT_FOUND`; `BETTING`/`FLYING` → `409 ROUND_NOT_FINISHED`; `ABANDONED` → `409 ROUND_ABANDONED`; only `CRASHED` returns proof data.
+- Handshake classifies a `WalletError` by more than its status: a 4xx from `wallet.balance` is terminal (`SessionEndedError` → 410); every other `WalletError` — including a 2xx-status parse or signature failure (`WALLET_RESPONSE_INVALID`, `BALANCE_SIGNATURE_INVALID`) — maps to `502 WALLET_UNAVAILABLE`. A currency mismatch in the signed reply throws `WalletError(502, 'CURRENCY_MISMATCH')` so it lands on that same 502 path instead of a bare 500.
+- `server.ts` and `tests/health.test.ts` must pass the new `AppDeps` to compile: `server.ts` builds the Postgres store and `HttpWalletClient` (Task 15 replaces that boot with recovery/engine/outbox); the health test uses a memory store.
+- Rejected input answers a JSON envelope: unparseable body → `400 INVALID_JSON`, Zod failure → `400 VALIDATION_ERROR`, anything else → `500 INTERNAL_ERROR`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -2082,9 +2187,67 @@ test('proof is available only after the round crashed', async () => {
   await store.startFlight(round.id, { crashPoint: 2.5, clientSeedComposite: 'a:b:c', at: new Date() });
   await store.finishRound(round.id, { status: 'CRASHED', at: new Date() });
   const ok = await fetch(`${base}/api/rounds/${round.id}/proof`);
-  const body = await ok.json();
-  assert.equal(body.data.serverSeed, 's');
-  assert.equal(body.data.crashPoint, 2.5);
+  const obj = await ok.json();
+  assert.equal(obj.data.serverSeed, 's');
+  assert.equal(obj.data.crashPoint, 2.5);
+  server.close(); await fake.close();
+});
+
+test('closing a session is idempotent and flips the stored status', async () => {
+  const fake = await createFakeBingo({ hmacSecret: 'test-hmac-secret-value', balance: 0n, currency: 'ETB' });
+  const { server, base, store } = await boot(fake);
+  await fetch(`${base}/api/sessions/handshake`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ token: fake.token }),
+  });
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const response = await fetch(`${base}/api/sessions/close`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ token: fake.token }),
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { data: { closed: true } });
+  }
+  assert.equal(store.dump().sessions[0]!.status, 'CLOSED');
+  server.close(); await fake.close();
+});
+
+test('proof answers 404 for an unknown round and 409 for an abandoned one', async () => {
+  const fake = await createFakeBingo({ hmacSecret: 'test-hmac-secret-value', balance: 0n, currency: 'ETB' });
+  const { server, base, store } = await boot(fake);
+  const missing = await fetch(`${base}/api/rounds/999999/proof`);
+  assert.equal(missing.status, 404);
+  assert.equal((await missing.json()).error.code, 'ROUND_NOT_FOUND');
+  const round = await store.createRound({ serverSeed: 's', serverSeedHash: 'h', startedAt: new Date() });
+  await store.finishRound(round.id, { status: 'ABANDONED', at: new Date() });
+  const abandoned = await fetch(`${base}/api/rounds/${round.id}/proof`);
+  assert.equal(abandoned.status, 409);
+  assert.equal((await abandoned.json()).error.code, 'ROUND_ABANDONED');
+  server.close(); await fake.close();
+});
+
+test('a 5xx wallet answers 502 instead of declaring the session dead', async () => {
+  const fake = await createFakeBingo({ hmacSecret: 'test-hmac-secret-value', balance: 0n, currency: 'ETB' });
+  const { server, base } = await boot(fake);
+  fake.respondNextWith('{"error":{"code":"INTERNAL_ERROR","message":"boom"}}', { status: 500 });
+  const response = await fetch(`${base}/api/sessions/handshake`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ token: fake.token }),
+  });
+  assert.equal(response.status, 502);
+  assert.equal((await response.json()).error.code, 'WALLET_UNAVAILABLE');
+  server.close(); await fake.close();
+});
+
+test('a malformed handshake body answers 400 rather than 500', async () => {
+  const fake = await createFakeBingo({ hmacSecret: 'test-hmac-secret-value', balance: 0n, currency: 'ETB' });
+  const { server, base } = await boot(fake);
+  const response = await fetch(`${base}/api/sessions/handshake`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ token: 'not-a-uuid' }),
+  });
+  assert.equal(response.status, 400);
+  assert.equal((await response.json()).error.code, 'VALIDATION_ERROR');
   server.close(); await fake.close();
 });
 ```
@@ -2122,7 +2285,9 @@ export async function handshake(input: {
   }
   verifyBalanceReply(input.config.operator.hmacSecret, input.token, reply, now.getTime());
   if (reply.currency !== input.config.operator.currency) {
-    throw new Error(`Currency mismatch: bingo settles ${reply.currency}`);
+    // A signed reply in another currency means the operator contract is broken,
+    // not that the session ended: surface it on the wallet-unavailable path.
+    throw new WalletError(502, 'CURRENCY_MISMATCH', `Bingo settles ${reply.currency}, expected ${input.config.operator.currency}`);
   }
   const session = {
     token: input.token,
@@ -2162,21 +2327,23 @@ app.use((_req, res, next) => {
 });
 ```
 
-Handshake route: validate `{token}` is a UUID (`z.string().uuid()`), call `handshake`, respond `{data:{sessionId, currency, balance: displayBalance.toString(), limits:{minStake, maxStake, maxWin}, expiresAt: new Date(Date.now()+2*3600_000).toISOString()}}`; map `SessionEndedError` → 410 `{error:{code:'SESSION_CLOSED'}}`; map any `WalletError` whose `status` is `null` (transport/timeout) or ≥ 500 → 502 `{error:{code:'WALLET_UNAVAILABLE'}}`.
+Handshake route: validate `{token}` is a UUID (`z.string().uuid()`), call `handshake`, respond `{data:{sessionId: session.token, gameId: 'crash', currency, balance: displayBalance.toString(), limits:{minStake, maxStake, maxWin}, expiresAt: new Date(Date.now()+2*3600_000).toISOString()}}` — `sessionId` is bingo's session token, the key of the provider's own row and of the socket auth in Task 14. Map `SessionEndedError` → 410 `{error:{code:'SESSION_CLOSED'}}`; map every other `WalletError` → 502 `{error:{code:'WALLET_UNAVAILABLE'}}` (null-status transport/timeout, 5xx, and 2xx-status parse or signature failures alike — a parse failure is not a dead session).
 
 Close route: validate `{token}` as a UUID, call `store.closeSession(token)` (no error when the token is unknown — closing twice is a no-op), respond `{data:{closed:true}}`.
 
-Proof route: 404 unknown, 409 `ROUND_NOT_FINISHED` unless `CRASHED`, else `{data:{roundId, serverSeed, serverSeedHash, clientSeedComposite, crashPoint, startedAt, flewAt, crashedAt}}`.
+Proof route: `:id` must be a safe positive integer (otherwise 404); 404 `ROUND_NOT_FOUND` for unknown rounds; 409 `ROUND_NOT_FINISHED` while `BETTING`/`FLYING`; 409 `ROUND_ABANDONED` for `ABANDONED`; otherwise `{data:{roundId, serverSeed, serverSeedHash, clientSeedComposite, crashPoint, startedAt, flewAt, crashedAt}}` (let express serialise the Dates).
+
+Error handling: after `express.json({ limit: '32kb' })`, a final error middleware maps `entity.parse.failed` → 400 `{error:{code:'INVALID_JSON'}}`, `ZodError` → 400 `{error:{code:'VALIDATION_ERROR'}}`, anything else → 500 `{error:{code:'INTERNAL_ERROR'}}`.
 
 - [ ] **Step 5: Run tests**
 
-Run: `npm run games:test`
-Expected: 3 tests pass.
+Run: `npm run games:test && npm run games:typecheck`
+Expected: the 7 HTTP tests pass alongside the existing suites; typecheck clean.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add apps/games-provider/src/server/handshake.ts apps/games-provider/src/server/http.ts apps/games-provider/tests/http.test.ts
+git add apps/games-provider/src/server/handshake.ts apps/games-provider/src/server/http.ts apps/games-provider/src/test/fakeBingo.ts apps/games-provider/tests/http.test.ts apps/games-provider/tests/health.test.ts apps/games-provider/server.ts
 git commit -m "feat(games-provider): add session handshake and round proof endpoints"
 ```
 
@@ -2186,13 +2353,24 @@ git commit -m "feat(games-provider): add session handshake and round proof endpo
 
 **Files:**
 - Create: `apps/games-provider/src/server/socket.ts`
-- Modify: `apps/games-provider/src/server/http.ts` (attach server) or `server.ts` (create `WebSocketServer` on the HTTP server)
+- Create: `apps/games-provider/src/test/server.ts` (shared http+socket+engine test harness)
 - Test: `apps/games-provider/tests/socket.test.ts`
+- Production wiring is Task 15's job; this task ships the module and the harness.
 
 **Interfaces:**
-- Produces: `attachSocket({ server, store, engine, wallet, config })`; message contracts `auth`, `bet:place`, `bet:cancel`, `bet:cashout` and server events `snapshot`, `round:betting`, `round:tick`, `round:crashed`, `bet:update`, `balance:update`, `session:ended`, `error`.
+- Produces: `attachSocket({ server, store, engine })` → `{ broadcast(event: RoundEngineEvent): void; close(): Promise<void> }`, upgrading on path `/ws`. Inbound frames `auth` (`{token}`), `bet:place` (`{panel, stake, autoCashout?}`), `bet:cancel` (`{panel}`), `bet:cashout` (`{panel}`). Outbound frames `snapshot`, `round:betting`, `round:tick`, `round:crashed`, `bet:update`, `balance:update`, `session:ended`, `error`.
+- Produces: `startTestServer({ config, store, wallet })` → `{ url, wsUrl, engine, close }` (ephemeral port, `/ws` path, engine NOT started — tests drive `engine.tickOnce`).
 
-- [ ] **Step 1: Write the failing test**
+**Rulings applied (lead, 2026-11-17):**
+- The engine emits a fourth event, `round:flying`, that the design's V1 outbound list does not include. Broadcast it as `round:tick` with `{roundId, multiplier: 1, elapsedMs: 0}` — ticks only exist while flying, so elapsed 0 is the takeoff signal and the client needs no extra event.
+- `bet:update` and `balance:update` concern one player: send them only to sockets authed as that session token. Engine events go to every authed socket.
+- `attachSocket` takes no `wallet`/`config`: the socket never calls the wallet directly and does no origin policy of its own; the engine already owns bet handling. The plan's earlier `{ server, store, engine, wallet, config }` shape would leave two unused parameters.
+- Frames are answered with `{type:'error', code, message}` where `code` is `NOT_AUTHED` (any frame before auth), `BAD_FRAME` (unparseable JSON, unknown type, `panel` not 0|1, `stake` not a positive decimal string, non-numeric/`<1` `autoCashout`), `WalletError.code` for wallet failures, `BET_REJECTED` for the engine's business errors ("Betting is closed", "Stake outside limits", "No active bet for this round", "no round is open"). A bad frame never closes the socket; the client keeps its auth.
+- Each action re-reads the session from the store; a missing or CLOSED row sends `{type:'session:ended'}` and closes the socket. Auth itself needs an OPEN row. (`handshake` reopening a closed row is Task 13's contract; the socket is not a session oracle.)
+- `EngineLimits.maxBetsPerRound` has no config value yet (Task 15 adds it); the harness uses 4.
+- Money on outbound frames is a decimal string (`stake`, `payout`, `balance`); `bet:update` re-reads the row after the action so it reports committed state.
+
+- [ ] **Step 1: Write the failing tests**
 
 ```ts
 // apps/games-provider/tests/socket.test.ts
@@ -2205,8 +2383,33 @@ import { HttpWalletClient } from '../src/server/wallet';
 import { loadConfig } from '../src/config';
 import { handshake } from '../src/server/handshake';
 import { startTestServer } from '../src/test/server';
+import { BETTING_WINDOW_MS } from '../src/server/roundEngine';
 
-test('a client must auth before betting, and snapshots hide the crash point', async () => {
+interface Frame { type: string; [key: string]: unknown }
+
+function collector(ws: WebSocket) {
+  const queue: Frame[] = [];
+  const waiters: Array<{ match: (frame: Frame) => boolean; resolve: (frame: Frame) => void }> = [];
+  ws.on('message', (raw) => {
+    const frame = JSON.parse(raw.toString()) as Frame;
+    const index = waiters.findIndex((waiter) => waiter.match(frame));
+    if (index >= 0) waiters.splice(index, 1)[0]!.resolve(frame);
+    else queue.push(frame);
+  });
+  return {
+    send: (frame: Frame) => ws.send(JSON.stringify(frame)),
+    next(match: (frame: Frame) => boolean, timeoutMs = 2000): Promise<Frame> {
+      const index = queue.findIndex(match);
+      if (index >= 0) return Promise.resolve(queue.splice(index, 1)[0]!);
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error('timed out waiting for frame')), timeoutMs);
+        waiters.push({ match, resolve: (frame) => { clearTimeout(timer); resolve(frame); } });
+      });
+    },
+  };
+}
+
+async function setup() {
   const fake = await createFakeBingo({ hmacSecret: 'test-hmac-secret-value', balance: 10_000n, currency: 'ETB' });
   const config = loadConfig({
     DATABASE_URL: 'postgres://x',
@@ -2216,39 +2419,352 @@ test('a client must auth before betting, and snapshots hide the crash point', as
   const store = createMemoryStore();
   const wallet = new HttpWalletClient({ callbackUrl: config.operator.callbackUrl, hmacSecret: config.operator.hmacSecret });
   await handshake({ token: fake.token, config, store, wallet });
-  // boot an http+socket server through the shared helper `startTestServer({config, store, wallet})`
-  // (exported from src/test/server.ts in this task; see step 3)
-  const { url, close } = await startTestServer({ config, store, wallet });
+  const server = await startTestServer({ config, store, wallet });
+  return { fake, store, ...server };
+}
+
+async function connect(url: string) {
   const ws = new WebSocket(url);
-  const messages: any[] = [];
-  ws.on('message', (raw) => messages.push(JSON.parse(raw.toString())));
-  await new Promise((resolve) => ws.on('open', resolve));
+  const frames = collector(ws);
+  await new Promise<void>((resolve, reject) => {
+    ws.once('open', () => resolve());
+    ws.once('error', reject);
+  });
+  return { ws, frames };
+}
 
-  ws.send(JSON.stringify({ type: 'bet:place', panel: 0, stake: '1000' }));
-  await new Promise((resolve) => setTimeout(resolve, 50));
-  assert.equal(messages.at(-1)?.type, 'error');
-  assert.equal(messages.at(-1)?.code, 'NOT_AUTHED');
+test('a client must auth before betting, and the snapshot hides the round outcome', async (t) => {
+  const env = await setup();
+  t.after(async () => { await env.close(); await env.fake.close(); });
+  const { frames } = await connect(env.wsUrl);
 
-  ws.send(JSON.stringify({ type: 'auth', token: fake.token }));
-  await new Promise((resolve) => setTimeout(resolve, 100));
-  const snapshot = messages.find((m) => m.type === 'snapshot');
-  assert.ok(snapshot);
-  assert.equal('crashPoint' in snapshot ? snapshot.crashPoint : null, null);
+  frames.send({ type: 'bet:place', panel: 0, stake: '1000' });
+  const denied = await frames.next((frame) => frame.type === 'error');
+  assert.equal(denied.code, 'NOT_AUTHED');
 
-  ws.close(); await close(); await fake.close();
+  frames.send({ type: 'auth', token: env.fake.token });
+  const snapshot = await frames.next((frame) => frame.type === 'snapshot');
+  assert.equal(snapshot.crashPoint, null);
+  assert.equal(snapshot.serverSeed, null);
+  assert.equal(snapshot.phase, 'BETTING');
+});
+
+test('placing, cancelling and cashing out confirm the bet and the balance', async (t) => {
+  const env = await setup();
+  t.after(async () => { await env.close(); await env.fake.close(); });
+  const { frames } = await connect(env.wsUrl);
+  frames.send({ type: 'auth', token: env.fake.token });
+  await frames.next((frame) => frame.type === 'snapshot');
+
+  await env.engine.tickOnce(0);
+  const betting = await frames.next((frame) => frame.type === 'round:betting');
+  assert.equal(typeof betting.roundId, 'number');
+
+  frames.send({ type: 'bet:place', panel: 0, stake: '1000' });
+  const placed = await frames.next((frame) => frame.type === 'bet:update' && frame.panel === 0);
+  assert.equal(placed.status, 'ACTIVE');
+  assert.equal(placed.stake, '1000');
+  const balance = await frames.next((frame) => frame.type === 'balance:update');
+  assert.equal(balance.balance, '9000');
+
+  frames.send({ type: 'bet:place', panel: 1, stake: '500' });
+  await frames.next((frame) => frame.type === 'bet:update' && frame.panel === 1 && frame.status === 'ACTIVE');
+  frames.send({ type: 'bet:cancel', panel: 1 });
+  const cancelled = await frames.next((frame) => frame.type === 'bet:update' && frame.panel === 1);
+  assert.equal(cancelled.status, 'CANCELLED');
+
+  await env.engine.tickOnce(BETTING_WINDOW_MS);
+  const takeoff = await frames.next((frame) => frame.type === 'round:tick');
+  assert.equal(takeoff.multiplier, 1);
+  assert.equal(takeoff.elapsedMs, 0);
+
+  frames.send({ type: 'bet:cashout', panel: 0 });
+  const cashed = await frames.next((frame) => frame.type === 'bet:update' && frame.panel === 0);
+  assert.equal(cashed.status, 'CASHED');
+  assert.equal(cashed.payout, '1000');
+});
+
+test('authing a closed or unknown session ends the socket', async (t) => {
+  const env = await setup();
+  t.after(async () => { await env.close(); await env.fake.close(); });
+
+  const unknown = await connect(env.wsUrl);
+  unknown.frames.send({ type: 'auth', token: '11111111-1111-4111-8111-111111111111' });
+  await unknown.frames.next((frame) => frame.type === 'session:ended');
+  await new Promise<void>((resolve) => unknown.ws.once('close', () => resolve()));
+
+  await env.store.closeSession(env.fake.token);
+  const closed = await connect(env.wsUrl);
+  closed.frames.send({ type: 'auth', token: env.fake.token });
+  await closed.frames.next((frame) => frame.type === 'session:ended');
+});
+
+test('a bad frame is answered with BAD_FRAME and the socket keeps its auth', async (t) => {
+  const env = await setup();
+  t.after(async () => { await env.close(); await env.fake.close(); });
+  const { frames } = await connect(env.wsUrl);
+  frames.send({ type: 'auth', token: env.fake.token });
+  await frames.next((frame) => frame.type === 'snapshot');
+
+  frames.send({ type: 'bet:place', panel: 7, stake: '1000' });
+  const bad = await frames.next((frame) => frame.type === 'error');
+  assert.equal(bad.code, 'BAD_FRAME');
+
+  // "0" and "000" are decimal strings but not positive stakes.
+  frames.send({ type: 'bet:place', panel: 0, stake: '0' });
+  const zero = await frames.next((frame) => frame.type === 'error');
+  assert.equal(zero.code, 'BAD_FRAME');
+
+  // Still authed: the next valid frame reaches the engine (no round is open yet).
+  frames.send({ type: 'bet:place', panel: 0, stake: '1000' });
+  const rejected = await frames.next((frame) => frame.type === 'error');
+  assert.equal(rejected.code, 'BET_REJECTED');
 });
 ```
 
 - [ ] **Step 2: Run to verify failure**
 
 Run: `npm run games:test`
-Expected: FAIL.
+Expected: FAIL (no socket module, no harness).
 
 - [ ] **Step 3: Implement `socket.ts` and `src/test/server.ts`**
 
-`attachSocket` keeps a `Map<WebSocket, {sessionToken?: string}>`, rejects any non-`auth` frame before auth with `{type:'error', code:'NOT_AUTHED'}`, validates `auth` by `store.getSession(token)` (closed/unknown → `{type:'session:ended'}` + close), sends `snapshot` on success, forwards `bet:place`/`bet:cancel`/`bet:cashout` to `engine` (mapping `WalletError` codes to `{type:'error', code, message}`), and broadcasts engine events to authed sockets. Heartbeat: `ping` every 30s, terminate unresponsive sockets.
+The listing below is the intended shape; type it as written and fix any type friction rather than redesigning it. A frame with no `type` before auth is `NOT_AUTHED`; after auth it is `BAD_FRAME`.
 
-`startTestServer` creates an HTTP server from `createApp`, attaches the socket and a `RoundEngine` on an ephemeral port, returns `{ url, close }`.
+```ts
+// apps/games-provider/src/server/socket.ts
+import type { Server } from 'node:http';
+import { WebSocketServer, WebSocket } from 'ws';
+import type { SessionRecord } from '../domain/types';
+import type { RoundEngine, RoundEngineEvent } from './roundEngine';
+import type { Store } from './store';
+import { WalletError } from './wallet';
+
+const HEARTBEAT_MS = 30_000;
+const PANELS = [0, 1] as const;
+type Panel = (typeof PANELS)[number];
+type EngineView = Pick<RoundEngine, 'snapshot' | 'placeBet' | 'cancelBet' | 'cashout'>;
+
+export interface SocketHandle {
+  broadcast(event: RoundEngineEvent): void;
+  close(): Promise<void>;
+}
+
+interface ClientState { sessionToken: string | null; alive: boolean; tail: Promise<void> }
+
+export function attachSocket(input: { server: Server; store: Store; engine: EngineView }): SocketHandle {
+  const { store, engine } = input;
+  // maxPayload keeps a hostile client from buffering 100 MiB before JSON.parse.
+  const wss = new WebSocketServer({ server: input.server, path: '/ws', maxPayload: 64 * 1024 });
+  const clients = new Map<WebSocket, ClientState>();
+
+  const send = (ws: WebSocket, frame: Record<string, unknown>) => {
+    if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(frame));
+  };
+  const sendToSession = (sessionToken: string, frame: Record<string, unknown>) => {
+    for (const [ws, state] of clients) if (state.sessionToken === sessionToken) send(ws, frame);
+  };
+
+  wss.on('connection', (ws) => {
+    const state: ClientState = { sessionToken: null, alive: true, tail: Promise.resolve() };
+    clients.set(ws, state);
+    ws.on('pong', () => { state.alive = true; });
+    // `ws` emits 'error' for protocol violations (e.g. an unmasked frame); an
+    // EventEmitter 'error' with no listener is an uncaughtException that would
+    // take down the whole provider. Never leave it unhandled.
+    ws.on('error', (error) => {
+      console.error('socket client failed', error);
+      clients.delete(ws);
+    });
+    ws.on('close', () => clients.delete(ws));
+    // A socket's frames run strictly in order: a cancel must never overtake the
+    // place it cancels while both sit on store/wallet awaits.
+    ws.on('message', (raw) => {
+      state.tail = state.tail
+        .then(() => handleFrame(ws, raw.toString()))
+        .catch((error: unknown) => {
+          console.error('socket frame failed', error);
+          send(ws, { type: 'error', code: 'INTERNAL_ERROR', message: 'Frame handling failed' });
+        });
+    });
+  });
+
+  async function handleFrame(ws: WebSocket, raw: string): Promise<void> {
+    const state = clients.get(ws);
+    if (!state) return;
+    let frame: Record<string, unknown>;
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) throw new Error('not an object');
+      frame = parsed as Record<string, unknown>;
+    } catch {
+      send(ws, { type: 'error', code: 'BAD_FRAME', message: 'Frame is not a JSON object' });
+      return;
+    }
+    const type = frame.type;
+    if (typeof type !== 'string') {
+      send(ws, { type: 'error', code: state.sessionToken ? 'BAD_FRAME' : 'NOT_AUTHED', message: 'Frame has no type' });
+      return;
+    }
+    if (type !== 'auth' && state.sessionToken === null) {
+      send(ws, { type: 'error', code: 'NOT_AUTHED', message: 'Authenticate first' });
+      return;
+    }
+
+    if (type === 'auth') {
+      const token = frame.token;
+      if (typeof token !== 'string' || token.length === 0) {
+        send(ws, { type: 'error', code: 'BAD_FRAME', message: 'auth requires a token' });
+        return;
+      }
+      const session = await store.getSession(token);
+      if (session === null || session.status !== 'OPEN') {
+        send(ws, { type: 'session:ended', reason: session === null ? 'UNKNOWN' : 'CLOSED' });
+        ws.close(4001, 'session ended');
+        return;
+      }
+      state.sessionToken = session.token;
+      send(ws, { type: 'snapshot', ...engine.snapshot(), balance: session.displayBalance.toString() });
+      return;
+    }
+
+    const token = state.sessionToken;
+    if (token === null) return;
+    const session = await store.getSession(token);
+    if (session === null || session.status !== 'OPEN') {
+      send(ws, { type: 'session:ended', reason: session === null ? 'UNKNOWN' : 'CLOSED' });
+      ws.close(4001, 'session ended');
+      return;
+    }
+
+    if (type === 'bet:place') {
+      const panel = frame.panel;
+      const stake = frame.stake;
+      const autoCashout = frame.autoCashout ?? null;
+      if (!PANELS.includes(panel as Panel) || typeof stake !== 'string' || !/^[1-9]\d*$/.test(stake)
+        || (autoCashout !== null && (typeof autoCashout !== 'number' || !Number.isFinite(autoCashout) || autoCashout < 1))) {
+        send(ws, { type: 'error', code: 'BAD_FRAME', message: 'bet:place requires panel 0|1, a decimal stake and an optional autoCashout >= 1' });
+        return;
+      }
+      await act(ws, token, panel as Panel, () =>
+        engine.placeBet({ session, panel: panel as Panel, stake: BigInt(stake), autoCashout }),
+      );
+      return;
+    }
+    if (type === 'bet:cancel' || type === 'bet:cashout') {
+      const panel = frame.panel;
+      if (!PANELS.includes(panel as Panel)) {
+        send(ws, { type: 'error', code: 'BAD_FRAME', message: `${type} requires panel 0|1` });
+        return;
+      }
+      await act(ws, token, panel as Panel, () =>
+        type === 'bet:cancel'
+          ? engine.cancelBet({ session, panel: panel as Panel })
+          : engine.cashout({ session, panel: panel as Panel }),
+      );
+      return;
+    }
+    send(ws, { type: 'error', code: 'BAD_FRAME', message: `Unknown frame type ${type}` });
+  }
+
+  async function act(ws: WebSocket, token: string, panel: Panel, action: () => Promise<unknown>): Promise<void> {
+    const roundId = engine.snapshot().roundId;
+    try {
+      await action();
+    } catch (error) {
+      if (error instanceof WalletError) {
+        send(ws, { type: 'error', code: error.code, message: error.message });
+      } else {
+        send(ws, { type: 'error', code: 'BET_REJECTED', message: error instanceof Error ? error.message : 'Bet rejected' });
+      }
+      return;
+    }
+    if (roundId !== null) {
+      const bet = await store.getBet(roundId, token, panel);
+      if (bet !== null) {
+        sendToSession(token, {
+          type: 'bet:update', roundId: bet.roundId, panel: bet.panel, status: bet.status,
+          stake: bet.stake.toString(), autoCashout: bet.autoCashout,
+          cashoutMultiplier: bet.cashoutMultiplier, payout: bet.payout === null ? null : bet.payout.toString(),
+        });
+      }
+    }
+    const fresh = await store.getSession(token);
+    if (fresh !== null) sendToSession(token, { type: 'balance:update', balance: fresh.displayBalance.toString() });
+  }
+
+  const heartbeat = setInterval(() => {
+    for (const [ws, state] of clients) {
+      if (!state.alive) { ws.terminate(); clients.delete(ws); continue; }
+      state.alive = false;
+      ws.ping();
+    }
+  }, HEARTBEAT_MS);
+  heartbeat.unref();
+
+  return {
+    broadcast(event) {
+      const frame = event.type === 'round:flying'
+        ? { type: 'round:tick', roundId: event.payload.roundId, multiplier: event.payload.multiplier, elapsedMs: event.payload.elapsedMs }
+        : { type: event.type, ...event.payload };
+      for (const [ws, state] of clients) if (state.sessionToken !== null) send(ws, frame);
+    },
+    async close() {
+      clearInterval(heartbeat);
+      for (const ws of clients.keys()) ws.terminate();
+      clients.clear();
+      await new Promise<void>((resolve) => wss.close(() => resolve()));
+    },
+  };
+}
+```
+
+Note for the implementer: the session-check block above contains an intentional placeholder comment — write the single correct condition (`session === null || session.status !== 'OPEN'`), not the garbled line.
+
+`src/test/server.ts`:
+
+```ts
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
+import type { AppConfig } from '../config';
+import { createApp } from '../server/http';
+import { BetManager } from '../server/betManager';
+import { RoundEngine, type EngineLimits } from '../server/roundEngine';
+import { attachSocket, type SocketHandle } from '../server/socket';
+import type { Store } from '../server/store';
+import type { WalletClient } from '../server/wallet';
+
+export interface TestServer { url: string; wsUrl: string; engine: RoundEngine; close(): Promise<void> }
+
+export async function startTestServer(input: { config: AppConfig; store: Store; wallet: WalletClient }): Promise<TestServer> {
+  const limits: EngineLimits = { ...input.config.limits, maxBetsPerRound: 4 };
+  const betManager = new BetManager({ store: input.store, wallet: input.wallet, limits });
+  let socket: SocketHandle | null = null;
+  const engine = new RoundEngine({
+    store: input.store, wallet: input.wallet, limits,
+    operatorCode: input.config.operator.code,
+    randomSeed: () => 'test-server-seed',
+    clientSeeds: () => ['alpha', 'beta', 'gamma'],
+    onEvent: (event) => socket?.broadcast(event),
+    betManager,
+  });
+  const server = createServer(createApp(input));
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address() as AddressInfo;
+  socket = attachSocket({ server, store: input.store, engine });
+  const attached = socket;
+  return {
+    url: `http://127.0.0.1:${port}`,
+    wsUrl: `ws://127.0.0.1:${port}/ws`,
+    engine,
+    async close() {
+      await attached.close();
+      engine.stop();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    },
+  };
+}
+```
 
 - [ ] **Step 4: Run tests, typecheck, commit**
 
@@ -2265,30 +2781,132 @@ git commit -m "feat(games-provider): add authenticated websocket gateway"
 
 **Files:**
 - Modify: `apps/games-provider/server.ts`
+- Modify: `apps/games-provider/src/config.ts` (limits + client seeds + operator name)
+- Modify: `apps/games-provider/src/server/store.ts`, `src/test/memoryStore.ts`, `src/db/storePostgres.ts` (`countOutboxByStatus`)
+- Modify: `apps/games-provider/src/server/outbox.ts` (log a drain that leaves DEAD/CAP_REJECTED rows)
+- Modify: `apps/games-provider/tests/config.test.ts`, `apps/games-provider/tests/memoryStore.test.ts`
 - Create: `Dockerfile.games`, `Procfile.games`, `apps/games-provider/.env.example`, `apps/games-provider/README.md`, `apps/games-provider/scripts/smoke.ts`
 - Modify: `docs/DEPLOY.md` (new section)
 - Modify: root `package.json` (`games:smoke`)
 
 **Interfaces:**
-- Produces: production boot order `migrate → seed operator → runRecovery → outbox.start → engine.start → listen`; graceful `SIGTERM`.
+- Consumes: `createDb` → `{db, pool, migrate(), close()}`; `createPostgresStore(db)`; `OutboxWorker({store, wallet})` with `drainOnce(now)`, `start(ms)`, `stop()`; `runRecovery({store, wallet, now?})` → `{abandonedRoundIds, refundedBets, lostBets, resolvedIndeterminate, repairedSettlements}`; `BetManager({store, wallet, limits, now?, newId?})`; `RoundEngine({store, wallet, limits, operatorCode, randomSeed, clientSeeds, onEvent, betManager})`; `createApp({config, store, wallet})`; `attachSocket({server, store, engine})` → `{broadcast(event), close()}`.
+- Produces: production boot order `migrate → seed operator → drain → runRecovery → drain → listen → outbox.start → engine.start`; graceful `SIGTERM`; config gains `limits.maxBetsPerRound`, `clientSeeds`, `operator.name`.
 
-- [ ] **Step 1: Write the boot entry**
+**Rulings applied (lead, 2026-11-17):**
+- The plan's old listing predated Tasks 10–14: `attachSocket` takes `{server, store, engine}` (no wallet/config) and returns `broadcast`; the engine's `onEvent` must call it, so the socket handle is assigned after construction exactly like `src/test/server.ts`.
+- Design §5.3 boot order governs: attempt pending wins once, then recover, then attempt the recovery rollbacks, then start the loop. Wins still `PENDING` retry in the background and do not block the first round.
+- Config grows `GAME_MAX_BETS_PER_ROUND` (default 200), `CLIENT_SEEDS` (exactly 3 comma-separated, defaulting to the prototype's `stratos_slot_1_00000001,stratos_slot_2_00000002,stratos_slot_3_00000003`) and `OPERATOR_NAME` (default `Bingo 251`). `EngineLimits.maxBetsPerRound` has no config value before this task.
+- `npm run games:build` is RED at Task 15's start: `index.html` references `/src/main.tsx`, which does not exist until Task 16 copies the client. Do not add a placeholder client; verify typecheck + tests here and carry the client build to Task 16/17.
+- `vite` is a devDependency, so the image must build before `npm prune --omit=dev`; `tsx` is a runtime dependency and survives the prune.
+- Single provider instance: no outbox lease, no multi-replica story; scaling above `web=1` stays unsupported.
+
+- [ ] **Step 1: Add the config values and the outbox status count**
+
+`src/config.ts` — add to `EnvSchema`:
+
+```ts
+GAME_MAX_BETS_PER_ROUND: z.coerce.number().int().positive().default(200),
+CLIENT_SEEDS: z.string().default(
+  'stratos_slot_1_00000001,stratos_slot_2_00000002,stratos_slot_3_00000003',
+),
+OPERATOR_NAME: z.string().min(1).default('Bingo 251'),
+```
+
+and in the returned object: `operator.name: parsed.OPERATOR_NAME`, `limits.maxBetsPerRound: parsed.GAME_MAX_BETS_PER_ROUND`, and
+
+```ts
+const clientSeeds = parsed.CLIENT_SEEDS.split(',').map((seed) => seed.trim()).filter(Boolean);
+if (clientSeeds.length !== 3) throw new Error('CLIENT_SEEDS must list exactly 3 comma-separated seeds');
+// returned as `clientSeeds`
+```
+
+`tests/config.test.ts` — extend the existing tests:
+
+```ts
+test('limits and client seeds have production defaults and are overridable', () => {
+  const defaults = loadConfig(baseEnv);
+  assert.equal(defaults.limits.maxBetsPerRound, 200);
+  assert.deepEqual(defaults.clientSeeds, [
+    'stratos_slot_1_00000001', 'stratos_slot_2_00000002', 'stratos_slot_3_00000003',
+  ]);
+  assert.equal(defaults.operator.name, 'Bingo 251');
+
+  const custom = loadConfig({
+    ...baseEnv,
+    GAME_MAX_BETS_PER_ROUND: '350',
+    CLIENT_SEEDS: 'a,b,c',
+    OPERATOR_NAME: 'Acme Casino',
+  });
+  assert.equal(custom.limits.maxBetsPerRound, 350);
+  assert.deepEqual(custom.clientSeeds, ['a', 'b', 'c']);
+  assert.equal(custom.operator.name, 'Acme Casino');
+});
+
+test('CLIENT_SEEDS must contain exactly three seeds', () => {
+  assert.throws(() => loadConfig({ ...baseEnv, CLIENT_SEEDS: 'a,b' }), /exactly 3/);
+});
+```
+
+`src/server/store.ts` — add to the interface (next to `pendingOutboxCount`):
+
+```ts
+countOutboxByStatus(status: OutboxStatus): Promise<number>;
+```
+
+Implement in both stores. Memory store:
+
+```ts
+async countOutboxByStatus(status) {
+  return [...outbox.values()].filter((row) => row.status === status).length;
+},
+```
+
+Postgres store (`import { and, asc, count, eq, lte }` already exists — reuse `count`/`eq`):
+
+```ts
+async countOutboxByStatus(status) {
+  const rows = await db
+    .select({ total: count() })
+    .from(walletOutbox)
+    .where(eq(walletOutbox.status, status));
+  return rows[0]?.total ?? 0;
+},
+```
+
+`tests/memoryStore.test.ts` — one assertion in an existing outbox test (or a new small test): after enqueue, `countOutboxByStatus('PENDING') === 1`, `countOutboxByStatus('DEAD') === 0`; after `markOutbox(id, 'DEAD', 'X')`, `'DEAD' === 1` and `'PENDING' === 0`.
+
+- [ ] **Step 2: Surface dead and capped rows from the worker**
+
+`src/server/outbox.ts` — in `tick()`, keep the summary and log a terminal outcome:
+
+```ts
+const summary = await this.drainOnce(new Date());
+if (summary.dead > 0 || summary.capped > 0) {
+  // DEAD/CAP_REJECTED rows are the audit trail for a payout that will never
+  // land; an operator has to see it, and a background tick is the only place
+  // a runtime failure surfaces.
+  console.error('outbox: wallet rows need operator attention', summary);
+}
+```
+
+- [ ] **Step 3: Write the boot entry**
 
 ```ts
 // apps/games-provider/server.ts
 import 'dotenv/config';
-import { createServer } from 'node:http';
 import { randomUUID } from 'node:crypto';
+import { createServer } from 'node:http';
 import { loadConfig } from './src/config';
-import { createDb } from './src/db';
+import { createDb } from './src/db/index';
 import { createPostgresStore } from './src/db/storePostgres';
+import { BetManager } from './src/server/betManager';
 import { createApp } from './src/server/http';
-import { attachSocket } from './src/server/socket';
-import { HttpWalletClient } from './src/server/wallet';
 import { OutboxWorker } from './src/server/outbox';
 import { runRecovery } from './src/server/recovery';
 import { RoundEngine } from './src/server/roundEngine';
-import { BetManager } from './src/server/betManager';
+import { attachSocket, type SocketHandle } from './src/server/socket';
+import { HttpWalletClient } from './src/server/wallet';
 
 const config = loadConfig();
 const database = createDb(config.databaseUrl);
@@ -2296,38 +2914,75 @@ await database.migrate();
 const store = createPostgresStore(database.db);
 await store.upsertOperator({
   code: config.operator.code,
-  name: 'Bingo 251',
+  name: config.operator.name,
   callbackUrl: config.operator.callbackUrl,
   hmacSecret: config.operator.hmacSecret,
   currency: config.operator.currency,
   enabled: true,
 });
-const wallet = new HttpWalletClient({ callbackUrl: config.operator.callbackUrl, hmacSecret: config.operator.hmacSecret });
+
+const wallet = new HttpWalletClient({
+  callbackUrl: config.operator.callbackUrl,
+  hmacSecret: config.operator.hmacSecret,
+});
 const outbox = new OutboxWorker({ store, wallet });
-await runRecovery({ store, wallet, now: () => new Date() });
+
+// Design §5.3: attempt every pending win once before deciding anything else.
+console.log('games-provider: boot drain', await outbox.drainOnce(new Date()));
+console.log('games-provider: boot recovery', await runRecovery({ store, wallet }));
+// §5.3.4: every recovery rollback is enqueued now; attempt them before the loop.
+console.log('games-provider: recovery drain', await outbox.drainOnce(new Date()));
 outbox.start(1000);
-const limits = { ...config.limits, maxBetsPerRound: 200 };
-const betManager = new BetManager({ store, wallet, limits, now: () => new Date(), newId: () => randomUUID() });
-const engine = new RoundEngine({ store, wallet, betManager, operatorCode: config.operator.code, limits, randomSeed: () => randomUUID(), clientSeeds: () => ['slot-1', 'slot-2', 'slot-3'], onEvent: () => {} });
+
+const stranded = {
+  dead: await store.countOutboxByStatus('DEAD'),
+  capped: await store.countOutboxByStatus('CAP_REJECTED'),
+};
+if (stranded.dead + stranded.capped > 0) {
+  console.error('games-provider: wallet rows need operator attention', stranded);
+}
+
+let socket: SocketHandle | undefined;
+const betManager = new BetManager({
+  store,
+  wallet,
+  limits: config.limits,
+  newId: () => randomUUID(),
+});
+const engine = new RoundEngine({
+  store,
+  wallet,
+  limits: config.limits,
+  betManager,
+  operatorCode: config.operator.code,
+  randomSeed: () => randomUUID(),
+  clientSeeds: () => config.clientSeeds,
+  onEvent: (event) => socket?.broadcast(event),
+});
 const server = createServer(createApp({ config, store, wallet }));
-attachSocket({ server, store, engine, wallet, config });
-server.listen(config.port, () => console.log(`games-provider listening on ${config.port}`));
+socket = attachSocket({ server, store, engine });
+
+await new Promise<void>((resolve) => server.listen(config.port, resolve));
+console.log(`games-provider: listening on ${config.port}`);
 await engine.start();
 
-const shutdown = async () => {
-  engine.stop();
+let shuttingDown = false;
+async function shutdown(signal: string): Promise<void> {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`games-provider: ${signal}, shutting down`);
+  engine.stop(); // no new rounds, no new ticks
   outbox.stop();
-  server.close();
+  await socket?.close(); // terminates live clients so server.close can finish
+  await new Promise<void>((resolve) => server.close(() => resolve()));
   await database.close();
   process.exit(0);
-};
-process.on('SIGTERM', shutdown);
-process.on('SIGINT', shutdown);
+}
+process.on('SIGTERM', () => void shutdown('SIGTERM'));
+process.on('SIGINT', () => void shutdown('SIGINT'));
 ```
 
-Wire `onEvent` to the socket broadcaster (Task 14 exposes `broadcast`).
-
-- [ ] **Step 2: Write deployment files**
+- [ ] **Step 4: Write deployment files**
 
 `Procfile.games`:
 
@@ -2335,14 +2990,46 @@ Wire `onEvent` to the socket broadcaster (Task 14 exposes `broadcast`).
 web: node --import tsx apps/games-provider/server.ts
 ```
 
-`Dockerfile.games` mirrors `Dockerfile.api`: `COPY package.json package-lock.json`, the three workspace manifests (`apps/api`, `apps/web`, `apps/games-provider`), `npm ci`, `COPY apps/games-provider apps/games-provider`, `RUN npm run build -w @bingo/games-provider && npm prune --omit=dev`, then a runtime image with `apps/games-provider` (including its built `dist/client`), `EXPOSE 3001`, and `CMD ["node", "--import", "tsx", "apps/games-provider/server.ts"]`. `vite` and `tsx` are production dependencies, so pruning keeps them.
+`Dockerfile.games` mirrors `Dockerfile.api`:
 
-`.env.example` (placeholders only):
+```dockerfile
+# syntax=docker/dockerfile:1
+# Crash game provider image for Dokku (apps/games-provider). Context is the repo root.
+FROM node:22-bookworm-slim AS build
+WORKDIR /app
+
+COPY package.json package-lock.json ./
+COPY apps/api/package.json apps/api/package.json
+COPY apps/web/package.json apps/web/package.json
+COPY apps/games-provider/package.json apps/games-provider/package.json
+RUN npm ci
+
+COPY apps/games-provider apps/games-provider
+# vite/react are devDependencies, so the client must be built before the prune.
+RUN npm run build -w @bingo/games-provider \
+  && npm prune --omit=dev \
+  && npx tsx --version
+
+FROM node:22-bookworm-slim AS runtime
+ENV NODE_ENV=production
+WORKDIR /app
+
+COPY --from=build /app/node_modules ./node_modules
+COPY --from=build /app/package.json ./package.json
+# dist/client is served by /play from this directory.
+COPY --from=build /app/apps ./apps
+
+EXPOSE 3001
+CMD ["node", "--import", "tsx", "apps/games-provider/server.ts"]
+```
+
+`.env.example` (placeholders only, never real values):
 
 ```
 PORT=3001
 DATABASE_URL=postgres://USER:PASSWORD@HOST:5432/DBNAME
 OPERATOR_CODE=bingo251
+OPERATOR_NAME=Bingo 251
 OPERATOR_CALLBACK_URL=https://api.example.com/api/games/callback/stratos
 OPERATOR_HMAC_SECRET=REPLACE_WITH_BINGO_PROVIDER_SECRET
 OPERATOR_CURRENCY=ETB
@@ -2350,10 +3037,14 @@ ALLOWED_PARENT_ORIGINS=https://app.example.com
 GAME_MIN_STAKE=100
 GAME_MAX_STAKE=100000
 GAME_MAX_WIN=3000000
+GAME_MAX_BETS_PER_ROUND=200
+CLIENT_SEEDS=stratos_slot_1_00000001,stratos_slot_2_00000002,stratos_slot_3_00000003
 BOT_COUNT=0
 ```
 
-- [ ] **Step 3: Document Dokku setup** in `docs/DEPLOY.md`
+`README.md` (short): what the app is (crash game provider for bingo251 and other operators), the boot order, run commands (`npm run games:dev`, `games:test`, `games:typecheck`, `games:build`, `games:smoke`), the env table matching `.env.example`, the endpoints (`POST /api/sessions/handshake`, `POST /api/sessions/close`, `GET /api/rounds/:id/proof`, `/ws`, `/play`), and the single-instance constraint.
+
+- [ ] **Step 5: Document Dokku setup** in `docs/DEPLOY.md` (append as a new numbered section)
 
 ```bash
 dokku apps:create bingo-crash
@@ -2366,21 +3057,44 @@ dokku ps:scale bingo-crash web=1
 git remote add dokku-crash dokku@YOUR_VPS:bingo-crash
 ```
 
-plus the `dokku config:set bingo-crash …` block (placeholder values, secret typed by the operator), domain + letsencrypt, and a note that scaling above 1 is unsupported.
+plus a `dokku config:set bingo-crash …` block with the `.env.example` keys (values typed by the operator, secret never committed), domain + letsencrypt, first boot expectations (migrations, operator upsert, recovery log lines), provider registration in the bingo admin (`stratos` / `crash`, `launchUrlTemplate=https://<crash-host>/play?token={token}&lang={lang}&currency={currency}`), the smoke command, and the `web=1` constraint.
 
-- [ ] **Step 4: Write the smoke script**
+- [ ] **Step 6: Write the smoke script**
 
-`scripts/smoke.ts` connects to `DATABASE_URL`, applies migrations, inserts a fake session and round, runs `runRecovery` twice (assert idempotent), and prints a summary. Registered as `games:smoke` in root scripts.
+`apps/games-provider/scripts/smoke.ts` — refuses to run unless `SMOKE_CONFIRM=yes` (it writes rows), applies migrations, upserts the operator, inserts a fake OPEN session, a `BETTING` round and an `ACTIVE` bet, then:
 
-- [ ] **Step 5: Verify build**
+```ts
+const first = await runRecovery({ store, wallet });
+// assert: round is ABANDONED, bet is CANCELLED, a PENDING ROLLBACK row exists
+const rollback = (await store.claimDueOutbox(new Date(), 50)).find((row) => row.txnId === bet.betTxnId);
+if (rollback) await store.markOutbox(rollback.id, 'SENT', 'SMOKE_TEST'); // never call bingo for a fake session
+const second = await runRecovery({ store, wallet });
+// assert: second.abandonedRoundIds.length === 0 && second.refundedBets === 0 && second.repairedSettlements === 0
+```
 
-Run: `npm run games:build`
-Expected: `apps/games-provider/dist/client/index.html` exists. The boot path itself is exercised in the acceptance run (Task 17) because it needs a database.
+On any failed assertion print the failing check and `process.exit(1)`; on success print both summaries, the ids it wrote, and exit 0. Always `await database.close()`.
 
-- [ ] **Step 6: Commit**
+Register in root `package.json`:
+
+```json
+"games:smoke": "node --import tsx apps/games-provider/scripts/smoke.ts"
+```
+
+- [ ] **Step 7: Verify**
+
+Run `npm run games:typecheck` → clean.
+Run `npm run games:test` → all green (count grows by the new config/store tests).
+Do NOT expect `npm run games:build` to pass: it fails on the missing `/src/main.tsx` until Task 16 ships the client (carried).
+
+- [ ] **Step 8: Commit**
 
 ```bash
-git add Dockerfile.games Procfile.games apps/games-provider package.json docs/DEPLOY.md
+git add Dockerfile.games Procfile.games apps/games-provider package.json docs/DEPLOY.md \
+  apps/games-provider/server.ts apps/games-provider/src/config.ts apps/games-provider/src/server/store.ts \
+  apps/games-provider/src/test/memoryStore.ts apps/games-provider/src/db/storePostgres.ts \
+  apps/games-provider/src/server/outbox.ts apps/games-provider/tests/config.test.ts \
+  apps/games-provider/tests/memoryStore.test.ts apps/games-provider/.env.example \
+  apps/games-provider/README.md apps/games-provider/scripts/smoke.ts
 git commit -m "feat(games-provider): add boot sequence and Dokku deployment artifacts"
 ```
 
@@ -2388,31 +3102,582 @@ git commit -m "feat(games-provider): add boot sequence and Dokku deployment arti
 
 ## Phase E — Client and acceptance
 
-### Task 16: Strip the client to the game surface and wire the bridge
+### Task 16: Build the game client, the bridge, and the settlement notifications
 
 **Files:**
-- Copy from prototype: `src/client/components/aviator/**`, `src/client/hooks/useAviatorSocket.ts`, `src/client/utils/soundEngine.ts`, `src/client/index.css`
-- Create: `apps/games-provider/src/main.tsx`, `apps/games-provider/src/client/App.tsx`, `apps/games-provider/src/client/bridge.ts`, `apps/games-provider/src/client/i18n.ts`
-- Delete from the copy: `components/operator`, `components/superadmin`, `components/portal`, `ProvablyFairModal` retained (proof verify still useful), all Firebase/JWT references
+- Modify: `apps/games-provider/src/server/betManager.ts`, `apps/games-provider/src/server/outbox.ts`, `apps/games-provider/src/server/socket.ts`, `apps/games-provider/server.ts`, `apps/games-provider/src/test/server.ts`, `apps/games-provider/vite.config.ts`, `apps/games-provider/index.html`
+- Test: `apps/games-provider/tests/betManager.test.ts`, `apps/games-provider/tests/outbox.test.ts`, `apps/games-provider/tests/socket.test.ts`
+- Copy from `C:\Users\mekon\Documents\Projects\game-provider` (rewrite every import; no path into the prototype may remain):
+  - `src/client/components/aviator/flightCanvasRenderer.ts` → `apps/games-provider/src/client/components/flightCanvasRenderer.ts` (change the `GamePhase` import to `../types`)
+  - `src/client/components/aviator/FlightCanvas.tsx` → `apps/games-provider/src/client/components/FlightCanvas.tsx` (simplified per Step 5)
+  - `src/client/utils/soundEngine.ts` → `apps/games-provider/src/client/sound.ts` (delete `playRainDrop`)
+  - `src/index.css` → `apps/games-provider/src/index.css` (add the `--g-*` defaults from Step 5)
+- Create: `apps/games-provider/src/main.tsx`, `apps/games-provider/src/client/{App.tsx,bridge.ts,i18n.ts,fair.ts,types.ts}`, `apps/games-provider/src/client/hooks/useCrashSocket.ts`, `apps/games-provider/src/client/components/{BetPanel.tsx,ProvablyFairModal.tsx}`
+- Delete from the copy: free bets, chat, rain, bots, avatars, online count, auto-bet, operator/superadmin/portal views, Firebase, JWT, recharts.
 
 **Interfaces:**
-- Consumes: handshake API, WS messages from Task 14, `bingo:theme` / `bingo:locale` / `bingo:haptic` / `bingo:exit` from Task 3.
-- Produces: the `/play` SPA entry.
+- Consumes: `POST /api/sessions/handshake` and `GET /api/rounds/:id/proof` (Task 13); inbound WS frames `auth {token}`, `bet:place {panel, stake, autoCashout?}`, `bet:cancel {panel}`, `bet:cashout {panel}`; outbound `snapshot`, `round:betting`, `round:flying`, `round:tick`, `round:crashed`, `bet:update`, `balance:update`, `session:ended`, `error` (Task 14); `bingo:theme` / `bingo:locale` / `bingo:haptic` / `bingo:exit` from `apps/web/src/app/games/play/[sessionId]/page.tsx`.
+- Produces: `dist/client` served at `/play`; the settlement notification seam (`BetManager.onSettled`, `OutboxWorker.onDelivered`, `SocketHandle.notifyBet`/`notifyBalance`, snapshot `bets`); a green `npm run games:build` (Task 15 deliberately left it red until this task created `src/main.tsx`).
 
-- [ ] **Step 1: Write `bridge.ts`** — accepts parent messages only when `event.origin` equals the origin of `document.referrer` (the bingo play page that framed us), applying colors to CSS variables:
+**Rulings applied:**
+- Auto-cashout settlement must be pushed, not polled: `BetManager.onSettled` fires after the CASHED write and after every LOST sweep, `OutboxWorker.onDelivered` fires after a delivered movement mirrors the balance, and the socket exposes `notifyBet` / `notifyBalance`. This also closes the Task 14 parked finding "cancel reports un-refunded balance": the rollback delivery now pushes the real balance.
+- A reconnect must show the player's own bets: the auth snapshot gains `bets: [BetFrame | null, BetFrame | null]`, read with `store.getBet` for the snapshot's round.
+- `serverSeedHash` stays `null` in a live snapshot (the engine never leaks pre-crash seeds); the client shows the hash from `round:betting` / `round:flying` and re-populates it on the next round.
+- Vite `base` must be `/play/`: assets are served by `app.use('/play', express.static(clientDir))`, so the default `/assets/...` URLs would 404.
+
+**Step 1: Push settlement and balance changes from the server**
+
+`betManager.ts` — add the callback to `BetManagerDeps` and fire it after both terminal writes:
 
 ```ts
-export interface ThemeMessage {
-  type: 'bingo:theme';
-  payload: { scheme: 'dark' | 'light'; bg: string; panel: string; text: string; hint: string; button: string; buttonText: string; gold: string; danger: string; safeBottom: number; viewportHeight: number };
+export interface BetManagerDeps {
+  store: Store;
+  wallet: WalletClient;
+  limits: EngineLimits;
+  /** Timestamp source for persisted rows. Defaults to the real clock. */
+  now?: () => Date;
+  /** Transaction id source. Defaults to `randomUUID`. */
+  newId?: () => string;
+  /** Called after a bet is persisted as CASHED or LOST, so the gateway can push it. */
+  onSettled?: (bet: BetRecord) => void;
+}
+```
+
+Constructor: `this.onSettled = deps.onSettled ?? null;` with `private readonly onSettled: ((bet: BetRecord) => void) | null;`.
+
+In `settleWin`, inside the lock after `enqueueOutbox`:
+
+```ts
+      const settledAt = this.now();
+      await this.store.updateBet(current.id, {
+        status: 'CASHED',
+        cashoutMultiplier: multiplier,
+        payout,
+        winTxnId,
+        settledAt,
+      });
+      await this.store.enqueueOutbox({
+        operatorCode: session.operatorCode,
+        type: 'WIN',
+        txnId: winTxnId,
+        sessionToken: session.token,
+        amount: payout,
+      });
+      this.onSettled?.({ ...current, status: 'CASHED', cashoutMultiplier: multiplier, payout, winTxnId, settledAt });
+```
+
+In `settleRound`, after the LOST write:
+
+```ts
+      await this.store.updateBet(bet.id, { status: 'LOST', settledAt });
+      this.onSettled?.({ ...bet, status: 'LOST', settledAt });
+```
+
+`outbox.ts` — add the callback and fire it where the balance mirror is written:
+
+```ts
+export interface OutboxWorkerDeps {
+  store: Store;
+  wallet: WalletClient;
+  /** Called after a delivered movement moved the local balance mirror. */
+  onDelivered?: (input: { sessionToken: string; balance: bigint }) => void;
+}
+```
+
+```ts
+  private readonly onDelivered: ((input: { sessionToken: string; balance: bigint }) => void) | null;
+```
+
+Constructor: `this.onDelivered = deps.onDelivered ?? null;`. In `deliver`:
+
+```ts
+    if (reply.balance !== null) {
+      await this.store.setSessionBalance(row.sessionToken, reply.balance);
+      this.onDelivered?.({ sessionToken: row.sessionToken, balance: reply.balance });
+    }
+    await this.store.markOutbox(row.id, 'SENT');
+    summary.sent += 1;
+```
+
+`socket.ts` — import `type { BetRecord }`, extend the handle, and share one payload builder:
+
+```ts
+export interface SocketHandle {
+  broadcast(event: RoundEngineEvent): void;
+  notifyBet(bet: BetRecord): void;
+  notifyBalance(sessionToken: string, balance: bigint): void;
+  close(): Promise<void>;
 }
 
-export function installBridge(handlers: { onLocale: (lang: 'en' | 'am') => void }) {
+const betPayload = (bet: BetRecord) => ({
+  roundId: bet.roundId,
+  panel: bet.panel,
+  status: bet.status,
+  stake: bet.stake.toString(),
+  autoCashout: bet.autoCashout,
+  cashoutMultiplier: bet.cashoutMultiplier,
+  payout: bet.payout === null ? null : bet.payout.toString(),
+});
+```
+
+Use `sendToSession(token, { type: 'bet:update', ...betPayload(bet) })` in `act()` (replacing the inline object), and send the snapshot with the session's own bets in the auth branch:
+
+```ts
+      state.sessionToken = session.token;
+      const snapshot = engine.snapshot();
+      const ownBets = snapshot.roundId === null
+        ? [null, null]
+        : await Promise.all(PANELS.map((panel) => store.getBet(snapshot.roundId as number, session.token, panel)));
+      send(ws, {
+        type: 'snapshot',
+        ...snapshot,
+        balance: session.displayBalance.toString(),
+        bets: ownBets.map((bet) => (bet === null ? null : betPayload(bet))),
+      });
+      return;
+```
+
+Add to the returned handle:
+
+```ts
+    notifyBet(bet) {
+      sendToSession(bet.sessionToken, { type: 'bet:update', ...betPayload(bet) });
+    },
+    notifyBalance(sessionToken, balance) {
+      sendToSession(sessionToken, { type: 'balance:update', balance: balance.toString() });
+    },
+```
+
+`server.ts` — move `let socket: SocketHandle | undefined;` above the outbox construction, then wire:
+
+```ts
+const outbox = new OutboxWorker({
+  store,
+  wallet,
+  onDelivered: ({ sessionToken, balance }) => socket?.notifyBalance(sessionToken, balance),
+});
+```
+
+```ts
+const betManager = new BetManager({
+  store,
+  wallet,
+  limits: config.limits,
+  newId: () => randomUUID(),
+  onSettled: (bet) => socket?.notifyBet(bet),
+});
+```
+
+`src/test/server.ts` — extend `TestServer` with `store: Store` and `socket: SocketHandle`, wire `onSettled: (bet) => socket?.notifyBet(bet)` into `BetManager`, and return `store` plus the `attached` handle (the engine's `onEvent` already broadcasts through the same handle).
+
+**Step 2: Test the seam**
+
+- `betManager.test.ts`: one test drives `processAutoCashouts` (round `crashPoint: 2`, multiplier `1.5`, bet `autoCashout: 1.2`) and asserts `onSettled` was called once with `status: 'CASHED'`, the target multiplier, and the same `payout` persisted on the bet; another calls `settleRound` with two ACTIVE bets and asserts two `LOST` notifications.
+- `outbox.test.ts`: deliver one WIN whose reply carries `balance`, and assert `onDelivered` received `{ sessionToken, balance }` and the store session balance moved.
+- `socket.test.ts`: connect two clients with different session tokens; call `server.socket.notifyBet(betForSessionA)` and `server.socket.notifyBalance(tokenB, 123n)`; assert A receives only `bet:update` and B only `balance:update`. Add a reconnect test: place a bet, open a second socket for the same session, and assert its `snapshot.bets` contains the ACTIVE bet for its panel.
+
+**Step 3: Client frame types — `src/client/types.ts`**
+
+```ts
+export type GamePhase = 'BETTING' | 'FLYING' | 'CRASHED';
+export type Lang = 'en' | 'am';
+
+export type BetStatus =
+  | 'PLACING' | 'ACTIVE' | 'CASHED' | 'LOST' | 'CANCELLED' | 'REJECTED' | 'UNRESOLVED';
+
+export interface BetFrame {
+  roundId: number;
+  panel: 0 | 1;
+  status: BetStatus;
+  stake: string;
+  autoCashout: number | null;
+  cashoutMultiplier: number | null;
+  payout: string | null;
+}
+
+export interface RoundHistoryItem { roundId: number; crashPoint: number }
+export interface BetLimits { minStake: bigint; maxStake: bigint; maxWin: bigint }
+
+export interface HandshakeData {
+  sessionId: string;
+  gameId: string;
+  currency: string;
+  balance: string;
+  limits: { minStake: string; maxStake: string; maxWin: string };
+  expiresAt: string;
+}
+
+export interface SnapshotFrame {
+  type: 'snapshot';
+  roundId: number | null;
+  phase: GamePhase;
+  multiplier: number;
+  elapsedMs: number;
+  bettingEndsInMs: number;
+  serverSeedHash: string | null;
+  balance: string;
+  bets: [BetFrame | null, BetFrame | null];
+}
+export interface BettingFrame {
+  type: 'round:betting';
+  roundId: number;
+  serverSeedHash: string;
+  clientSeeds: string[];
+  bettingEndsInMs: number;
+}
+export interface FlyingFrame {
+  type: 'round:flying';
+  roundId: number;
+  serverSeedHash: string;
+  multiplier: number;
+  elapsedMs: number;
+}
+export interface TickFrame { type: 'round:tick'; roundId: number; multiplier: number; elapsedMs: number }
+export interface CrashedFrame {
+  type: 'round:crashed';
+  roundId: number;
+  crashPoint: number;
+  serverSeed: string;
+  serverSeedHash: string;
+  clientSeedComposite: string | null;
+  crashedAt: string;
+}
+export interface BetUpdateFrame extends BetFrame { type: 'bet:update' }
+export interface BalanceFrame { type: 'balance:update'; balance: string }
+export interface SessionEndedFrame { type: 'session:ended'; reason: string }
+export interface ErrorFrame { type: 'error'; code: string; message: string }
+
+export type ServerFrame =
+  | SnapshotFrame | BettingFrame | FlyingFrame | TickFrame | CrashedFrame
+  | BetUpdateFrame | BalanceFrame | SessionEndedFrame | ErrorFrame;
+```
+
+**Step 4: Browser fair math — `src/client/fair.ts`**
+
+`src/domain/provablyFair.ts` imports `node:crypto` and must not be bundled. The browser copy verifies the same math with Web Crypto; `clientSeedComposite` is already the colon-joined seed string.
+
+```ts
+export const DEFAULT_SEEDS = [
+  'stratos_slot_1_00000001',
+  'stratos_slot_2_00000002',
+  'stratos_slot_3_00000003',
+] as const;
+
+const TWO_POW_52 = 4503599627370496;
+
+export function multiplierAtElapsedMs(elapsedMs: number): number {
+  if (elapsedMs <= 0) return 1.0;
+  return Math.max(1.0, Math.floor(Math.exp(0.00006 * elapsedMs) * 100) / 100);
+}
+
+export interface ProofPayload {
+  roundId: number;
+  serverSeed: string;
+  serverSeedHash: string;
+  clientSeedComposite: string | null;
+  crashPoint: number;
+}
+
+export interface VerifyResult {
+  serverSeedHashComputed: string;
+  serverSeedHashMatches: boolean;
+  combinedInput: string;
+  sha512Hash: string;
+  hexSlice52Bit: string;
+  decimalValue: number;
+  computedCrashPoint: number;
+  crashPointMatches: boolean;
+}
+
+async function digestHex(algorithm: 'SHA-256' | 'SHA-512', input: string): Promise<string> {
+  const data = new TextEncoder().encode(input);
+  const digest = new Uint8Array(await crypto.subtle.digest(algorithm, data));
+  return Array.from(digest, (byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+function crashPointFromDecimal(decimalValue: number): number {
+  if (!Number.isFinite(decimalValue)) return 1.0;
+  if (decimalValue % 33 === 0) return 1.0;
+  const raw = Math.floor((100 * TWO_POW_52 - decimalValue) / (TWO_POW_52 - decimalValue)) / 100;
+  return Math.max(1.0, Math.min(raw, 100_000.0));
+}
+
+export async function verifyProof(proof: ProofPayload): Promise<VerifyResult> {
+  const serverSeedHashComputed = await digestHex('SHA-256', proof.serverSeed);
+  const combinedInput = `${proof.serverSeed}:${proof.clientSeedComposite ?? DEFAULT_SEEDS.join(':')}`;
+  const sha512Hash = await digestHex('SHA-512', combinedInput);
+  const hexSlice52Bit = sha512Hash.slice(0, 13);
+  const decimalValue = Number.parseInt(hexSlice52Bit, 16);
+  const computedCrashPoint = crashPointFromDecimal(decimalValue);
+  return {
+    serverSeedHashComputed,
+    serverSeedHashMatches: serverSeedHashComputed.toLowerCase() === proof.serverSeedHash.toLowerCase(),
+    combinedInput,
+    sha512Hash,
+    hexSlice52Bit,
+    decimalValue,
+    computedCrashPoint,
+    crashPointMatches: Math.abs(computedCrashPoint - proof.crashPoint) < 0.001,
+  };
+}
+```
+
+**Step 5: Copy the visual pieces**
+
+`flightCanvasRenderer.ts`: copy verbatim, replace `import type { GamePhase } from '../../../shared/types.ts';` with `import type { GamePhase } from '../types';`.
+
+`src/index.css`: copy the prototype file and add after `@theme`:
+
+```css
+:root {
+  --g-bg: #0b0e14;
+  --g-panel: #111622;
+  --g-text: #f1f5f9;
+  --g-hint: #94a3b8;
+  --g-accent: #10b981;
+  --g-on-accent: #ffffff;
+  --g-gold: #f59e0b;
+  --g-danger: #f43f5e;
+  --g-safe-bottom: 0px;
+}
+```
+
+`sound.ts`: copy, rename the export to `soundEngine`, delete `playRainDrop` and `isMuted`.
+
+`FlightCanvas.tsx`: copy and then apply exactly these changes:
+- Props:
+
+```ts
+interface FlightCanvasProps {
+  roundId: number | null;
+  phase: GamePhase;
+  multiplier: number;
+  elapsedMs: number;
+  bettingEndsAt: number | null;
+  bettingWindowMs: number;
+  serverSeedHash: string | null;
+  connected: boolean;
+  history: readonly RoundHistoryItem[];
+  muted: boolean;
+  lang: Lang;
+  isFullscreen: boolean;
+  onToggleMute: () => void;
+  onToggleFullscreen: () => void;
+  onSelectHistoryRound: (roundId: number) => void;
+  onOpenFairness: () => void;
+}
+```
+
+- Imports become `../types`, `../fair` (`multiplierAtElapsedMs`), `./flightCanvasRenderer`, `../i18n` (`t`), and lucide icons. Delete `PlayerAvatar`, `FloatingCashoutEvent`, the `floatingCashouts`/`activeCashouts` overlay, `onlineCount`, and the `WifiOff` online label; keep `Wifi`/`WifiOff` as a connection dot next to the round label.
+- Countdown uses `bettingEndsAt` (`remaining = Math.max(0, bettingEndsAt - Date.now())`, progress `remaining / bettingWindowMs`) and disappears when `bettingEndsAt === null`; the BETTING overlay label is `t(lang, 'nextRoundIn')`, the CRASHED label is `t(lang, 'crashedAt')`.
+- Buttons get `t(lang, 'mute' | 'unmute' | 'fullScreen' | 'exitFullScreen' | 'provablyFair')` as labels/titles.
+- Replace structural palette classes with theme variables: container `bg-[var(--g-panel)] border-white/10`, round label `text-[var(--g-text)]`, hints `text-[var(--g-hint)]`, history header panel `bg-[var(--g-panel)]`, seed footer `text-[var(--g-hint)]`. Keep the multiplier history chip colors and the canvas scene as-is.
+- Fullscreen heights: `isFullscreen ? 'h-[calc(100dvh-190px)] min-h-[300px]' : 'h-[300px] sm:h-[380px]'`.
+
+**Step 6: Hook — `src/client/hooks/useCrashSocket.ts`**
+
+```ts
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { haptic } from '../bridge';
+import { soundEngine } from '../sound';
+import type {
+  BetFrame, GamePhase, RoundHistoryItem, ServerFrame,
+} from '../types';
+
+const BETTING_WINDOW_MS = 5_500;
+
+export function useCrashSocket(input: { token: string; onSessionEnded: () => void }) {
+  const { token, onSessionEnded } = input;
+  const [connected, setConnected] = useState(false);
+  const [phase, setPhase] = useState<GamePhase>('BETTING');
+  const [roundId, setRoundId] = useState<number | null>(null);
+  const [multiplier, setMultiplier] = useState(1);
+  const [elapsedMs, setElapsedMs] = useState(0);
+  const [bettingEndsAt, setBettingEndsAt] = useState<number | null>(null);
+  const [bettingWindowMs, setBettingWindowMs] = useState(BETTING_WINDOW_MS);
+  const [serverSeedHash, setServerSeedHash] = useState<string | null>(null);
+  const [history, setHistory] = useState<RoundHistoryItem[]>([]);
+  const [bets, setBets] = useState<[BetFrame | null, BetFrame | null]>([null, null]);
+  const [balance, setBalance] = useState('0');
+  const [lastError, setLastError] = useState<{ code: string; message: string } | null>(null);
+  const [ended, setEnded] = useState<string | null>(null);
+
+  const wsRef = useRef<WebSocket | null>(null);
+  const endedRef = useRef(false);
+  const errorTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    let unmounted = false;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let ws: WebSocket | null = null;
+
+    const showError = (code: string, message: string) => {
+      setLastError({ code, message });
+      haptic('error');
+      if (errorTimer.current) clearTimeout(errorTimer.current);
+      errorTimer.current = setTimeout(() => setLastError(null), 4000);
+    };
+
+    const handleFrame = (raw: string) => {
+      let frame: ServerFrame;
+      try {
+        frame = JSON.parse(raw) as ServerFrame;
+      } catch {
+        return;
+      }
+      switch (frame.type) {
+        case 'snapshot':
+          setPhase(frame.phase);
+          setRoundId(frame.roundId);
+          setMultiplier(frame.multiplier);
+          setElapsedMs(frame.elapsedMs);
+          setBettingWindowMs(BETTING_WINDOW_MS);
+          setBettingEndsAt(frame.phase === 'BETTING' ? Date.now() + frame.bettingEndsInMs : null);
+          setServerSeedHash(frame.serverSeedHash);
+          setBalance(frame.balance);
+          setBets(frame.bets);
+          break;
+        case 'round:betting':
+          setPhase('BETTING');
+          setRoundId(frame.roundId);
+          setMultiplier(1);
+          setElapsedMs(0);
+          setBettingWindowMs(frame.bettingEndsInMs);
+          setBettingEndsAt(Date.now() + frame.bettingEndsInMs);
+          setServerSeedHash(frame.serverSeedHash);
+          setBets([null, null]);
+          break;
+        case 'round:flying':
+          setPhase('FLYING');
+          setMultiplier(1);
+          setElapsedMs(0);
+          setBettingEndsAt(null);
+          setServerSeedHash(frame.serverSeedHash);
+          soundEngine.playTakeoff();
+          break;
+        case 'round:tick':
+          setMultiplier(frame.multiplier);
+          setElapsedMs(frame.elapsedMs);
+          break;
+        case 'round:crashed':
+          setPhase('CRASHED');
+          setMultiplier(frame.crashPoint);
+          setHistory((prev) => [
+            { roundId: frame.roundId, crashPoint: frame.crashPoint },
+            ...prev.filter((item) => item.roundId !== frame.roundId),
+          ].slice(0, 24));
+          soundEngine.playCrash();
+          break;
+        case 'bet:update': {
+          const bet: BetFrame = frame;
+          setBets((prev) => {
+            const next: [BetFrame | null, BetFrame | null] = [prev[0], prev[1]];
+            next[bet.panel] = bet;
+            return next;
+          });
+          if (bet.status === 'ACTIVE') soundEngine.playBetPlaced();
+          if (bet.status === 'CASHED') {
+            soundEngine.playCashout();
+            haptic('success');
+          }
+          break;
+        }
+        case 'balance:update':
+          setBalance(frame.balance);
+          break;
+        case 'session:ended':
+          endedRef.current = true;
+          setEnded(frame.reason);
+          ws?.close();
+          onSessionEnded();
+          break;
+        case 'error':
+          showError(frame.code, frame.message);
+          break;
+      }
+    };
+
+    const connect = () => {
+      if (unmounted || endedRef.current) return;
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
+      wsRef.current = ws;
+      ws.onopen = () => {
+        if (unmounted) return;
+        setConnected(true);
+        ws?.send(JSON.stringify({ type: 'auth', token }));
+      };
+      ws.onmessage = (event) => {
+        if (!unmounted) handleFrame(event.data as string);
+      };
+      ws.onclose = () => {
+        if (unmounted) return;
+        setConnected(false);
+        if (!endedRef.current) reconnectTimer = setTimeout(connect, 1200);
+      };
+      ws.onerror = () => ws?.close();
+    };
+
+    connect();
+    return () => {
+      unmounted = true;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (errorTimer.current) clearTimeout(errorTimer.current);
+      ws?.close();
+      wsRef.current = null;
+    };
+  }, [token, onSessionEnded]);
+
+  const send = useCallback((frame: Record<string, unknown>) => {
+    const ws = wsRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(frame));
+  }, []);
+
+  const placeBet = useCallback((panel: 0 | 1, stakeMinor: bigint, autoCashout: number | null) => {
+    haptic('tap');
+    send({ type: 'bet:place', panel, stake: stakeMinor.toString(), ...(autoCashout === null ? {} : { autoCashout }) });
+  }, [send]);
+
+  const cancelBet = useCallback((panel: 0 | 1) => {
+    haptic('tap');
+    send({ type: 'bet:cancel', panel });
+  }, [send]);
+
+  const cashout = useCallback((panel: 0 | 1) => send({ type: 'bet:cashout', panel }), [send]);
+
+  return {
+    connected, phase, roundId, multiplier, elapsedMs, bettingEndsAt, bettingWindowMs,
+    serverSeedHash, history, bets, balance, lastError, ended,
+    placeBet, cancelBet, cashout,
+  };
+}
+```
+
+`onSessionEnded` must be stable in `App` (wrap in `useCallback`) or the socket reconnects on every render.
+
+**Step 7: Bridge — `src/client/bridge.ts`**
+
+```ts
+import type { Lang } from './types';
+
+interface ThemeMessage {
+  type: 'bingo:theme';
+  payload: {
+    scheme: 'dark' | 'light';
+    bg: string; panel: string; text: string; hint: string; button: string; buttonText: string;
+    gold: string; danger: string; safeBottom: number; viewportHeight: number;
+  };
+}
+
+export function installBridge(handlers: { onLocale: (lang: Lang) => void }) {
+  // The parent play page posts its theme and locale to this iframe. Only a
+  // message from the framing document's own origin is applied.
+  const parentOrigin = document.referrer ? new URL(document.referrer).origin : null;
   window.addEventListener('message', (event) => {
-    const parent = document.referrer ? new URL(document.referrer).origin : null;
-    if (!parent || event.origin !== parent) return;
-    if (event.data?.type === 'bingo:theme') {
-      const payload = (event.data as ThemeMessage).payload;
+    if (!parentOrigin || event.origin !== parentOrigin) return;
+    const data = event.data as { type?: string; payload?: unknown } | null;
+    if (data?.type === 'bingo:theme') {
+      const payload = (data as ThemeMessage).payload;
       const root = document.documentElement;
       root.dataset.scheme = payload.scheme;
       root.style.setProperty('--g-bg', payload.bg);
@@ -2423,11 +3688,14 @@ export function installBridge(handlers: { onLocale: (lang: 'en' | 'am') => void 
       root.style.setProperty('--g-on-accent', payload.buttonText);
       root.style.setProperty('--g-gold', payload.gold);
       root.style.setProperty('--g-danger', payload.danger);
+      root.style.setProperty('--g-safe-bottom', `${payload.safeBottom}px`);
     }
-    if (event.data?.type === 'bingo:locale') handlers.onLocale(event.data.payload);
+    if (data?.type === 'bingo:locale') handlers.onLocale(data.payload === 'am' ? 'am' : 'en');
   });
 }
 
+// The parent validates the provider origin on its side; this frame has no
+// secret to protect by choosing a narrower target.
 export function haptic(kind: 'tap' | 'success' | 'error') {
   window.parent.postMessage({ type: 'bingo:haptic', payload: kind }, '*');
 }
@@ -2437,35 +3705,729 @@ export function exitGame() {
 }
 ```
 
-Posting to `'*'` is acceptable only because the parent validates the provider origin; document this in a code comment for the reviewer.
-
-- [ ] **Step 2: Strip `App.tsx`** to a single `AviatorWorkspace` render, delete the TopBar/nav/views, remove the top-up button and profile/rename calls; replace palette classes with the CSS variables (`bg-[var(--g-bg)]`, `text-[var(--g-text)]`, etc.) and keep the canvas visuals.
-
-- [ ] **Step 3: Wire boot** — read `token` and `lang` from the query string, `POST /api/sessions/handshake`, show a terminal "session ended" screen on 410, then `useAviatorSocket(token)` (adapted to the new message names), and send `bingo:exit` on session end.
-
-- [ ] **Step 4: Add EN/AM strings** in `i18n.ts`:
+**Step 8: Strings — `src/client/i18n.ts`**
 
 ```ts
-export const strings = {
-  en: { place: 'Place bet', cashout: 'Cash out', next: 'Next round in', balance: 'Balance', crashed: 'Crashed at', ended: 'Session ended', back: 'Back to games', tap: 'Tap to bet' },
-  am: { place: 'ውርርድ አስቀምጥ', cashout: 'አሁን ውጣ', next: 'ቀጣዩ ዙር በ', balance: 'ቀሪ ሂሳብ', crashed: 'የተቋረጠበት', ended: 'ክፍለ ጊዜው አብቅቷል', back: 'ወደ ጨዋታዎች', tap: 'ለመወራረድ ይንኩ' },
-} as const;
+import type { Lang } from './types';
+
+const en = {
+  balance: 'Balance',
+  bet: 'Bet',
+  cancel: 'Cancel',
+  cashOut: 'Cash out',
+  autoCashout: 'Auto cash out',
+  stake: 'Stake',
+  waitingForNextRound: 'Waiting for next round',
+  nextRoundIn: 'Next round in',
+  crashedAt: 'Flew away at',
+  won: 'Won',
+  lost: 'Lost',
+  sessionEnded: 'Session ended',
+  sessionEndedBody: 'Your game session is closed. Return to the lobby to play again.',
+  backToGames: 'Back to games',
+  provablyFair: 'Provably fair',
+  round: 'Round',
+  loading: 'Loading game…',
+  loadFailed: 'Could not load the game. Return to the lobby and try again.',
+  reconnecting: 'Connection lost. Reconnecting…',
+  mute: 'Mute sound',
+  unmute: 'Unmute sound',
+  fullScreen: 'Full screen',
+  exitFullScreen: 'Exit full screen (Esc)',
+  verifying: 'Verifying round…',
+  verified: 'Verified authentic in your browser',
+  verificationMismatch: 'Verification mismatch',
+  proofUnavailable: 'No proof is stored for this round',
+  inspect: 'Inspect',
+  inspectHint: 'Tap any recent round to verify its SHA-512 math.',
+  liveCommit: 'Live round pre-commit',
+  serverSeedHidden: 'Server seed hidden until the round crashes',
+  revealedServerSeed: 'Revealed server seed',
+  committedHash: 'Pre-committed SHA-256 hash',
+  combinedInput: 'Combined input (server seed + client seeds)',
+  crashResult: 'Crash result',
+  tap: 'Tap to bet',
+};
+
+const am: Record<keyof typeof en, string> = {
+  balance: 'ቀሪ ሂሳብ',
+  bet: 'ውርርድ አስቀምጥ',
+  cancel: 'ሰርዝ',
+  cashOut: 'አሁን ውጣ',
+  autoCashout: 'ራስ-ሰር ውጣ',
+  stake: 'ውርርድ',
+  waitingForNextRound: 'ቀጣዩን ዙር በመጠበቅ',
+  nextRoundIn: 'ቀጣዩ ዙር በ',
+  crashedAt: 'የተቋረጠበት',
+  won: 'አሸንፈዋል',
+  lost: 'ተሸንፈዋል',
+  sessionEnded: 'ክፍለ ጊዜው አብቅቷል',
+  sessionEndedBody: 'የጨዋታ ክፍለ ጊዜዎ ተዘግቷል። ለመጫወት ወደ መግቢያው ይመለሱ።',
+  backToGames: 'ወደ ጨዋታዎች',
+  provablyFair: 'ሊረጋገጥ የሚችል ፍትሃዊነት',
+  round: 'ዙር',
+  loading: 'ጨዋታ በመጫን ላይ…',
+  loadFailed: 'ጨዋታውን መጫን አልተቻለም። ወደ መግቢያው ተመልሰው እንደገና ይሞክሩ።',
+  reconnecting: 'ግንኙነት ተቋርጧል። በድጋሚ በመገናኘት ላይ…',
+  mute: 'ድምጽ አጥፋ',
+  unmute: 'ድምጽ አብራ',
+  fullScreen: 'ሙሉ ማያ',
+  exitFullScreen: 'ሙሉ ማያ ውጣ (Esc)',
+  verifying: 'ዙሩን በማረጋገጥ ላይ…',
+  verified: 'በአሳሽዎ ውስጥ ተረጋግጧል',
+  verificationMismatch: 'ማረጋገጫ አልተመሳሰለም',
+  proofUnavailable: 'ለዚህ ዙር ማስረጃ አልተቀመጠም',
+  inspect: 'መርምር',
+  inspectHint: 'የማንኛውንም የቅርብ ዙር ላይ በመንካት የSHA-512 ስሌቱን ያረጋግጡ።',
+  liveCommit: 'የቀጣዩ ዙር ቅድመ-ቁርጠኝነት',
+  serverSeedHidden: 'የሰርቨር ዘር እስከ መቋረጡ ድረስ ተደብቋል',
+  revealedServerSeed: 'የተገለጠ የሰርቨር ዘር',
+  committedHash: 'ቅድሚያ የተረጋገጠ SHA-256 ሃሽ',
+  combinedInput: 'የተዋሃደ ግብዓት (የሰርቨር ዘር + የደንበኛ ዘሮች)',
+  crashResult: 'የመቋረጥ ውጤት',
+  tap: 'ለመወራረድ ይንኩ',
+};
+
+export const strings: Record<Lang, Record<string, string>> = { en, am };
+export function t(lang: Lang, key: keyof typeof en): string {
+  return strings[lang][key];
+}
 ```
 
-Trigger `haptic('tap')` on bet, `haptic('success')` on cashout, `haptic('error')` on rejection.
+**Step 9: `src/client/components/BetPanel.tsx`**
 
-- [ ] **Step 5: Verify build and browser**
+```tsx
+import React, { useState } from 'react';
+import { Minus, Plus } from 'lucide-react';
+import { t } from '../i18n';
+import type { BetFrame, BetLimits, GamePhase, Lang } from '../types';
 
-Run: `npm run games:build`
-Expected: clean build, no Firebase/JWT/recharts imports remain (`grep -r "firebase\|jsonwebtoken\|recharts" apps/games-provider/src || echo clean`).
+interface BetPanelProps {
+  panel: 0 | 1;
+  phase: GamePhase;
+  multiplier: number;
+  currency: string;
+  balanceMinor: bigint;
+  limits: BetLimits;
+  bet: BetFrame | null;
+  lang: Lang;
+  onPlace: (panel: 0 | 1, stakeMinor: bigint, autoCashout: number | null) => void;
+  onCancel: (panel: 0 | 1) => void;
+  onCashout: (panel: 0 | 1) => void;
+}
 
-Run `npm run games:dev` and open `http://localhost:3000/play?token=<uuid>` against a running fake bingo or the deployed bingo; verify the game renders, a bet places, and the theme falls back gracefully without a parent.
+const PRESETS_MAJOR = [1, 5, 25, 100];
 
-- [ ] **Step 6: Commit**
+export const money = (minor: bigint, currency: string) =>
+  `${(Number(minor) / 100).toFixed(2)} ${currency}`;
+
+export const BetPanel: React.FC<BetPanelProps> = ({
+  panel, phase, multiplier, currency, balanceMinor, limits, bet, lang, onPlace, onCancel, onCashout,
+}) => {
+  const [stakeMajor, setStakeMajor] = useState('10');
+  const [autoEnabled, setAutoEnabled] = useState(false);
+  const [autoValue, setAutoValue] = useState('2.00');
+
+  const parsed = Number.parseFloat(stakeMajor);
+  const stakeMinor = Number.isFinite(parsed) && parsed > 0 ? BigInt(Math.round(parsed * 100)) : 0n;
+  const active = bet !== null && (bet.status === 'ACTIVE' || bet.status === 'PLACING');
+  const cashed = bet?.status === 'CASHED';
+  const finished = bet !== null && ['LOST', 'CANCELLED', 'REJECTED', 'UNRESOLVED'].includes(bet.status);
+  const autoCashout = (() => {
+    if (!autoEnabled) return null;
+    const value = Number.parseFloat(autoValue);
+    return Number.isFinite(value) && value >= 1.01 ? Number(value.toFixed(2)) : null;
+  })();
+  const outOfBounds = stakeMinor < limits.minStake || stakeMinor > limits.maxStake;
+  const unaffordable = stakeMinor > balanceMinor;
+
+  const adjust = (delta: number) => {
+    const next = Math.max(1, (Number.parseFloat(stakeMajor) || 0) + delta);
+    setStakeMajor(String(next));
+  };
+
+  const renderPrimary = () => {
+    const base =
+      'w-full h-full min-h-[56px] px-3 rounded-xl font-display font-bold flex flex-col items-center justify-center transition-colors cursor-pointer disabled:cursor-not-allowed disabled:opacity-50';
+    if (active && phase === 'FLYING' && bet) {
+      const estimate = BigInt(Math.floor(Number(bet.stake) * multiplier));
+      return (
+        <button type="button" onClick={() => onCashout(panel)}
+          className={`${base} bg-[var(--g-gold)] text-slate-950`}>
+          <span className="text-sm uppercase tracking-wide">{t(lang, 'cashOut')}</span>
+          <span className="text-base font-mono tabular-nums">{money(estimate, currency)}</span>
+        </button>
+      );
+    }
+    if (active) {
+      return (
+        <button type="button" onClick={() => onCancel(panel)}
+          className={`${base} bg-[var(--g-danger)] text-white`}>
+          <span className="text-base">{t(lang, 'cancel')}</span>
+          {bet && <span className="text-xs font-mono tabular-nums">{money(BigInt(bet.stake), currency)}</span>}
+        </button>
+      );
+    }
+    if (cashed && bet) {
+      return (
+        <button type="button" disabled className={`${base} bg-emerald-900/60 text-emerald-200`}>
+          <span className="text-xs uppercase">{t(lang, 'won')}</span>
+          <span className="text-base font-mono tabular-nums">+{money(BigInt(bet.payout ?? '0'), currency)}</span>
+        </button>
+      );
+    }
+    if (finished) {
+      return (
+        <button type="button" disabled className={`${base} bg-slate-800 text-slate-400`}>
+          {t(lang, 'lost')}
+        </button>
+      );
+    }
+    if (phase !== 'BETTING') {
+      return (
+        <button type="button" disabled className={`${base} bg-slate-800 text-slate-400`}>
+          {t(lang, 'waitingForNextRound')}
+        </button>
+      );
+    }
+    return (
+      <button type="button" onClick={() => onPlace(panel, stakeMinor, autoCashout)}
+        disabled={outOfBounds || unaffordable}
+        className={`${base} bg-[var(--g-accent)] text-[var(--g-on-accent)]`}>
+        <span className="text-base">{t(lang, 'bet')}</span>
+        <span className="text-sm font-mono tabular-nums">{money(stakeMinor, currency)}</span>
+      </button>
+    );
+  };
+
+  return (
+    <div className="bg-[var(--g-panel)] border border-white/10 rounded-xl p-3 flex flex-col gap-2">
+      <div className="flex items-center gap-2">
+        <button type="button" onClick={() => adjust(-1)} aria-label="Decrease stake"
+          disabled={active}
+          className="w-9 h-9 flex items-center justify-center rounded-lg bg-slate-800 text-[var(--g-text)] disabled:opacity-40">
+          <Minus className="w-4 h-4" />
+        </button>
+        <div className="flex-1 flex items-center justify-center gap-1 bg-black/30 border border-white/10 rounded-lg px-2 py-1.5">
+          <input type="number" inputMode="decimal" min={1} step={1} value={stakeMajor}
+            disabled={active} onChange={(event) => setStakeMajor(event.target.value)}
+            aria-label={t(lang, 'stake')}
+            className="w-20 bg-transparent text-center font-mono font-semibold text-sm text-[var(--g-text)] focus:outline-none disabled:opacity-50" />
+          <span className="text-xs font-mono text-[var(--g-hint)]">{currency}</span>
+        </div>
+        <button type="button" onClick={() => adjust(1)} aria-label="Increase stake"
+          disabled={active}
+          className="w-9 h-9 flex items-center justify-center rounded-lg bg-slate-800 text-[var(--g-text)] disabled:opacity-40">
+          <Plus className="w-4 h-4" />
+        </button>
+      </div>
+
+      <div className="grid grid-cols-4 gap-1.5">
+        {PRESETS_MAJOR.map((preset) => (
+          <button key={preset} type="button" disabled={active}
+            onClick={() => setStakeMajor(String(preset))}
+            className="py-1.5 text-xs font-mono rounded-md bg-black/30 border border-white/10 text-[var(--g-hint)] hover:text-[var(--g-text)] disabled:opacity-40">
+            {preset}
+          </button>
+        ))}
+      </div>
+
+      <div className="flex items-center justify-between gap-2 text-xs text-[var(--g-hint)]">
+        <label className="flex items-center gap-1.5 cursor-pointer select-none">
+          <input type="checkbox" checked={autoEnabled} disabled={active}
+            onChange={(event) => setAutoEnabled(event.target.checked)}
+            className="w-4 h-4 accent-[var(--g-gold)]" />
+          <span>{t(lang, 'autoCashout')}</span>
+        </label>
+        <div className="flex items-center gap-1 bg-black/30 border border-white/10 rounded-md px-2 py-1">
+          <input type="number" inputMode="decimal" min={1.01} step={0.01} value={autoValue}
+            disabled={!autoEnabled || active}
+            onChange={(event) => setAutoValue(event.target.value)}
+            aria-label={t(lang, 'autoCashout')}
+            className="w-14 bg-transparent text-right font-mono text-xs text-[var(--g-text)] focus:outline-none disabled:opacity-40" />
+          <span className="font-mono text-[var(--g-hint)]">x</span>
+        </div>
+      </div>
+
+      <div className="h-14">{renderPrimary()}</div>
+    </div>
+  );
+};
+```
+
+**Step 10: `src/client/components/ProvablyFairModal.tsx`**
+
+```tsx
+import React, { useEffect, useState } from 'react';
+import { CheckCircle2, ShieldCheck, X, XCircle } from 'lucide-react';
+import { t } from '../i18n';
+import { verifyProof, type ProofPayload, type VerifyResult } from '../fair';
+import type { Lang } from '../types';
+
+interface ProvablyFairModalProps {
+  isOpen: boolean;
+  onClose: () => void;
+  lang: Lang;
+  currentRoundId: number | null;
+  currentServerSeedHash: string | null;
+  inspectedRoundId: number | null;
+}
+
+export const ProvablyFairModal: React.FC<ProvablyFairModalProps> = ({
+  isOpen, onClose, lang, currentRoundId, currentServerSeedHash, inspectedRoundId,
+}) => {
+  const [proof, setProof] = useState<ProofPayload | null>(null);
+  const [result, setResult] = useState<VerifyResult | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [lookup, setLookup] = useState('');
+
+  const load = (id: number) => {
+    setLoading(true);
+    setError(null);
+    setProof(null);
+    setResult(null);
+    return fetch(`/api/rounds/${id}/proof`)
+      .then(async (response) => {
+        if (!response.ok) throw new Error('unavailable');
+        const body = (await response.json()) as { data: ProofPayload };
+        setProof(body.data);
+      })
+      .catch(() => setError(t(lang, 'proofUnavailable')))
+      .finally(() => setLoading(false));
+  };
+
+  useEffect(() => {
+    if (!isOpen || inspectedRoundId === null) return;
+    setLookup(String(inspectedRoundId));
+    void load(inspectedRoundId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen, inspectedRoundId]);
+
+  useEffect(() => {
+    if (!proof) return;
+    let cancelled = false;
+    void verifyProof(proof).then((next) => {
+      if (!cancelled) setResult(next);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [proof]);
+
+  if (!isOpen) return null;
+
+  const submit = (event: React.FormEvent) => {
+    event.preventDefault();
+    const id = Number(lookup);
+    if (Number.isSafeInteger(id) && id > 0) void load(id);
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4"
+      style={{ paddingBottom: 'calc(var(--g-safe-bottom) + 1rem)' }}>
+      <div className="w-full max-w-xl max-h-[90dvh] overflow-y-auto bg-[var(--g-panel)] border border-white/10 rounded-xl shadow-2xl">
+        <div className="px-4 py-3 border-b border-white/10 flex items-center justify-between gap-3 sticky top-0 bg-[var(--g-panel)]">
+          <div className="flex items-center gap-2">
+            <ShieldCheck className="w-5 h-5 text-emerald-400" />
+            <h2 className="text-sm font-display font-bold text-[var(--g-text)]">{t(lang, 'provablyFair')}</h2>
+          </div>
+          <button type="button" onClick={onClose} aria-label="Close"
+            className="p-1.5 rounded-lg text-[var(--g-hint)] hover:text-[var(--g-text)]">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        <div className="p-4 flex flex-col gap-4 text-xs">
+          <section className="rounded-lg bg-black/30 border border-white/10 p-3 flex flex-col gap-1.5">
+            <div className="flex items-center justify-between">
+              <span className="font-semibold text-[var(--g-text)]">
+                {t(lang, 'liveCommit')} #{currentRoundId ?? '—'}
+              </span>
+              <span className="text-[var(--g-hint)]">{t(lang, 'serverSeedHidden')}</span>
+            </div>
+            <div className="font-mono break-all text-[var(--g-hint)]">
+              SHA-256: {currentServerSeedHash ?? '…'}
+            </div>
+          </section>
+
+          <section className="rounded-lg bg-black/30 border border-white/10 p-3 flex flex-col gap-2">
+            <form onSubmit={submit} className="flex items-center gap-1.5">
+              <input type="number" min={1} value={lookup} onChange={(event) => setLookup(event.target.value)}
+                aria-label={t(lang, 'round')}
+                className="w-24 bg-black/40 border border-white/10 rounded-md px-2 py-1 font-mono text-[var(--g-text)] focus:outline-none" />
+              <button type="submit" className="px-3 py-1 rounded-md bg-slate-800 text-[var(--g-text)] font-medium">
+                {t(lang, 'inspect')}
+              </button>
+            </form>
+
+            {loading && <div className="py-4 text-center text-[var(--g-hint)]">{t(lang, 'verifying')}</div>}
+            {error && <div className="py-4 text-center text-[var(--g-danger)]">{error}</div>}
+            {!loading && !error && !proof && (
+              <div className="py-4 text-center text-[var(--g-hint)]">{t(lang, 'inspectHint')}</div>
+            )}
+
+            {proof && result && (
+              <div className="flex flex-col gap-2">
+                <div className={`p-2.5 rounded-md border flex items-center justify-between gap-2 ${
+                  result.serverSeedHashMatches && result.crashPointMatches
+                    ? 'bg-emerald-950/40 border-emerald-500/40 text-emerald-200'
+                    : 'bg-rose-950/40 border-rose-500/40 text-rose-200'
+                }`}>
+                  <span className="flex items-center gap-1.5 font-semibold">
+                    {result.serverSeedHashMatches && result.crashPointMatches
+                      ? <CheckCircle2 className="w-4 h-4" />
+                      : <XCircle className="w-4 h-4" />}
+                    {result.serverSeedHashMatches && result.crashPointMatches
+                      ? `${t(lang, 'verified')} · #${proof.roundId}`
+                      : t(lang, 'verificationMismatch')}
+                  </span>
+                  <span className="font-mono font-bold tabular-nums">{result.computedCrashPoint.toFixed(2)}x</span>
+                </div>
+                <div>
+                  <div className="text-[var(--g-hint)] mb-1">{t(lang, 'revealedServerSeed')}</div>
+                  <div className="font-mono break-all text-[var(--g-text)]">{proof.serverSeed}</div>
+                </div>
+                <div>
+                  <div className="text-[var(--g-hint)] mb-1">{t(lang, 'committedHash')}</div>
+                  <div className="font-mono break-all text-emerald-300">{result.serverSeedHashComputed}</div>
+                </div>
+                <div>
+                  <div className="text-[var(--g-hint)] mb-1">{t(lang, 'combinedInput')}</div>
+                  <div className="font-mono break-all text-[var(--g-text)]">{result.combinedInput}</div>
+                </div>
+                <div className="font-mono text-[var(--g-hint)]">
+                  SHA-512 → {result.hexSlice52Bit} → {result.crashResultLabel}
+                </div>
+                <div className="font-mono text-[var(--g-text)]">
+                  {t(lang, 'crashResult')}: {result.computedCrashPoint.toFixed(2)}x
+                  {result.decimalValue % 33 === 0 ? ' · instant crash (edge)' : ''}
+                </div>
+              </div>
+            )}
+          </section>
+        </div>
+      </div>
+    </div>
+  );
+};
+```
+
+Remove the stray `crashResultLabel` reference (it does not exist): the SHA-512 line ends at `→ {result.hexSlice52Bit}`.
+
+**Step 11: `src/client/App.tsx` and `src/main.tsx`**
+
+```tsx
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { exitGame, installBridge } from './bridge';
+import { t } from './i18n';
+import { money, BetPanel } from './components/BetPanel';
+import { FlightCanvas } from './components/FlightCanvas';
+import { ProvablyFairModal } from './components/ProvablyFairModal';
+import { useCrashSocket } from './hooks/useCrashSocket';
+import { soundEngine } from './sound';
+import type { HandshakeData, Lang } from './types';
+
+type Boot =
+  | { state: 'loading' }
+  | { state: 'ready'; session: HandshakeData }
+  | { state: 'ended' }
+  | { state: 'error' };
+
+function readLang(): Lang {
+  const value = new URLSearchParams(window.location.search).get('lang');
+  return value === 'am' ? 'am' : 'en';
+}
+
+const EndedScreen: React.FC<{ lang: Lang; body?: string }> = ({ lang, body }) => (
+  <div className="min-h-dvh bg-[var(--g-bg)] text-[var(--g-text)] flex flex-col items-center justify-center gap-3 px-6 text-center">
+    <p className="font-display text-lg font-bold">
+      {body ?? t(lang, 'sessionEnded')}
+    </p>
+    {body === undefined && <p className="text-sm text-[var(--g-hint)]">{t(lang, 'sessionEndedBody')}</p>}
+    <button type="button" onClick={exitGame}
+      className="px-4 py-2 rounded-lg bg-[var(--g-accent)] text-[var(--g-on-accent)] font-semibold">
+      {t(lang, 'backToGames')}
+    </button>
+  </div>
+);
+
+const GameScreen: React.FC<{ token: string; session: HandshakeData; lang: Lang }> = ({
+  token, session, lang,
+}) => {
+  const [ended, setEnded] = useState(false);
+  const [muted, setMuted] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [fairnessOpen, setFairnessOpen] = useState(false);
+  const [inspectedRoundId, setInspectedRoundId] = useState<number | null>(null);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const enteredNativeRef = useRef(false);
+
+  const onSessionEnded = useCallback(() => {
+    setEnded(true);
+    exitGame();
+  }, []);
+  const socket = useCrashSocket({ token, onSessionEnded });
+
+  const limits = {
+    minStake: BigInt(session.limits.minStake),
+    maxStake: BigInt(session.limits.maxStake),
+    maxWin: BigInt(session.limits.maxWin),
+  };
+  const balanceMinor = BigInt(socket.balance);
+
+  useEffect(() => {
+    const onFullscreenChange = () => {
+      const nativeActive = Boolean(document.fullscreenElement);
+      if (nativeActive) {
+        enteredNativeRef.current = true;
+        setIsFullscreen(true);
+      } else if (enteredNativeRef.current) {
+        enteredNativeRef.current = false;
+        setIsFullscreen(false);
+      }
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && isFullscreen && !document.fullscreenElement) setIsFullscreen(false);
+    };
+    document.addEventListener('fullscreenchange', onFullscreenChange);
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('fullscreenchange', onFullscreenChange);
+      window.removeEventListener('keydown', onKeyDown);
+    };
+  }, [isFullscreen]);
+
+  const toggleFullscreen = useCallback(async () => {
+    if (isFullscreen) {
+      if (document.fullscreenElement) {
+        try {
+          await document.exitFullscreen();
+        } catch {
+          // fall through to the expanded viewport state
+        }
+      }
+      enteredNativeRef.current = false;
+      setIsFullscreen(false);
+      return;
+    }
+    const element = containerRef.current;
+    if (element && typeof element.requestFullscreen === 'function') {
+      try {
+        await element.requestFullscreen();
+        enteredNativeRef.current = true;
+      } catch {
+        enteredNativeRef.current = false;
+      }
+    }
+    setIsFullscreen(true);
+  }, [isFullscreen]);
+
+  const toggleMute = () => {
+    const next = !muted;
+    setMuted(next);
+    soundEngine.setMuted(next);
+  };
+
+  if (ended || socket.ended !== null) {
+    return <EndedScreen lang={lang} />;
+  }
+
+  return (
+    <div ref={containerRef}
+      className={`bg-[var(--g-bg)] text-[var(--g-text)] flex flex-col ${
+        isFullscreen ? 'fixed inset-0 z-50 overflow-y-auto' : 'min-h-dvh'
+      }`}>
+      <header className="flex items-center justify-between gap-2 px-3 py-2">
+        <div className="font-display font-bold">Crash</div>
+        <div className="font-mono font-bold tabular-nums text-[var(--g-gold)]">
+          {money(balanceMinor, session.currency)}
+        </div>
+      </header>
+
+      {!socket.connected && socket.ended === null && (
+        <div className="mx-3 mb-2 rounded-lg bg-amber-950/60 border border-amber-500/40 px-3 py-1.5 text-xs text-amber-200">
+          {t(lang, 'reconnecting')}
+        </div>
+      )}
+      {socket.lastError && (
+        <div className="mx-3 mb-2 rounded-lg bg-rose-950/70 border border-rose-500/40 px-3 py-1.5 text-xs text-rose-200">
+          {socket.lastError.message}
+        </div>
+      )}
+
+      <main className="flex-1 w-full max-w-[760px] mx-auto px-3 pb-[calc(var(--g-safe-bottom)+0.75rem)] flex flex-col gap-3">
+        <FlightCanvas
+          roundId={socket.roundId}
+          phase={socket.phase}
+          multiplier={socket.multiplier}
+          elapsedMs={socket.elapsedMs}
+          bettingEndsAt={socket.bettingEndsAt}
+          bettingWindowMs={socket.bettingWindowMs}
+          serverSeedHash={socket.serverSeedHash}
+          connected={socket.connected}
+          history={socket.history}
+          muted={muted}
+          lang={lang}
+          isFullscreen={isFullscreen}
+          onToggleMute={toggleMute}
+          onToggleFullscreen={() => void toggleFullscreen()}
+          onSelectHistoryRound={(target) => {
+            setInspectedRoundId(target);
+            setFairnessOpen(true);
+          }}
+          onOpenFairness={() => {
+            setInspectedRoundId(null);
+            setFairnessOpen(true);
+          }}
+        />
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          {([0, 1] as const).map((panel) => (
+            <BetPanel key={panel} panel={panel} phase={socket.phase} multiplier={socket.multiplier}
+              currency={session.currency} balanceMinor={balanceMinor} limits={limits}
+              bet={socket.bets[panel]} lang={lang}
+              onPlace={socket.placeBet} onCancel={socket.cancelBet} onCashout={socket.cashout} />
+          ))}
+        </div>
+      </main>
+
+      <ProvablyFairModal isOpen={fairnessOpen} onClose={() => setFairnessOpen(false)} lang={lang}
+        currentRoundId={socket.roundId} currentServerSeedHash={socket.serverSeedHash}
+        inspectedRoundId={inspectedRoundId} />
+    </div>
+  );
+};
+
+export default function App() {
+  const [lang, setLang] = useState<Lang>(readLang);
+  const [boot, setBoot] = useState<Boot>({ state: 'loading' });
+  const token = useRef(new URLSearchParams(window.location.search).get('token')).current;
+
+  useEffect(() => {
+    installBridge({ onLocale: setLang });
+  }, []);
+
+  useEffect(() => {
+    if (!token) {
+      setBoot({ state: 'ended' });
+      return;
+    }
+    let cancelled = false;
+    fetch('/api/sessions/handshake', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ token }),
+    })
+      .then(async (response) => {
+        if (cancelled) return;
+        if (response.status === 410) {
+          setBoot({ state: 'ended' });
+          return;
+        }
+        if (!response.ok) {
+          setBoot({ state: 'error' });
+          return;
+        }
+        const body = (await response.json()) as { data: HandshakeData };
+        setBoot({ state: 'ready', session: body.data });
+      })
+      .catch(() => {
+        if (!cancelled) setBoot({ state: 'error' });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [token]);
+
+  if (boot.state === 'loading') {
+    return (
+      <div className="min-h-dvh bg-[var(--g-bg)] text-[var(--g-hint)] flex items-center justify-center text-sm">
+        {t(lang, 'loading')}
+      </div>
+    );
+  }
+  if (boot.state === 'ended') return <EndedScreen lang={lang} />;
+  if (boot.state === 'error') return <EndedScreen lang={lang} body={t(lang, 'loadFailed')} />;
+  return <GameScreen token={token as string} session={boot.session} lang={lang} />;
+}
+```
+
+`src/main.tsx`:
+
+```tsx
+import { createRoot } from 'react-dom/client';
+import App from './client/App';
+import './index.css';
+
+const root = document.getElementById('root');
+if (root) createRoot(root).render(<App />);
+```
+
+**Step 12: Serve under `/play`**
+
+- `vite.config.ts`: add `base: '/play/',` to the config object (assets must resolve under the mounted static path).
+- `index.html`: keep `<script type="module" src="/src/main.tsx">`; replace the JWT/iframe marketing description with: `Real-time crash game with two bet panels, auto cash-out, and browser-verifiable SHA-512 round proofs.`
+
+**Step 13: Verify**
 
 ```bash
-git add apps/games-provider/src apps/games-provider/index.html
-git commit -m "feat(games-provider): ship the game client with telegram bridge and bilingual UI"
+npm run games:typecheck
+npm run games:test
+npm run games:build
+grep -rn "firebase\|jsonwebtoken\|recharts" apps/games-provider/src || echo clean
+grep -o '/play/assets/[^"]*' apps/games-provider/dist/client/index.html | head -3
+```
+
+Expected: typecheck and tests green; build emits `dist/client`; grep prints `clean`; the built `index.html` references `/play/assets/...`.
+
+Then prove the served surface without a database. Write a throwaway harness at `.superpowers/sdd/2026-11-17-games-provider-v1/browser-harness.ts` (git-ignored, not committed):
+
+```ts
+import { createFakeBingo, FAKE_BINGO_TOKEN } from '../../apps/games-provider/src/test/fakeBingo';
+import { createMemoryStore } from '../../apps/games-provider/src/test/memoryStore';
+import { startTestServer } from '../../apps/games-provider/src/test/server';
+import { HttpWalletClient } from '../../apps/games-provider/src/server/wallet';
+import type { AppConfig } from '../../apps/games-provider/src/config';
+
+const secret = 'harness-secret-000000000000';
+const fake = await createFakeBingo({ hmacSecret: secret, balance: 100_000n });
+const config: AppConfig = {
+  port: 0,
+  databaseUrl: '',
+  operator: {
+    code: 'bingo251', name: 'Bingo 251', callbackUrl: fake.url, hmacSecret: secret, currency: 'ETB',
+  },
+  allowedParentOrigins: ['http://localhost:3000'],
+  limits: { minStake: 100n, maxStake: 100_000n, maxWin: 3_000_000n, maxBetsPerRound: 200 },
+  clientSeeds: ['stratos_slot_1_00000001', 'stratos_slot_2_00000002', 'stratos_slot_3_00000003'],
+  botCount: 0,
+};
+const store = createMemoryStore();
+const wallet = new HttpWalletClient({ callbackUrl: fake.url, hmacSecret: secret });
+const server = await startTestServer({ config, store, wallet });
+await server.engine.start();
+console.log(`open ${server.url}/play?token=${FAKE_BINGO_TOKEN}&lang=en`);
+
+const stop = async () => {
+  await server.close();
+  await fake.close();
+  process.exit(0);
+};
+process.on('SIGINT', () => void stop());
+process.on('SIGTERM', () => void stop());
+```
+
+Run it with `node --import tsx .superpowers/sdd/2026-11-17-games-provider-v1/browser-harness.ts` from the repo root, then:
+1. `curl -s http://127.0.0.1:<port>/play?token=<uuid>&lang=en | grep -o '/play/assets/[^"]*'` returns asset URLs that also return 200.
+2. With a browser tool if available, load the page: canvas renders, balance shows `1000.00 ETB`, a bet places, `Cancel` appears, and a later round allows `Cash out`. If no browser tool is available, report that visual verification is pending for the controller.
+
+**Step 14: Commit**
+
+```bash
+git add apps/games-provider/src apps/games-provider/server.ts apps/games-provider/src/test/server.ts \
+  apps/games-provider/tests apps/games-provider/vite.config.ts apps/games-provider/index.html
+git commit -m "feat(games-provider): ship the crash client with themed bridge, two-panel betting, and pushed settlements"
 ```
 
 ---

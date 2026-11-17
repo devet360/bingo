@@ -36,7 +36,10 @@ function session(displayBalance = 10_000n): SessionRecord {
  * that clock, so every seeded row is due at `NOW` and the retry offsets in the
  * assertions are exact.
  */
-function fixture(options: { wrapStore?: (base: MemoryStore) => Store } = {}) {
+function fixture(options: {
+  wrapStore?: (base: MemoryStore) => Store;
+  onDelivered?: (input: { sessionToken: string; balance: bigint }) => void;
+} = {}) {
   const store = createMemoryStore({ now: () => NOW });
   const calls: Array<{ kind: 'win' | 'rollback'; txnId: string; amount: bigint }> = [];
   const scripts = new Map<string, Script>();
@@ -73,7 +76,11 @@ function fixture(options: { wrapStore?: (base: MemoryStore) => Store } = {}) {
     calls,
     seed,
     script: (txnId: string, scripted: Script) => scripts.set(txnId, scripted),
-    worker: new OutboxWorker({ store: options.wrapStore ? options.wrapStore(store) : store, wallet }),
+    worker: new OutboxWorker({
+      store: options.wrapStore ? options.wrapStore(store) : store,
+      wallet,
+      onDelivered: options.onDelivered,
+    }),
   };
 }
 
@@ -318,6 +325,18 @@ test('a win reply mirrors its balance onto the session', async () => {
   script('win-ok', ok(12_540n));
 
   assert.equal((await worker.drainOnce(NOW)).sent, 1);
+  assert.equal(store.dump().sessions[0]!.displayBalance, 12_540n);
+});
+
+test('a delivered movement pushes the mirrored balance to the gateway', async () => {
+  const delivered: Array<{ sessionToken: string; balance: bigint }> = [];
+  const { store, seed, script, worker } = fixture({ onDelivered: (input) => delivered.push(input) });
+  await store.saveSession(session());
+  await seed({ txnId: 'win-ok', type: 'ROLLBACK', amount: 1_000n });
+  script('win-ok', ok(12_540n));
+
+  assert.equal((await worker.drainOnce(NOW)).sent, 1);
+  assert.deepEqual(delivered, [{ sessionToken: TOKEN, balance: 12_540n }]);
   assert.equal(store.dump().sessions[0]!.displayBalance, 12_540n);
 });
 

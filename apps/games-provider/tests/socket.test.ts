@@ -44,7 +44,7 @@ async function setup() {
   const wallet = new HttpWalletClient({ callbackUrl: config.operator.callbackUrl, hmacSecret: config.operator.hmacSecret });
   await handshake({ token: fake.token, config, store, wallet });
   const server = await startTestServer({ config, store, wallet });
-  return { fake, store, ...server };
+  return { fake, ...server };
 }
 
 async function connect(url: string) {
@@ -168,4 +168,78 @@ test('an oversized frame kills only its socket, not the provider process', async
   frames.send({ type: 'auth', token: env.fake.token });
   const snapshot = await frames.next((frame) => frame.type === 'snapshot');
   assert.equal(snapshot.type, 'snapshot');
+});
+
+const OTHER_TOKEN = '22222222-2222-4222-8222-222222222222';
+
+async function openSecondSession(store: Awaited<ReturnType<typeof setup>>['store']) {
+  await store.saveSession({
+    token: OTHER_TOKEN, operatorCode: 'bingo251', currency: 'ETB',
+    minStake: 100n, maxStake: 100_000n, maxWin: 3_000_000n, displayBalance: 5_000n,
+    status: 'OPEN', createdAt: new Date(0), lastHandshakeAt: new Date(0),
+  });
+}
+
+test('notifyBet and notifyBalance address only the target session', async (t) => {
+  const env = await setup();
+  t.after(async () => { await env.close(); await env.fake.close(); });
+  await openSecondSession(env.store);
+
+  const a = await connect(env.wsUrl);
+  a.frames.send({ type: 'auth', token: env.fake.token });
+  await a.frames.next((frame) => frame.type === 'snapshot');
+  const b = await connect(env.wsUrl);
+  b.frames.send({ type: 'auth', token: OTHER_TOKEN });
+  await b.frames.next((frame) => frame.type === 'snapshot');
+
+  env.socket.notifyBet({
+    id: 'bet-a', roundId: 7, operatorCode: 'bingo251', sessionToken: env.fake.token, panel: 1,
+    stake: 1_000n, autoCashout: 1.5, status: 'CASHED', cashoutMultiplier: 2, payout: 2_000n,
+    betTxnId: 'bet-txn', winTxnId: 'win-txn', createdAt: new Date(0), settledAt: new Date(0),
+  });
+  env.socket.notifyBalance(OTHER_TOKEN, 123n);
+
+  const update = await a.frames.next((frame) => frame.type === 'bet:update');
+  assert.equal(update.panel, 1);
+  assert.equal(update.status, 'CASHED');
+  assert.equal(update.stake, '1000');
+  assert.equal(update.payout, '2000');
+  const balance = await b.frames.next((frame) => frame.type === 'balance:update');
+  assert.equal(balance.balance, '123');
+
+  // The two pushes never cross sessions.
+  await assert.rejects(a.frames.next((frame) => frame.type === 'balance:update', 150), /timed out/);
+  await assert.rejects(b.frames.next((frame) => frame.type === 'bet:update', 150), /timed out/);
+});
+
+test('a reconnect snapshot carries the session own bets for the live round', async (t) => {
+  const env = await setup();
+  t.after(async () => { await env.close(); await env.fake.close(); });
+
+  const first = await connect(env.wsUrl);
+  first.frames.send({ type: 'auth', token: env.fake.token });
+  await first.frames.next((frame) => frame.type === 'snapshot');
+  await env.engine.tickOnce(0);
+  await first.frames.next((frame) => frame.type === 'round:betting');
+  first.frames.send({ type: 'bet:place', panel: 1, stake: '1000' });
+  await first.frames.next((frame) => frame.type === 'bet:update' && frame.panel === 1 && frame.status === 'ACTIVE');
+  first.ws.close();
+
+  const second = await connect(env.wsUrl);
+  second.frames.send({ type: 'auth', token: env.fake.token });
+  const snapshot = await second.frames.next((frame) => frame.type === 'snapshot');
+  const bets = snapshot.bets as Array<Record<string, unknown> | null>;
+  assert.equal(typeof snapshot.roundId, 'number');
+  assert.equal(bets.length, 2);
+  assert.equal(bets[0], null);
+  assert.equal(bets[1]!.panel, 1);
+  assert.equal(bets[1]!.status, 'ACTIVE');
+  assert.equal(bets[1]!.stake, '1000');
+
+  // A session with no bet in the round still gets the two null slots.
+  await openSecondSession(env.store);
+  const fresh = await connect(env.wsUrl);
+  fresh.frames.send({ type: 'auth', token: OTHER_TOKEN });
+  const other = await fresh.frames.next((frame) => frame.type === 'snapshot');
+  assert.deepEqual(other.bets, [null, null]);
 });
