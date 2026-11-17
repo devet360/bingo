@@ -1022,6 +1022,10 @@ export function launchGame(gameId: string, lang: 'en' | 'am'): Promise<ProviderS
   return apiRequest(`/games/${gameId}/launch`, { method: 'POST', body: { lang } });
 }
 
+export function fetchGameSession(sessionId: string): Promise<ProviderSession> {
+  return apiRequest(`/games/sessions/${sessionId}`);
+}
+
 export function closeGameSession(sessionId: string): Promise<{ closed: true }> {
   return apiRequest(`/games/sessions/${sessionId}/close`, { method: 'POST' });
 }

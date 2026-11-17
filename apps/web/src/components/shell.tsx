@@ -220,12 +220,14 @@ export function Shell({ children }: { children: ReactNode }) {
   const router = useRouter();
   const [menuOpen, setMenuOpen] = useState(false);
 
-  // Rooms open from the lobby; Telegram's native back button should return
-  // there instead of leaving the Mini App.
+  // Rooms and embedded provider games trade the app chrome for play space.
+  // Telegram's native back button should return to the lobby instead of
+  // leaving the Mini App.
+  const immersive = pathname.startsWith('/room/') || pathname.startsWith('/games/play/');
   useTelegramBackButton(() => {
     haptic('tap');
-    router.push('/');
-  }, pathname.startsWith('/room/'));
+    router.push(pathname.startsWith('/games/play/') ? '/games' : '/');
+  }, immersive);
 
   if (status === 'loading') {
     return (
@@ -266,21 +268,21 @@ export function Shell({ children }: { children: ReactNode }) {
     return false;
   });
 
-  // Game rooms trade the app chrome for board space; Telegram already draws
-  // its own title bar, so the in-app header shrinks there too.
-  const inRoom = pathname.startsWith('/room/');
+  // Game rooms and embedded provider games trade the app chrome for board
+  // space; Telegram already draws its own title bar, so the in-app header
+  // shrinks there too.
   const adminArea = pathname.startsWith('/admin');
-  const wide = adminArea || pathname.startsWith('/support') || inRoom;
+  const wide = adminArea || pathname.startsWith('/support') || immersive;
   const widthClass = adminArea ? 'max-w-[1440px]' : wide ? 'max-w-6xl' : 'max-w-3xl';
   const chromeHeight = isTelegram ? 'h-11' : 'h-14';
   const homeHref = isAdmin ? '/admin' : isSupport ? '/support' : agent ? '/agent' : '/';
 
   return (
     <div
-      className={cn('min-h-dvh', inRoom ? 'pb-2' : adminArea ? 'pb-6' : 'pb-20')}
+      className={cn('min-h-dvh', immersive ? 'pb-2' : adminArea ? 'pb-6' : 'pb-20')}
       style={{ minHeight: 'var(--tg-viewport-height, 100dvh)' }}
     >
-      {inRoom ? null : (
+      {immersive ? null : (
       <header className="sticky top-0 z-30 border-b border-line/60 bg-ink/85 backdrop-blur">
         <div
           className={cn(
@@ -407,7 +409,7 @@ export function Shell({ children }: { children: ReactNode }) {
       <main
         className={cn(
           'mx-auto w-full',
-          inRoom ? 'px-2 pt-2 pb-[env(safe-area-inset-bottom)]' : 'px-3 pt-3 sm:px-4',
+          immersive ? 'px-2 pt-2 pb-[env(safe-area-inset-bottom)]' : 'px-3 pt-3 sm:px-4',
           widthClass,
         )}
       >
@@ -418,7 +420,7 @@ export function Shell({ children }: { children: ReactNode }) {
 
       <CampaignPopup />
 
-      {nav.length > 0 && !inRoom && !adminArea ? (
+      {nav.length > 0 && !immersive && !adminArea ? (
         <nav className="fixed inset-x-0 bottom-0 z-30 border-t border-line/70 bg-ink/95 pb-[env(safe-area-inset-bottom)] backdrop-blur">
           <div className="mx-auto flex w-full max-w-3xl items-stretch">
             {nav.map((item) => {

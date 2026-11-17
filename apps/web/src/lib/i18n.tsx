@@ -676,6 +676,9 @@ const DICT: Record<Lang, Record<string, string>> = {
     'games.noLaunchUrl': 'This game is not configured with a launch URL yet.',
     'games.launchError': 'Could not launch the game.',
     'games.loadError': 'Could not load the games lobby.',
+    'games.sessionEnded': 'Game session ended',
+    'games.sessionEndedBody': 'Return to the lobby to start a new round.',
+    'games.returnToLobby': 'Back to games',
   },
   am: {
     'room.getCards': 'ካርዶችዎን ያግኙ',
@@ -1327,6 +1330,9 @@ const DICT: Record<Lang, Record<string, string>> = {
     'games.noLaunchUrl': 'ይህ ጨዋታ እስካሁን የማስጀመሪያ አገናኝ አልተዘጋጀለትም።',
     'games.launchError': 'ጨዋታውን ማስጀመር አልተቻለም።',
     'games.loadError': 'የጨዋታ ሎቢውን መጫን አልተቻለም።',
+    'games.sessionEnded': 'የጨዋታው ክፍለ ጊዜ አብቅቷል',
+    'games.sessionEndedBody': 'አዲስ ዙር ለመጀመር ወደ መጫወቻ ክፍሉ ይመለሱ።',
+    'games.returnToLobby': 'ወደ ጨዋታዎች',
   },
 };
 

@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import { ApiError, fetchPlayableGames, launchGame } from '@/lib/api';
 import { formatStake } from '@/lib/format';
 import { useI18n } from '@/lib/i18n';
@@ -68,6 +69,7 @@ function GameCard({
 
 export default function GamesPage() {
   const { t, lang } = useI18n();
+  const router = useRouter();
   const [providers, setProviders] = useState<GameProvider[] | null>(null);
   const [launching, setLaunching] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -99,7 +101,7 @@ export default function GamesPage() {
         setError(t('games.noLaunchUrl'));
         return;
       }
-      window.open(session.launchUrl, '_blank', 'noopener,noreferrer');
+      router.push(`/games/play/${session.id}`);
     } catch (caught) {
       setError(caught instanceof ApiError ? caught.message : t('games.launchError'));
     } finally {
