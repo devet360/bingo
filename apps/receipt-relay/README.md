@@ -49,10 +49,16 @@ URL, and the two endpoint templates are fixed in `src/config.php`.
 | --- | --- | --- |
 | GET | `/health` | App name, version, supported providers |
 | GET | `/receipts/{provider}/{reference}` | Raw bank answer, base64-encoded |
+| GET | `/receipts/{provider}?reference=...` | Same, for a pasted receipt link |
 
 `provider` is `telebirr` or `mpesa`. `reference` is the receipt/transaction
-reference; a full receipt link is accepted too and the reference is extracted
-from it.
+reference. Pass a bare reference in the path; pass a full receipt link in
+`?reference=` (URL-encoded) — web servers reject the encoded slashes a link
+carries in a path. The reference is extracted from the link and checked.
+
+```sh
+curl "https://YOUR-HOST/receipts/telebirr?reference=https%3A%2F%2Ftransactioninfo.ethiotelecom.et%2Freceipt%2FDGXXXXXXXX"
+```
 
 Errors are `{ "ok": false, "code": "...", "message": "..." }`:
 

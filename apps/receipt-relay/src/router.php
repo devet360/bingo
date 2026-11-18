@@ -86,8 +86,8 @@ function handle_request(): void
         return;
     }
 
-    if (!preg_match('#^/receipts/([A-Za-z0-9_-]+)/(.+)$#', $path, $match)) {
-        error_response(404, 'NOT_FOUND', 'Use GET /receipts/{provider}/{reference}.');
+    if (!preg_match('#^/receipts/([A-Za-z0-9_-]+)(?:/(.*))?$#', $path, $match)) {
+        error_response(404, 'NOT_FOUND', 'Use GET /receipts/{provider}/{reference} or ?reference={reference}.');
         return;
     }
 
@@ -102,7 +102,12 @@ function handle_request(): void
         return;
     }
 
-    $reference = extract_reference($provider, rawurldecode($match[2]));
+    // The path form suits a bare reference. A pasted receipt link goes in
+    // ?reference=, because web servers reject its encoded slashes in the path.
+    $rawReference = isset($_GET['reference']) && is_string($_GET['reference'])
+        ? $_GET['reference']
+        : rawurldecode($match[2] ?? '');
+    $reference = extract_reference($provider, $rawReference);
     if ($reference === null) {
         error_response(400, 'INVALID_REFERENCE', 'That does not look like a ' . $provider['name'] . ' receipt reference.');
         return;
