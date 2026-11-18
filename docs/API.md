@@ -216,6 +216,8 @@ Commission rates are **not** exposed on public agent profiles.
 | POST | `/agent/deposits/:code/reject` | `{ note? }` | No money moves |
 | POST | `/agent/deposits/:code/recheck-receipt` | — | `{ data, receipt: { mode, message, url? } }`; `SERVER` re-fetches, `CLIENT` returns the bank link |
 | POST | `/agent/deposits/:code/confirm-receipt` | `{ amount }` | Records a person-read receipt; amount must match (minor units). Does not credit |
+| GET | `/agent/receipt-providers` | — | Enabled rails the agent may check; see **Receipt checker** below |
+| POST | `/agent/receipts/check` | `{ providerCode, reference, accountNumber?, phoneNumber?, payload? }` | Read-only receipt lookup; nothing is stored |
 | GET | `/agent/withdrawals` | `?status=` | Default: `ESCROWED` payouts for this agent |
 | POST | `/agent/withdrawals/redeem` | `{ payoutCode, note? }` | Releases escrow to float + fee to treasury + commission |
 | GET | `/agent/commissions` | `?limit=` | |
@@ -257,6 +259,8 @@ client opts into the full envelope for these.
 | POST | `/support/withdrawals/:withdrawalId/cancel` | — | Only `ESCROWED`; returns the locked funds to the player |
 | GET | `/support/agents` | `?status=` | Float, escrow and commission summary |
 | GET | `/support/receipts` | `?status=&providerCode=&page=` | Receipt verification audit: parsed amount, sender/receiver, attempts, source (`SERVER`/`CLIENT`/`RELAY`) |
+| GET | `/support/receipt-providers` | — | Every rail, for the checker picker; the `/admin` mount answers the same |
+| POST | `/support/receipts/check` | `{ providerCode, reference, accountNumber?, phoneNumber?, payload? }` | Read-only receipt lookup; see **Receipt checker** below |
 | GET | `/support/tickets` | `?status=&assignee=&query=&page=` | Support queue, newest message first. `assignee` accepts `me`, `unassigned` or a staff id |
 | GET | `/support/tickets/:ticketId` | — | Ticket, message history, player wallet and last five deposits/withdrawals. Opening it clears `unreadForStaff` |
 | POST | `/support/tickets/:ticketId/messages` | `{ body }` | Staff reply; claims an unassigned ticket and sets it `PENDING`. Delivery is asynchronous — see below |
@@ -285,6 +289,53 @@ requests, `Help & FAQ`) and a "Talk to an agent" action that creates a `SupportT
 - Whitelisted values: tickets 5 per player per hour, body 4000 chars, 25 rows per page,
   bot rate limit 15 messages/minute per chat. Staff replies are audited
   (`support.reply`, `support.claim`, `support.resolve`).
+
+### Receipt checker (support, admin, agents)
+
+`POST /support/receipts/check` and `POST /agent/receipts/check` answer "what does this
+receipt say?" without a deposit in hand. Support and super admin may check any rail;
+agents see only enabled rails. The `/admin` mount answers the same as `/support`.
+
+The lookup is **read-only**. It runs the same parser and gate as deposit verification
+but never creates or updates a `ReceiptVerification`, so checking a reference cannot
+consume the one-deposit slot that `@@unique([providerCode, reference])` enforces. When
+the reference is already attached to a deposit, the response reports it under `usedBy`
+(`depositId`, `depositCode`, `depositStatus`, `verificationStatus`) or `null`.
+
+```http
+POST /support/receipts/check
+{
+  "providerCode": "cbe",
+  "reference": "FT25 abcdef gh"
+}
+
+200
+{
+  "data": {
+    "provider": { "code": "cbe", "name": "CBE", "method": "BANK_TRANSFER" },
+    "reference": "FT25ABCDEFGH",
+    "status": "VERIFIED",
+    "message": "The bank confirms this receipt.",
+    "url": "https://mb.cbe.com.et/...",
+    "source": "SERVER",
+    "parsed": { "amount": 250, "senderName": "ABEBE KEBEDE", "date": "01-02-2026 10:11:12", ... },
+    "usedBy": null,
+    "checkedAt": "2026-11-18T09:30:00.000Z"
+  }
+}
+```
+
+`status` mirrors verification: `VERIFIED`, `FAILED`, `NOT_FOUND`, `NOT_MATCHED`,
+`NOT_VERIFIED`, `UNREACHABLE`, and `UNSUPPORTED` (manual rails have no bank page).
+`INVALID_RECEIPT_REFERENCE` (400) is returned before any fetch when the reference
+fails its provider pattern. `source` is `SERVER` or `CLIENT`.
+
+The optional `payload` (`{ contentType?, bodyBase64 }`) accepts the bank's own
+response — the saved HTML page, the JSON envelope, or the PDF — and parses it in
+place of a fetch. Screenshots cannot be read; there is no OCR. For the geo-blocked
+rails (`Telebirr`, `M-Pesa`) a reference-only lookup returns `UNREACHABLE` with the
+receipt `url` instead of attempting a doomed request; the same rails parse normally
+when their payload is attached.
 
 ## SuperAdmin (`SUPER_ADMIN`)
 

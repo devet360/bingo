@@ -46,6 +46,11 @@ export function createApp() {
   app.use('/wallet/deposits', express.json({ limit: '8mb' }));
   // Agents submit payment screenshots inline on the proof endpoint.
   app.use('/agent/withdrawals', express.json({ limit: '8mb' }));
+  // The receipt checker accepts the bank's own response (an HTML page, JSON
+  // envelope or PDF) as base64, so it needs the same room as deposits.
+  app.use('/support/receipts', express.json({ limit: '8mb' }));
+  app.use('/admin/receipts', express.json({ limit: '8mb' }));
+  app.use('/agent/receipts', express.json({ limit: '8mb' }));
   // Keep the exact bytes of every JSON body: provider webhooks sign them.
   app.use(
     express.json({

@@ -28,6 +28,7 @@ import {
 } from '@/lib/format';
 import { useSession } from '@/components/session';
 import { AgentSettings } from '@/components/agent/settings';
+import { ReceiptChecker } from '@/components/receipts/checker';
 import {
   Button,
   EmptyState,
@@ -49,7 +50,7 @@ import type {
   WithdrawalProof,
 } from '@/lib/types';
 
-type Tab = 'deposits' | 'withdrawals' | 'earnings' | 'settings';
+type Tab = 'deposits' | 'withdrawals' | 'earnings' | 'checker' | 'settings';
 
 const STATUS_TONE: Record<string, 'mint' | 'gold' | 'warn' | 'danger' | 'neutral'> = {
   PENDING: 'warn',
@@ -549,6 +550,7 @@ export default function AgentPage() {
           { value: 'deposits', label: 'Deposits', badge: openDeposits.length || undefined },
           { value: 'withdrawals', label: 'Payouts', badge: openWithdrawals.length || undefined },
           { value: 'earnings', label: 'Earnings' },
+          { value: 'checker', label: 'Check receipt' },
           { value: 'settings', label: 'Settings' },
         ]}
       />
@@ -824,6 +826,7 @@ export default function AgentPage() {
         </div>
       ) : null}
 
+      {tab === 'checker' ? <ReceiptChecker scope="agent" /> : null}
       {tab === 'settings' ? <AgentSettings /> : null}
 
       <Sheet open={creditTarget !== null} title="Credit deposit" onClose={() => setCreditTarget(null)}>

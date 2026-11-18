@@ -34,6 +34,7 @@ import type {
   ProviderKind,
   ProviderSession,
   ProviderTransaction,
+  ReceiptLookupResult,
   ReceiptVerificationView,
   RecheckReceiptResult,
   ReferralOverview,
@@ -720,6 +721,30 @@ export function confirmDepositReceiptByStaff(depositId: string, amount: number):
   return apiRequest(`/support/deposits/${depositId}/confirm-receipt`, {
     method: 'POST',
     body: { amount },
+  });
+}
+
+export interface ReceiptLookupInput {
+  providerCode: string;
+  reference: string;
+  accountNumber?: string;
+  phoneNumber?: string;
+  /** The bank's own response (HTML, JSON envelope or PDF), base64. */
+  payload?: { contentType?: string; bodyBase64: string };
+}
+
+export function fetchReceiptCheckerProviders(scope: 'staff' | 'agent'): Promise<DepositProvider[]> {
+  return apiRequest(scope === 'agent' ? '/agent/receipt-providers' : '/support/receipt-providers');
+}
+
+/** Read-only: looks a receipt up and returns what the bank says. */
+export function checkReceipt(
+  scope: 'staff' | 'agent',
+  input: ReceiptLookupInput,
+): Promise<ReceiptLookupResult> {
+  return apiRequest(scope === 'agent' ? '/agent/receipts/check' : '/support/receipts/check', {
+    method: 'POST',
+    body: input,
   });
 }
 

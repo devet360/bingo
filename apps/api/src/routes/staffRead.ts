@@ -32,6 +32,8 @@ import { cancelWithdrawalByStaff } from '../services/withdrawals';
 import { reviewWithdrawalProof } from '../services/withdrawalProofs';
 import { closeAgentTask } from '../services/agentTasks';
 import { confirmManualReceipt, recheckDepositReceipt } from '../services/receipts/deposits';
+import { checkReceipt } from '../services/receipts/checker';
+import { listAllProviders, serializeProvider } from '../services/providers';
 import {
   SUPPORT_PAGE_SIZE,
   claimSupportTicket,
@@ -90,6 +92,19 @@ const DepositParams = z.object({ depositId: z.string().uuid() });
 /** The amount a person read on the bank's receipt page, in minor units. */
 const ConfirmReceiptSchema = z.object({
   amount: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+});
+
+const ReceiptCheckSchema = z.object({
+  providerCode: z.string().trim().min(1).max(64),
+  reference: z.string().trim().min(1).max(512),
+  accountNumber: z.string().trim().max(64).optional(),
+  phoneNumber: z.string().trim().max(32).optional(),
+  payload: z
+    .object({
+      contentType: z.string().trim().max(128).optional(),
+      bodyBase64: z.string().min(1),
+    })
+    .optional(),
 });
 
 const ProofReviewParams = z.object({
@@ -570,6 +585,23 @@ staffReadRouter.post(
       userAgent: req.headers['user-agent'],
     });
     res.json({ data: serializeDeposit(deposit) });
+  }),
+);
+
+/** Read-only receipt lookup: no deposit needed and nothing is stored. */
+staffReadRouter.get(
+  '/receipt-providers',
+  asyncHandler(async (_req, res) => {
+    const providers = await listAllProviders();
+    res.json({ data: providers.map(serializeProvider) });
+  }),
+);
+
+staffReadRouter.post(
+  '/receipts/check',
+  asyncHandler(async (req, res) => {
+    const body = parse(ReceiptCheckSchema, req.body);
+    res.json({ data: await checkReceipt(body) });
   }),
 );
 

@@ -78,7 +78,7 @@ export async function serializePlayerDeposit(deposit: DepositWithProvider) {
   };
 }
 
-function toReceiptProvider(provider: DepositProvider): ReceiptProvider {
+export function toReceiptProvider(provider: DepositProvider): ReceiptProvider {
   const parser = createParser({
     code: provider.code,
     parser: provider.parser,

@@ -15,6 +15,7 @@ import { MarketingTab } from './marketing';
 import { ProvidersTab } from './providers';
 import { AgentsTab, DepositsTab, TransactionsTab, WithdrawalsTab } from './queues';
 import { ReceiptsTab } from './receipts';
+import { ReceiptChecker } from '@/components/receipts/checker';
 import { LoadingBlock } from './shared';
 import { TicketsTab } from './tickets';
 import { UsersTab } from './users';
@@ -26,7 +27,8 @@ type SupportTab =
   | 'deposits'
   | 'withdrawals'
   | 'agents'
-  | 'receipts';
+  | 'receipts'
+  | 'checker';
 type AdminTab =
   | 'overview'
   | SupportTab
@@ -127,6 +129,16 @@ const ADMIN_GROUPS: Array<{ labelKey: string; items: AdminNavItem[] }> = [
             <path d="M6 3h9l4 4v14H6z" />
             <path d="M15 3v4h4" />
             <path d="M9 12h6M9 16h4" />
+          </>
+        ),
+      },
+      {
+        value: 'checker',
+        labelKey: 'staff.tab.checker',
+        icon: (
+          <>
+            <path d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3" />
+            <path d="M4 12h16" />
           </>
         ),
       },
@@ -427,6 +439,7 @@ export function StaffConsole({ mode }: { mode: 'support' | 'admin' }) {
             { value: 'withdrawals', label: t('staff.tab.withdrawals') },
             { value: 'agents', label: t('staff.tab.agents') },
             { value: 'receipts', label: t('staff.tab.receipts') },
+            { value: 'checker', label: t('staff.tab.checker') },
           ]}
         />
 
@@ -436,6 +449,7 @@ export function StaffConsole({ mode }: { mode: 'support' | 'admin' }) {
         {supportTab === 'withdrawals' ? <WithdrawalsTab /> : null}
         {supportTab === 'agents' ? <AgentsTab canManage={false} /> : null}
         {supportTab === 'receipts' ? <ReceiptsTab /> : null}
+        {supportTab === 'checker' ? <ReceiptChecker scope="staff" /> : null}
       </div>
     );
   }
@@ -514,6 +528,7 @@ export function StaffConsole({ mode }: { mode: 'support' | 'admin' }) {
             {adminTab === 'withdrawals' ? <WithdrawalsTab /> : null}
             {adminTab === 'agents' ? <AgentsTab canManage /> : null}
             {adminTab === 'receipts' ? <ReceiptsTab /> : null}
+            {adminTab === 'checker' ? <ReceiptChecker scope="staff" /> : null}
             {adminTab === 'providers' ? <ProvidersTab /> : null}
             {adminTab === 'bingo' ? <BingoRoomsTab /> : null}
             {adminTab === 'marketing' ? <MarketingTab /> : null}

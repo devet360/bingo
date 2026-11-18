@@ -151,6 +151,58 @@ export interface RecheckReceiptResult {
   receipt: ReceiptCheck;
 }
 
+export type ReceiptLookupStatus =
+  | 'VERIFIED'
+  | 'FAILED'
+  | 'NOT_FOUND'
+  | 'NOT_MATCHED'
+  | 'NOT_VERIFIED'
+  | 'UNREACHABLE'
+  | 'UNSUPPORTED'
+  | 'INVALID_REFERENCE';
+
+/** The fields a parser read from the bank's own receipt. */
+export interface ReceiptLookupDetail {
+  verified: boolean;
+  amount?: number;
+  currency?: string;
+  senderName?: string;
+  senderAccount?: string;
+  receiverName?: string;
+  receiverAccount?: string;
+  reference?: string;
+  date?: string;
+  transactionStatus?: string;
+  transactionType?: string;
+  reason?: string;
+  invoiceNumber?: string;
+  settledAmount?: number;
+  orderId?: string;
+  branch?: string;
+  paymentChannel?: string;
+  amountInWords?: string;
+  serviceFee?: number;
+  totalPaid?: number;
+}
+
+/** A read-only receipt lookup: no deposit is created or changed. */
+export interface ReceiptLookupResult {
+  provider: { code: string; name: string; method: PaymentMethod };
+  reference: string;
+  status: ReceiptLookupStatus;
+  message: string;
+  url?: string;
+  source: VerificationSource;
+  parsed?: ReceiptLookupDetail;
+  usedBy: {
+    depositId: string | null;
+    depositCode: string | null;
+    depositStatus: DepositStatus | null;
+    verificationStatus: VerificationStatus;
+  } | null;
+  checkedAt: string;
+}
+
 export interface PayoutAccount {
   id: string;
   method: PaymentMethod;

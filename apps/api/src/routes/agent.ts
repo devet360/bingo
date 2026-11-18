@@ -36,6 +36,8 @@ import {
 import { releaseAgentTask } from '../services/agentTasks';
 import { listAgentProofs, submitWithdrawalProof } from '../services/withdrawalProofs';
 import { confirmManualReceipt, recheckDepositReceipt } from '../services/receipts/deposits';
+import { checkReceipt } from '../services/receipts/checker';
+import { listEnabledProviders, serializeProvider } from '../services/providers';
 import { getPlayerWallet } from '../services/wallet';
 
 const CodeParams = z.object({ code: z.string().regex(/^\d{6}$/, 'Expected a 6-digit code') });
@@ -48,6 +50,19 @@ const CreditSchema = z.object({
 /** The amount the agent reads on the bank's receipt page, in minor units. */
 const ConfirmReceiptSchema = z.object({
   amount: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+});
+
+const ReceiptCheckSchema = z.object({
+  providerCode: z.string().trim().min(1).max(64),
+  reference: z.string().trim().min(1).max(512),
+  accountNumber: z.string().trim().max(64).optional(),
+  phoneNumber: z.string().trim().max(32).optional(),
+  payload: z
+    .object({
+      contentType: z.string().trim().max(128).optional(),
+      bodyBase64: z.string().min(1),
+    })
+    .optional(),
 });
 
 const RejectSchema = z.object({ note: z.string().max(500).optional() });
@@ -329,6 +344,23 @@ agentRouter.post(
       agentProfileId: req.agent!.id,
     });
     res.json({ data: serializeDeposit(deposit) });
+  }),
+);
+
+/** Read-only receipt lookup for the rails the agent can work with. */
+agentRouter.get(
+  '/receipt-providers',
+  asyncHandler(async (_req, res) => {
+    const providers = await listEnabledProviders();
+    res.json({ data: providers.map(serializeProvider) });
+  }),
+);
+
+agentRouter.post(
+  '/receipts/check',
+  asyncHandler(async (req, res) => {
+    const body = parse(ReceiptCheckSchema, req.body);
+    res.json({ data: await checkReceipt(body) });
   }),
 );
 
