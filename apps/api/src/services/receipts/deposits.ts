@@ -26,12 +26,14 @@ import {
 } from '@prisma/client';
 import { prisma } from '../../lib/prisma';
 import { Errors } from '../../lib/errors';
+import { formatEtb } from '../../lib/money';
 import { logger } from '../../lib/logger';
 import { serializeDeposit, serializePaymentAccount } from '../../lib/serializers';
 import { isUniqueViolation } from '../../lib/tx';
 import { creditDeposit } from '../deposits';
 import { verifyClientPayload, verifyReceipt } from './verify';
-import { deriveReceiptAccount, mergeReceiptSubmission } from './reference';
+import { createParser } from './parsers';
+import { deriveReceiptAccount, mergeReceiptSubmission, normalizeInput } from './reference';
 import { ReferenceError, type ReceiptProvider, type VerifyOutcome } from './types';
 
 type DepositWithProvider = DepositRequest & { provider: DepositProvider | null };
@@ -77,6 +79,11 @@ export async function serializePlayerDeposit(deposit: DepositWithProvider) {
 }
 
 function toReceiptProvider(provider: DepositProvider): ReceiptProvider {
+  const parser = createParser({
+    code: provider.code,
+    parser: provider.parser,
+    supported: provider.supported,
+  });
   return {
     code: provider.code,
     name: provider.name,
@@ -89,6 +96,9 @@ function toReceiptProvider(provider: DepositProvider): ReceiptProvider {
     requiresPhone: provider.requiresPhone,
     opaqueReference: provider.opaqueReference,
     clientSide: provider.clientSide,
+    // Where the server sits is not where the bank answers: M-Pesa and
+    // Telebirr only reply to Ethiopian IPs.
+    geoBlocked: parser?.geoBlocked ?? false,
     supported: provider.supported,
     enabled: provider.enabled,
   };
@@ -370,6 +380,247 @@ export function queueDepositVerification(depositId: string): void {
   void verifyDepositReceipt({ depositId }).catch((error) => {
     logger.warn({ err: error, depositId }, 'background receipt verification failed');
   });
+}
+
+export type ReceiptCheckMode = 'SERVER' | 'CLIENT' | 'UNSUPPORTED';
+
+export interface ReceiptCheck {
+  mode: ReceiptCheckMode;
+  message: string;
+  /** CLIENT mode: the bank page a person on an Ethiopian network can open. */
+  url?: string;
+}
+
+async function findOpenDeposit(depositId: string): Promise<DepositWithProvider> {
+  const deposit = await prisma.depositRequest.findUnique({
+    where: { id: depositId },
+    include: { provider: true },
+  });
+  if (!deposit) throw Errors.notFound('Deposit request');
+  if (deposit.status !== 'PENDING' && deposit.status !== 'PROCESSING') {
+    throw Errors.conflict(`Deposit is ${deposit.status.toLowerCase()}`, 'DEPOSIT_NOT_OPEN');
+  }
+  return deposit;
+}
+
+/**
+ * Re-check an open deposit's stored receipt on demand (the agent's or staff's
+ * "Verify receipt" action).
+ *
+ * Rails the API can reach are checked server-side. M-Pesa and Telebirr answer
+ * only Ethiopian IPs and send no CORS headers, so a browser cannot read them
+ * either: the caller gets the bank page to open and confirms what it shows
+ * through confirmManualReceipt.
+ */
+export async function recheckDepositReceipt(params: {
+  depositId: string;
+  agentProfileId?: string;
+}): Promise<{ check: ReceiptCheck; deposit: DepositRequest }> {
+  const deposit = await findOpenDeposit(params.depositId);
+  if (params.agentProfileId && deposit.agentProfileId && deposit.agentProfileId !== params.agentProfileId) {
+    throw Errors.forbidden('This deposit is assigned to another agent', 'DEPOSIT_ASSIGNED');
+  }
+  if (!deposit.provider) {
+    throw Errors.conflict('This deposit has no receipt provider attached', 'PROVIDER_REQUIRED');
+  }
+
+  const provider = toReceiptProvider(deposit.provider);
+  if (!provider.supported) {
+    return {
+      check: {
+        mode: 'UNSUPPORTED',
+        message: 'This method is confirmed by the agent; there is no bank receipt to check.',
+      },
+      deposit,
+    };
+  }
+
+  const reference = deposit.receiptReference?.trim();
+  if (!reference) {
+    throw Errors.badRequest('No receipt reference was submitted for this deposit yet.', 'RECEIPT_REFERENCE_REQUIRED');
+  }
+
+  let input: { reference: string; accountNumber?: string; phoneNumber?: string };
+  try {
+    input = normalizeInput(
+      provider,
+      {
+        reference,
+        accountNumber: deposit.receiptAccount ?? (await resolveReceiptAccount(deposit)),
+        phoneNumber: deposit.receiptPhone ?? undefined,
+      },
+      { requireAccount: false },
+    );
+  } catch (error) {
+    if (error instanceof ReferenceError) {
+      throw Errors.badRequest(error.message, 'INVALID_RECEIPT_REFERENCE');
+    }
+    throw error;
+  }
+
+  const parser = createParser(provider);
+  const url = (() => {
+    try {
+      return parser?.buildUrl(input);
+    } catch {
+      return undefined;
+    }
+  })();
+
+  if (provider.geoBlocked) {
+    return {
+      check: {
+        mode: 'CLIENT',
+        message: `${provider.name} only answers Ethiopian IPs. Open the receipt and confirm the amount it shows.`,
+        url,
+      },
+      deposit,
+    };
+  }
+
+  const outcome = await verifyReceipt(provider, input, VerificationSource.SERVER);
+  if (outcome.status === 'UNREACHABLE') {
+    const updated = await prisma.depositRequest.update({
+      where: { id: deposit.id },
+      data: {
+        verificationStatus: VerificationStatus.MANUAL,
+        verificationMessage: outcome.message,
+        verificationSource: VerificationSource.SERVER,
+      },
+    });
+    return {
+      check: { mode: 'SERVER', message: outcome.message, url: outcome.url ?? url },
+      deposit: updated,
+    };
+  }
+
+  await storeOutcome(deposit, outcome, VerificationSource.SERVER);
+  const verified = outcome.status === 'VERIFIED';
+  const updated = await prisma.depositRequest.update({
+    where: { id: deposit.id },
+    data: {
+      verificationStatus: verified ? VerificationStatus.VERIFIED : VerificationStatus.FAILED,
+      verificationMessage: outcome.message,
+      verificationSource: VerificationSource.SERVER,
+      verifiedAt: verified ? new Date() : null,
+    },
+  });
+  return {
+    check: { mode: 'SERVER', message: outcome.message, url: outcome.url ?? url },
+    deposit: updated,
+  };
+}
+
+/**
+ * Record a receipt a person has read on the bank's own page (M-Pesa and
+ * Telebirr, whose endpoints a browser cannot read cross-origin). The amount
+ * must match the deposit exactly, and the reference keeps its
+ * one-receipt-one-deposit guarantee.
+ */
+export async function confirmManualReceipt(params: {
+  depositId: string;
+  actorUserId: string;
+  amount: bigint;
+  agentProfileId?: string;
+}): Promise<DepositRequest> {
+  const deposit = await findOpenDeposit(params.depositId);
+  if (params.agentProfileId && deposit.agentProfileId && deposit.agentProfileId !== params.agentProfileId) {
+    throw Errors.forbidden('This deposit is assigned to another agent', 'DEPOSIT_ASSIGNED');
+  }
+  if (!deposit.provider) {
+    throw Errors.conflict('This deposit has no receipt provider attached', 'PROVIDER_REQUIRED');
+  }
+  const provider = toReceiptProvider(deposit.provider);
+  if (!provider.supported) {
+    throw Errors.badRequest(
+      'This method is confirmed by the agent; there is no bank receipt to confirm.',
+      'RECEIPT_NOT_SUPPORTED',
+    );
+  }
+
+  const reference = deposit.receiptReference?.trim();
+  if (!reference) {
+    throw Errors.badRequest('No receipt reference was submitted for this deposit yet.', 'RECEIPT_REFERENCE_REQUIRED');
+  }
+  if (deposit.verificationStatus === VerificationStatus.VERIFIED) return deposit;
+  if (params.amount !== deposit.amount) {
+    throw Errors.badRequest(
+      `The receipt shows ${formatEtb(params.amount)}, but the deposit is for ${formatEtb(deposit.amount)}.`,
+      'RECEIPT_AMOUNT_MISMATCH',
+    );
+  }
+
+  const message = 'Confirmed by staff from the bank receipt.';
+  await storeManualConfirmation(deposit, message, params.actorUserId, params.amount);
+  return prisma.depositRequest.update({
+    where: { id: deposit.id },
+    data: {
+      verificationStatus: VerificationStatus.VERIFIED,
+      verificationMessage: message,
+      // A person read the receipt; it is not a server or client fetch.
+      verificationSource: null,
+      verifiedAt: new Date(),
+    },
+  });
+}
+
+async function storeManualConfirmation(
+  deposit: DepositWithProvider,
+  message: string,
+  actorUserId: string,
+  amount: bigint,
+): Promise<void> {
+  const providerCode = deposit.providerCode!;
+  const reference = deposit.receiptReference!;
+
+  const conflict = await prisma.receiptVerification.findUnique({
+    where: { providerCode_reference: { providerCode, reference } },
+  });
+  if (conflict && conflict.depositId && conflict.depositId !== deposit.id) {
+    throw Errors.conflict('This receipt has already been used for another deposit', 'RECEIPT_ALREADY_USED');
+  }
+
+  const base = {
+    providerCode,
+    reference,
+    depositId: deposit.id,
+    status: VerificationStatus.VERIFIED,
+    source: null,
+    amount,
+    currency: 'ETB',
+    message,
+    detail: {
+      confirmedByUserId: actorUserId,
+      confirmedAt: new Date().toISOString(),
+      confirmedAmount: amount.toString(),
+    },
+    verifiedAt: new Date(),
+  };
+
+  try {
+    const byDeposit = await prisma.receiptVerification.findUnique({ where: { depositId: deposit.id } });
+    if (byDeposit) {
+      await prisma.receiptVerification.update({
+        where: { id: byDeposit.id },
+        data: { ...base, attempts: { increment: 1 } },
+      });
+    } else {
+      await prisma.receiptVerification.create({ data: { ...base, attempts: 1 } });
+    }
+  } catch (e) {
+    if (!isUniqueViolation(e)) throw e;
+    const row = await prisma.receiptVerification.findUnique({
+      where: { providerCode_reference: { providerCode, reference } },
+    });
+    if (row && row.depositId && row.depositId !== deposit.id) {
+      throw Errors.conflict('This receipt has already been used for another deposit', 'RECEIPT_ALREADY_USED');
+    }
+    if (!row) throw e;
+    await prisma.receiptVerification.update({
+      where: { id: row.id },
+      data: { ...base, attempts: { increment: 1 } },
+    });
+  }
 }
 
 /**

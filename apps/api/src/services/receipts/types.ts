@@ -51,6 +51,8 @@ export interface ReceiptProvider {
   requiresPhone: boolean;
   opaqueReference: boolean;
   clientSide: boolean;
+  /** The bank only answers Ethiopian IPs: the deployed API cannot check it. */
+  geoBlocked?: boolean;
   supported: boolean;
   enabled: boolean;
 }

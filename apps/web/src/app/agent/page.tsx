@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from 'react';
 import {
   ApiError,
   claimAgentDeposit,
+  confirmAgentDepositReceipt,
   creditAgentDeposit,
   fetchAgentCommissions,
   fetchAgentDeposits,
@@ -11,6 +12,7 @@ import {
   fetchAgentProfile,
   fetchAgentWithdrawalProofs,
   fetchAgentWithdrawals,
+  recheckAgentDepositReceipt,
   redeemAgentWithdrawal,
   rejectAgentDeposit,
   setAgentAvailability,
@@ -114,6 +116,14 @@ export default function AgentPage() {
   const [payoutCode, setPayoutCode] = useState('');
   const [creditTarget, setCreditTarget] = useState<Deposit | null>(null);
   const [receiptTarget, setReceiptTarget] = useState<Deposit | null>(null);
+  const [verifyTarget, setVerifyTarget] = useState<{
+    deposit: Deposit;
+    message: string;
+    url?: string;
+  } | null>(null);
+  const [verifyAmount, setVerifyAmount] = useState('');
+  const [verifyBusy, setVerifyBusy] = useState(false);
+  const [verifyError, setVerifyError] = useState<string | null>(null);
   const [creditAmount, setCreditAmount] = useState('');
   const [redeemTarget, setRedeemTarget] = useState<Withdrawal | null>(null);
   const [actionNote, setActionNote] = useState('');
@@ -283,6 +293,48 @@ export default function AgentPage() {
       return;
     }
     void runAction('claim-code', () => claimAgentDeposit(value), `Deposit ${value} is now yours to credit.`);
+  };
+
+  const verifyReceipt = async (deposit: Deposit) => {
+    setBusyKey(`verify-${deposit.id}`);
+    setError(null);
+    setNotice(null);
+    try {
+      const result = await recheckAgentDepositReceipt(deposit.code);
+      await loadAll();
+      if (result.receipt.mode === 'CLIENT') {
+        setVerifyTarget({ deposit: result.data, message: result.receipt.message, url: result.receipt.url });
+        setVerifyAmount('');
+        setVerifyError(null);
+      } else {
+        setNotice(result.receipt.message);
+      }
+    } catch (cause) {
+      setError(cause instanceof ApiError ? cause.message : 'Receipt check failed.');
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
+  const confirmReceipt = async () => {
+    if (!verifyTarget) return;
+    const minor = creditsToMinor(verifyAmount);
+    if (minor === null) {
+      setVerifyError('Enter the amount shown on the receipt, like 50 or 12.50.');
+      return;
+    }
+    setVerifyBusy(true);
+    setVerifyError(null);
+    try {
+      await confirmAgentDepositReceipt(verifyTarget.deposit.code, minor);
+      setVerifyTarget(null);
+      setNotice(`Deposit ${verifyTarget.deposit.code} verified. Credit it to finish.`);
+      await loadAll();
+    } catch (cause) {
+      setVerifyError(cause instanceof ApiError ? cause.message : 'Confirmation failed.');
+    } finally {
+      setVerifyBusy(false);
+    }
   };
 
   const creditByCode = () => {
@@ -558,6 +610,19 @@ export default function AgentPage() {
                           View receipt
                         </Button>
                       ) : null}
+                      {(unassigned || mine) &&
+                      deposit.receiptReference &&
+                      deposit.verificationStatus !== 'NOT_REQUIRED' &&
+                      deposit.verificationStatus !== 'VERIFIED' ? (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          loading={busyKey === `verify-${deposit.id}`}
+                          onClick={() => void verifyReceipt(deposit)}
+                        >
+                          Verify receipt
+                        </Button>
+                      ) : null}
                       {unassigned ? (
                         <Button
                           size="sm"
@@ -821,6 +886,57 @@ export default function AgentPage() {
                 className="max-h-[55vh] w-full rounded-xl object-contain"
               />
             ) : null}
+          </div>
+        ) : null}
+      </Sheet>
+
+      <Sheet
+        open={verifyTarget !== null}
+        title="Verify receipt"
+        onClose={() => {
+          if (!verifyBusy) setVerifyTarget(null);
+        }}
+      >
+        {verifyTarget ? (
+          <div className="space-y-3">
+            <div className="rounded-xl bg-ink/50 p-3 text-xs">
+              <p>
+                Deposit{' '}
+                <span className="font-display font-bold tracking-[0.2em] text-gold">
+                  {verifyTarget.deposit.code}
+                </span>
+              </p>
+              <p className="mt-1 text-muted">
+                Amount due {formatCredits(verifyTarget.deposit.amount)} ETB · ref{' '}
+                {verifyTarget.deposit.receiptReference}
+              </p>
+              <p className="mt-2 text-muted">{verifyTarget.message}</p>
+            </div>
+            {verifyTarget.url ? (
+              <a
+                href={verifyTarget.url}
+                target="_blank"
+                rel="noreferrer"
+                className="block rounded-xl border border-line bg-transparent px-4 py-3 text-center text-xs font-semibold text-text hover:border-mint/50 hover:bg-raised"
+              >
+                Open the bank receipt
+              </a>
+            ) : null}
+            <Input
+              label="Amount shown on the receipt (ETB)"
+              placeholder="e.g. 50.00"
+              inputMode="decimal"
+              value={verifyAmount}
+              onChange={(event) => setVerifyAmount(event.target.value)}
+            />
+            {verifyError ? <ErrorNote>{verifyError}</ErrorNote> : null}
+            <Button className="w-full" loading={verifyBusy} onClick={() => void confirmReceipt()}>
+              Confirm receipt
+            </Button>
+            <p className="text-[10px] text-muted">
+              The amount must match the deposit exactly. Confirming marks the deposit verified; the
+              player is still credited when you press Credit.
+            </p>
           </div>
         ) : null}
       </Sheet>

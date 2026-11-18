@@ -5,6 +5,7 @@ import {
   ApiError,
   cancelDepositByStaff,
   cancelWithdrawalByStaff,
+  confirmDepositReceiptByStaff,
   createAgentPaymentAccount,
   createStaffMember,
   fetchMediaBlobUrl,
@@ -13,6 +14,7 @@ import {
   fetchStaffTransactions,
   fetchStaffWithdrawals,
   newIdempotencyKey,
+  recheckDepositReceiptByStaff,
   reviewWithdrawalProof,
   topUpAgentFloat,
   updateAgentByAdmin,
@@ -203,6 +205,15 @@ export function DepositsTab() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [receiptTarget, setReceiptTarget] = useState<StaffDeposit | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [verifyTarget, setVerifyTarget] = useState<{
+    deposit: StaffDeposit;
+    message: string;
+    url?: string;
+  } | null>(null);
+  const [verifyAmount, setVerifyAmount] = useState('');
+  const [verifyBusy, setVerifyBusy] = useState(false);
+  const [verifyError, setVerifyError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -234,6 +245,51 @@ export function DepositsTab() {
     }
   };
 
+  const verifyReceipt = async (deposit: StaffDeposit) => {
+    setBusy(`verify:${deposit.id}`);
+    setNotice(null);
+    try {
+      const result = await recheckDepositReceiptByStaff(deposit.id);
+      await load();
+      if (result.receipt.mode === 'CLIENT') {
+        setVerifyTarget({
+          deposit: { ...deposit, ...result.data },
+          message: result.receipt.message,
+          url: result.receipt.url,
+        });
+        setVerifyAmount('');
+        setVerifyError(null);
+      } else {
+        setNotice(result.receipt.message);
+      }
+    } catch (caught) {
+      setError(caught instanceof ApiError ? caught.message : t('common.failed'));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const confirmReceipt = async () => {
+    if (!verifyTarget) return;
+    const minor = creditsToMinor(verifyAmount);
+    if (minor === null) {
+      setVerifyError('Enter the amount shown on the receipt, like 50 or 12.50.');
+      return;
+    }
+    setVerifyBusy(true);
+    setVerifyError(null);
+    try {
+      await confirmDepositReceiptByStaff(verifyTarget.deposit.id, minor);
+      setVerifyTarget(null);
+      setNotice('Receipt confirmed. The deposit is verified.');
+      await load();
+    } catch (caught) {
+      setVerifyError(caught instanceof ApiError ? caught.message : 'Confirmation failed.');
+    } finally {
+      setVerifyBusy(false);
+    }
+  };
+
   return (
     <Panel className="overflow-hidden">
       <FilterBar>
@@ -259,6 +315,9 @@ export function DepositsTab() {
         <div className="p-4">
           <ErrorNote>{error}</ErrorNote>
         </div>
+      ) : null}
+      {notice ? (
+        <div className="border-b border-line/60 px-4 py-2 text-xs text-mint">{notice}</div>
       ) : null}
       {rows === null ? (
         <LoadingBlock />
@@ -290,6 +349,20 @@ export function DepositsTab() {
                 {deposit.receiptUrl ? (
                   <Button size="sm" variant="outline" onClick={() => setReceiptTarget(deposit)}>
                     View receipt
+                  </Button>
+                ) : null}
+                {(deposit.status === 'PENDING' || deposit.status === 'PROCESSING') &&
+                deposit.receiptReference &&
+                deposit.verificationStatus !== 'NOT_REQUIRED' &&
+                deposit.verificationStatus !== 'VERIFIED' ? (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    loading={busy === `verify:${deposit.id}`}
+                    disabled={busy === `verify:${deposit.id}`}
+                    onClick={() => void verifyReceipt(deposit)}
+                  >
+                    Verify receipt
                   </Button>
                 ) : null}
                 {deposit.status === 'PENDING' || deposit.status === 'PROCESSING' ? (
@@ -341,6 +414,61 @@ export function DepositsTab() {
                 className="max-h-[55vh] w-full rounded-xl object-contain"
               />
             ) : null}
+          </div>
+        ) : null}
+      </Sheet>
+      <Sheet
+        open={verifyTarget !== null}
+        title="Verify receipt"
+        onClose={() => {
+          if (!verifyBusy) setVerifyTarget(null);
+        }}
+      >
+        {verifyTarget ? (
+          <div className="space-y-3">
+            <div className="rounded-xl bg-ink/50 p-3 text-xs">
+              <p>
+                Deposit{' '}
+                <span className="font-display font-bold tracking-[0.2em] text-gold">
+                  {verifyTarget.deposit.code}
+                </span>
+              </p>
+              <p className="mt-1 text-muted">
+                {verifyTarget.deposit.player.displayName}
+                {verifyTarget.deposit.player.phone ? ` · ${verifyTarget.deposit.player.phone}` : ''}
+                {verifyTarget.deposit.agentCode ? ` · agent ${verifyTarget.deposit.agentCode}` : ''}
+              </p>
+              <p className="mt-1 text-muted">
+                Amount due {formatCredits(verifyTarget.deposit.amount)} · ref{' '}
+                {verifyTarget.deposit.receiptReference}
+              </p>
+              <p className="mt-2 text-muted">{verifyTarget.message}</p>
+            </div>
+            {verifyTarget.url ? (
+              <a
+                href={verifyTarget.url}
+                target="_blank"
+                rel="noreferrer"
+                className="block rounded-xl border border-line bg-transparent px-4 py-3 text-center text-xs font-semibold text-text hover:border-mint/50 hover:bg-raised"
+              >
+                Open the bank receipt
+              </a>
+            ) : null}
+            <Input
+              label="Amount shown on the receipt (ETB)"
+              placeholder="e.g. 50.00"
+              inputMode="decimal"
+              value={verifyAmount}
+              onChange={(event) => setVerifyAmount(event.target.value)}
+            />
+            {verifyError ? <ErrorNote>{verifyError}</ErrorNote> : null}
+            <Button className="w-full" loading={verifyBusy} onClick={() => void confirmReceipt()}>
+              Confirm receipt
+            </Button>
+            <p className="text-[10px] text-muted">
+              The amount must match the deposit exactly. Confirming marks the deposit verified; you
+              still credit it from the queue.
+            </p>
           </div>
         ) : null}
       </Sheet>

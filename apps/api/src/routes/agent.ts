@@ -3,6 +3,7 @@ import { DepositStatus, PaymentMethod, WithdrawalStatus } from '@prisma/client';
 import { z } from 'zod';
 import { parse } from '../lib/validate';
 import { asyncHandler } from '../lib/async';
+import { Errors } from '../lib/errors';
 import { prisma } from '../lib/prisma';
 import {
   serializeAgent,
@@ -34,6 +35,7 @@ import {
 } from '../services/withdrawals';
 import { releaseAgentTask } from '../services/agentTasks';
 import { listAgentProofs, submitWithdrawalProof } from '../services/withdrawalProofs';
+import { confirmManualReceipt, recheckDepositReceipt } from '../services/receipts/deposits';
 import { getPlayerWallet } from '../services/wallet';
 
 const CodeParams = z.object({ code: z.string().regex(/^\d{6}$/, 'Expected a 6-digit code') });
@@ -41,6 +43,11 @@ const CodeParams = z.object({ code: z.string().regex(/^\d{6}$/, 'Expected a 6-di
 const CreditSchema = z.object({
   creditedAmount: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
   note: z.string().max(500).optional(),
+});
+
+/** The amount the agent reads on the bank's receipt page, in minor units. */
+const ConfirmReceiptSchema = z.object({
+  amount: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
 });
 
 const RejectSchema = z.object({ note: z.string().max(500).optional() });
@@ -282,6 +289,45 @@ agentRouter.post(
     const params = parse(CodeParams, req.params);
     const body = parse(RejectSchema, req.body);
     const deposit = await rejectDeposit(req.auth!.userId, params.code, body.note);
+    res.json({ data: serializeDeposit(deposit) });
+  }),
+);
+
+async function depositIdByCode(code: string): Promise<string> {
+  const deposit = await prisma.depositRequest.findFirst({
+    where: { code },
+    orderBy: { createdAt: 'desc' },
+    select: { id: true },
+  });
+  if (!deposit) throw Errors.notFound('Deposit request');
+  return deposit.id;
+}
+
+agentRouter.post(
+  '/deposits/:code/recheck-receipt',
+  asyncHandler(async (req, res) => {
+    const params = parse(CodeParams, req.params);
+    const depositId = await depositIdByCode(params.code);
+    const { check, deposit } = await recheckDepositReceipt({
+      depositId,
+      agentProfileId: req.agent!.id,
+    });
+    res.json({ data: serializeDeposit(deposit), receipt: check });
+  }),
+);
+
+agentRouter.post(
+  '/deposits/:code/confirm-receipt',
+  asyncHandler(async (req, res) => {
+    const params = parse(CodeParams, req.params);
+    const body = parse(ConfirmReceiptSchema, req.body);
+    const depositId = await depositIdByCode(params.code);
+    const deposit = await confirmManualReceipt({
+      depositId,
+      actorUserId: req.auth!.userId,
+      amount: BigInt(body.amount),
+      agentProfileId: req.agent!.id,
+    });
     res.json({ data: serializeDeposit(deposit) });
   }),
 );

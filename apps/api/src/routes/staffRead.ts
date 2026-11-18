@@ -31,6 +31,7 @@ import { writeAudit } from '../services/audit';
 import { cancelWithdrawalByStaff } from '../services/withdrawals';
 import { reviewWithdrawalProof } from '../services/withdrawalProofs';
 import { closeAgentTask } from '../services/agentTasks';
+import { confirmManualReceipt, recheckDepositReceipt } from '../services/receipts/deposits';
 import {
   SUPPORT_PAGE_SIZE,
   claimSupportTicket,
@@ -82,6 +83,13 @@ const UserStatusSchema = z.object({
 const ProofReviewSchema = z.object({
   decision: z.enum(['VERIFIED', 'FAILED']),
   note: z.string().trim().max(500).optional(),
+});
+
+const DepositParams = z.object({ depositId: z.string().uuid() });
+
+/** The amount a person read on the bank's receipt page, in minor units. */
+const ConfirmReceiptSchema = z.object({
+  amount: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
 });
 
 const ProofReviewParams = z.object({
@@ -519,6 +527,49 @@ staffReadRouter.post(
       userAgent: req.headers['user-agent'],
     });
     res.json({ data: serializeDeposit(updated) });
+  }),
+);
+
+staffReadRouter.post(
+  '/deposits/:depositId/recheck-receipt',
+  asyncHandler(async (req, res) => {
+    const params = parse(DepositParams, req.params);
+    const { check, deposit } = await recheckDepositReceipt({ depositId: params.depositId });
+    res.json({ data: serializeDeposit(deposit), receipt: check });
+  }),
+);
+
+staffReadRouter.post(
+  '/deposits/:depositId/confirm-receipt',
+  asyncHandler(async (req, res) => {
+    const params = parse(DepositParams, req.params);
+    const body = parse(ConfirmReceiptSchema, req.body);
+    const before = await prisma.depositRequest.findUnique({
+      where: { id: params.depositId },
+      select: { verificationStatus: true, receiptReference: true },
+    });
+    if (!before) throw Errors.notFound('Deposit');
+    const deposit = await confirmManualReceipt({
+      depositId: params.depositId,
+      actorUserId: req.auth!.userId,
+      amount: BigInt(body.amount),
+    });
+    await writeAudit({
+      actorId: req.auth!.userId,
+      actorRole: req.auth!.role,
+      action: 'deposit.receiptConfirm',
+      entityType: 'DepositRequest',
+      entityId: deposit.id,
+      before: { verificationStatus: before.verificationStatus, reference: before.receiptReference },
+      after: {
+        verificationStatus: deposit.verificationStatus,
+        reference: deposit.receiptReference,
+        amount: body.amount,
+      },
+      ip: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
+    res.json({ data: serializeDeposit(deposit) });
   }),
 );
 

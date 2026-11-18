@@ -143,10 +143,10 @@ Two verification paths exist for supported rails:
 - **Server-side** (`clientSide: false`): the API fetches the bank page itself after the
   reference is submitted, and the player app can poll `GET /wallet/deposits/:id`.
 - **Client-side** (`clientSide: true`, e.g. Telebirr, M-Pesa): the bank only answers
-  Ethiopian IPs. The API still attempts the fetch (the deployment is in Ethiopia) and
-  verifies when it gets through; otherwise the deposit goes to the agent as `MANUAL`.
-  The Mini App no longer fetches the bank page in the browser — neither issuer sends
-  CORS headers, so a browser read can never succeed.
+  Ethiopian IPs. The deployed API is not in Ethiopia and neither issuer sends CORS
+  headers, so this receipt cannot be read automatically by the server or by a browser.
+  The deposit waits as `MANUAL` until an agent or staff member opens the receipt from an
+  Ethiopian connection and confirms the amount (see below).
 
 The payload from the phone is **untrusted**. The server re-parses it against the
 code-owned parser, ignores any amount/status the client might claim, stores one
@@ -168,6 +168,23 @@ Anything short of that leaves the deposit in `PENDING`/`PROCESSING` for the agen
 confirm manually with `POST /agent/deposits/:code/credit`. Each attempt is audited with
 its `verificationSource` (`SERVER`, `CLIENT`, `RELAY`) and is visible to staff in
 `GET /support/receipts`.
+
+**Verify receipt (agent and staff).** An open deposit with a stored reference exposes
+one action, `recheck-receipt`. It answers with a `receipt.mode`:
+
+- `SERVER` — the API re-fetched the bank and the deposit's `verificationStatus` now
+  reflects the result. Nothing else is needed.
+- `CLIENT` — the rail is geo-blocked (`Telebirr`, `M-Pesa`). The response carries the
+  bank receipt `url` and no fetch is attempted. The person opens the link from an
+  Ethiopian network, reads the amount, and posts it to `confirm-receipt`. The amount
+  must equal the deposit exactly (`400 RECEIPT_AMOUNT_MISMATCH`), and the reference
+  keeps its one-receipt-one-deposit guarantee (`409 RECEIPT_ALREADY_USED`). The row is
+  stored with `source: null` — a person read it, not a fetch. The staff variant also
+  writes an audit entry (`deposit.receiptConfirm`).
+- `UNSUPPORTED` — the rail has no bank receipt; the agent confirms payment directly.
+
+Confirming never credits: the agent still calls `credit` (or the player keeps paying
+automatically when auto-credit conditions hold).
 
 ---
 
@@ -197,6 +214,8 @@ Commission rates are **not** exposed on public agent profiles.
 | POST | `/agent/deposits/:code/claim` | — | Moves `PENDING → PROCESSING`, assigns to caller |
 | POST | `/agent/deposits/:code/credit` | `{ creditedAmount?, note? }` | Atomic float → player credit + commission |
 | POST | `/agent/deposits/:code/reject` | `{ note? }` | No money moves |
+| POST | `/agent/deposits/:code/recheck-receipt` | — | `{ data, receipt: { mode, message, url? } }`; `SERVER` re-fetches, `CLIENT` returns the bank link |
+| POST | `/agent/deposits/:code/confirm-receipt` | `{ amount }` | Records a person-read receipt; amount must match (minor units). Does not credit |
 | GET | `/agent/withdrawals` | `?status=` | Default: `ESCROWED` payouts for this agent |
 | POST | `/agent/withdrawals/redeem` | `{ payoutCode, note? }` | Releases escrow to float + fee to treasury + commission |
 | GET | `/agent/commissions` | `?limit=` | |
@@ -232,6 +251,8 @@ client opts into the full envelope for these.
 | GET | `/support/transactions` | `?kind=&refType=&userId=&page=` | Ledger journals with entries |
 | GET | `/support/deposits` | `?status=&userId=&page=` | |
 | POST | `/support/deposits/:depositId/cancel` | — | Only open deposits; releases nothing that was already credited |
+| POST | `/support/deposits/:depositId/recheck-receipt` | — | Same check as the agent route, for any open deposit; returns `{ data, receipt }` |
+| POST | `/support/deposits/:depositId/confirm-receipt` | `{ amount }` | Records a person-read receipt and audits `deposit.receiptConfirm`; does not credit |
 | GET | `/support/withdrawals` | `?status=&userId=&page=` | |
 | POST | `/support/withdrawals/:withdrawalId/cancel` | — | Only `ESCROWED`; returns the locked funds to the player |
 | GET | `/support/agents` | `?status=` | Float, escrow and commission summary |

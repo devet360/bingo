@@ -35,6 +35,7 @@ import type {
   ProviderSession,
   ProviderTransaction,
   ReceiptVerificationView,
+  RecheckReceiptResult,
   ReferralOverview,
   Role,
   Room,
@@ -598,6 +599,21 @@ export function rejectAgentDeposit(code: string, note?: string): Promise<Deposit
   });
 }
 
+export function recheckAgentDepositReceipt(code: string): Promise<RecheckReceiptResult> {
+  return apiRequest(`/agent/deposits/${encodeURIComponent(code)}/recheck-receipt`, {
+    method: 'POST',
+    fullEnvelope: true,
+  });
+}
+
+/** `amount` is the figure read on the bank receipt, in minor units. */
+export function confirmAgentDepositReceipt(code: string, amount: number): Promise<Deposit> {
+  return apiRequest(`/agent/deposits/${encodeURIComponent(code)}/confirm-receipt`, {
+    method: 'POST',
+    body: { amount },
+  });
+}
+
 export function fetchAgentWithdrawals(status?: WithdrawalStatus): Promise<Withdrawal[]> {
   return apiRequest(`/agent/withdrawals${status ? `?status=${status}` : ''}`);
 }
@@ -690,6 +706,21 @@ export function reviewWithdrawalProof(
 
 export function cancelDepositByStaff(depositId: string): Promise<Deposit> {
   return apiRequest(`/support/deposits/${depositId}/cancel`, { method: 'POST' });
+}
+
+export function recheckDepositReceiptByStaff(depositId: string): Promise<RecheckReceiptResult> {
+  return apiRequest(`/support/deposits/${depositId}/recheck-receipt`, {
+    method: 'POST',
+    fullEnvelope: true,
+  });
+}
+
+/** `amount` is the figure read on the bank receipt, in minor units. */
+export function confirmDepositReceiptByStaff(depositId: string, amount: number): Promise<Deposit> {
+  return apiRequest(`/support/deposits/${depositId}/confirm-receipt`, {
+    method: 'POST',
+    body: { amount },
+  });
 }
 
 export function fetchStaffReceipts(

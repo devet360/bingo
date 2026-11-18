@@ -138,6 +138,19 @@ export interface VerifyReceiptResult {
   autoCredited: boolean;
 }
 
+/** What a receipt re-check found: checked here, or for the person to read. */
+export interface ReceiptCheck {
+  mode: 'SERVER' | 'CLIENT' | 'UNSUPPORTED';
+  message: string;
+  /** CLIENT mode: the bank page to open from an Ethiopian network. */
+  url?: string;
+}
+
+export interface RecheckReceiptResult {
+  data: Deposit;
+  receipt: ReceiptCheck;
+}
+
 export interface PayoutAccount {
   id: string;
   method: PaymentMethod;
