@@ -339,8 +339,11 @@ without a relay, or when it fails, a reference-only lookup returns `UNREACHABLE`
 with the receipt `url` instead of attempting a doomed request. The same rails parse
 normally when their payload is attached.
 
-The relay returns the bank's raw answer and the API still runs its own parser and
-gate; `source: "RELAY"` records where the bytes came from. Deposit verification and
+The relay extracts the receipt's text lines on the Ethiopian host (page text for
+Telebirr, PDF text for M-Pesa), so only kilobytes cross the wire; the API still
+runs its own parser and gate. If extraction is unavailable, the API re-fetches
+the bank's raw answer through the same relay and parses that instead.
+`source: "RELAY"` records where the bytes came from. Deposit verification and
 the agent/staff "Verify receipt" action use the same precedence: submitted payload,
 then relay, then a direct fetch.
 

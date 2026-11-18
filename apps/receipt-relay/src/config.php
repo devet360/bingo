@@ -8,7 +8,7 @@ declare(strict_types=1);
  */
 return [
     'app' => 'bingo-receipt-relay',
-    'version' => '1.0.0',
+    'version' => '1.1.0',
     'user_agent' => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
     'providers' => [
         'telebirr' => [
@@ -16,7 +16,7 @@ return [
             'url' => 'https://transactioninfo.ethiotelecom.et/receipt/%s',
             'reference_pattern' => '/^[A-Za-z0-9][A-Za-z0-9._-]{5,63}$/',
             'link_patterns' => [
-                '#^https?://(?:www\.)?transactioninfo\.ethiotelecom\.et/receipt/([^/?#]+)#i',
+                '~^https?://(?:www\.)?transactioninfo\.ethiotelecom\.et/receipt/([^/?#]+)~i',
             ],
             'headers' => [],
             'connect_timeout' => 5,
@@ -28,7 +28,7 @@ return [
             'url' => 'https://m-pesabusiness.safaricom.et/api/receipt/getReceipt?trxNo=%s',
             'reference_pattern' => '/^[A-Za-z0-9][A-Za-z0-9._-]{5,63}$/',
             'link_patterns' => [
-                '#^https?://(?:www\.)?m-pesabusiness\.safaricom\.et/[^\s"<>]*[?&]trxNo=([^&#\s]+)#i',
+                '~^https?://(?:www\.)?m-pesabusiness\.safaricom\.et/[^\s"<>]*[?&]trxNo=([^&#\s]+)~i',
             ],
             'headers' => [
                 'Accept: application/json, text/plain, */*',

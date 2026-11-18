@@ -2,7 +2,14 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { PaymentMethod } from '@prisma/client';
 import type { ReceiptProvider } from '../src/services/receipts/types';
-import { relayEnabled, relayFetchPayload, verifyViaRelay, type RelayFetch } from '../src/services/receipts/relay';
+import {
+  relayEnabled,
+  relayFetchPayload,
+  relayFetchText,
+  verifyViaRelay,
+  type RelayFetch,
+} from '../src/services/receipts/relay';
+import { htmlToLines } from '../src/services/receipts/text';
 
 const TELEBIRR_HTML = `<!doctype html><html><head><title>telebirr receipt</title></head><body>
 <table>
@@ -25,6 +32,26 @@ const TELEBIRR_HTML = `<!doctype html><html><head><title>telebirr receipt</title
   <tr><td></td><td>ጠቅላላ የተከፈለው መጠን/Total Paid Amount</td><td>106 Birr</td></tr>
 </table>
 </body></html>`;
+
+/** What the relay sends back with ?format=text for that page. */
+const TELEBIRR_TEXT = htmlToLines(TELEBIRR_HTML).join('\n');
+
+const MPESA_LINES = [
+  'PAYER NAME',
+  'SERVICE FEE',
+  '+ 15% VAT',
+  'ABEBE KEBEDE',
+  'RECEIVER NAME',
+  'BINGO PLC',
+  'PAYER PHONE NUMBER',
+  '2519****1111',
+  'TRANSACTION ID',
+  'ABC1234567',
+  'TOTAL',
+  '600 Birr',
+  'TRANSACTION STATUS',
+  'Completed',
+];
 
 function provider(code: string, patch: Partial<ReceiptProvider> = {}): ReceiptProvider {
   return {
@@ -53,18 +80,23 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
-test('relay fetches the raw body and hands it to the parser', async () => {
+function textResponse(text: string, reference: string): Response {
+  return jsonResponse({ ok: true, provider: 'telebirr', reference, status: 200, format: 'text', text });
+}
+
+function rawResponse(body: string): Response {
+  return jsonResponse({
+    ok: true,
+    contentType: 'text/html; charset=utf-8',
+    bodyBase64: Buffer.from(body, 'utf8').toString('base64'),
+  });
+}
+
+test('relay asks for text lines and the local parser and gate decide', async () => {
   const calls: string[] = [];
   const fake: RelayFetch = async (input) => {
     calls.push(String(input));
-    return jsonResponse({
-      ok: true,
-      provider: 'telebirr',
-      reference: 'ABC1234567',
-      status: 200,
-      contentType: 'text/html; charset=utf-8',
-      bodyBase64: Buffer.from(TELEBIRR_HTML, 'utf8').toString('base64'),
-    });
+    return textResponse(TELEBIRR_TEXT, 'ABC1234567');
   };
 
   const outcome = await verifyViaRelay(
@@ -75,8 +107,7 @@ test('relay fetches the raw body and hands it to the parser', async () => {
     'https://relay.example.test',
   );
 
-  assert.equal(calls.length, 1);
-  assert.equal(calls[0], 'https://relay.example.test/receipts/telebirr/ABC1234567');
+  assert.deepEqual(calls, ['https://relay.example.test/receipts/telebirr/ABC1234567?format=text']);
   assert.equal(outcome.status, 'VERIFIED');
   assert.equal(outcome.source, 'RELAY');
   assert.equal(outcome.parsed?.amount, 106);
@@ -84,13 +115,8 @@ test('relay fetches the raw body and hands it to the parser', async () => {
   assert.equal(outcome.url, 'https://transactioninfo.ethiotelecom.et/receipt/ABC1234567');
 });
 
-test('relay payload is still gate-checked against the requested reference', async () => {
-  const fake: RelayFetch = async () =>
-    jsonResponse({
-      ok: true,
-      contentType: 'text/html',
-      bodyBase64: Buffer.from(TELEBIRR_HTML, 'utf8').toString('base64'),
-    });
+test('relay text is still gate-checked against the requested reference', async () => {
+  const fake: RelayFetch = async () => textResponse(TELEBIRR_TEXT, 'ZZZZZZZZZZ');
 
   const outcome = await verifyViaRelay(
     provider('telebirr'),
@@ -102,6 +128,100 @@ test('relay payload is still gate-checked against the requested reference', asyn
 
   assert.equal(outcome.status, 'NOT_MATCHED');
   assert.equal(outcome.source, 'RELAY');
+});
+
+test('relay text works for the M-Pesa rail too', async () => {
+  const fake: RelayFetch = async () =>
+    jsonResponse({ ok: true, provider: 'mpesa', reference: 'ABC1234567', format: 'text', text: MPESA_LINES.join('\n') });
+
+  const outcome = await verifyViaRelay(
+    provider('mpesa'),
+    { reference: 'ABC1234567' },
+    'RELAY',
+    fake,
+    'https://relay.example.test',
+  );
+
+  assert.equal(outcome.status, 'VERIFIED');
+  assert.equal(outcome.parsed?.amount, 600);
+  assert.equal(outcome.reference, 'ABC1234567');
+});
+
+test('a text "no receipt" answer maps to NOT_FOUND without a second fetch', async () => {
+  const calls: string[] = [];
+  const fake: RelayFetch = async (input) => {
+    calls.push(String(input));
+    return jsonResponse({
+      ok: true,
+      notFound: true,
+      format: 'text',
+      message: 'M-Pesa has no receipt for this reference: unknown transaction.',
+    });
+  };
+
+  const outcome = await verifyViaRelay(
+    provider('mpesa'),
+    { reference: 'SFJ8K2LM9P' },
+    'RELAY',
+    fake,
+    'https://relay.example.test',
+  );
+
+  assert.equal(calls.length, 1);
+  assert.equal(outcome.status, 'NOT_FOUND');
+  assert.match(outcome.message, /unknown transaction/);
+  assert.equal(outcome.reference, 'SFJ8K2LM9P');
+});
+
+test('an extraction failure falls back to the raw body', async () => {
+  const calls: string[] = [];
+  const fake: RelayFetch = async (input) => {
+    const url = String(input);
+    calls.push(url);
+    if (url.includes('format=text')) {
+      return jsonResponse({ ok: false, code: 'EXTRACTION_FAILED', message: 'no text' }, 422);
+    }
+    return rawResponse(TELEBIRR_HTML);
+  };
+
+  const outcome = await verifyViaRelay(
+    provider('telebirr'),
+    { reference: 'ABC1234567' },
+    'RELAY',
+    fake,
+    'https://relay.example.test',
+  );
+
+  assert.equal(calls[0], 'https://relay.example.test/receipts/telebirr/ABC1234567?format=text');
+  assert.equal(calls[1], 'https://relay.example.test/receipts/telebirr/ABC1234567');
+  assert.equal(outcome.status, 'VERIFIED');
+  assert.equal(outcome.parsed?.amount, 106);
+});
+
+test('an empty or oversized text answer falls back to the raw body', async () => {
+  const oversized = 'A'.repeat(200_000 + 1);
+  for (const [name, text] of [
+    ['empty', ''],
+    ['oversized', oversized],
+  ] as Array<[string, string]>) {
+    const calls: string[] = [];
+    const fake: RelayFetch = async (input) => {
+      const url = String(input);
+      calls.push(url);
+      if (url.includes('format=text')) return textResponse(text, 'ABC1234567');
+      return rawResponse(TELEBIRR_HTML);
+    };
+
+    const outcome = await verifyViaRelay(
+      provider('telebirr'),
+      { reference: 'ABC1234567' },
+      'RELAY',
+      fake,
+      'https://relay.example.test',
+    );
+    assert.equal(calls.length, 2, name);
+    assert.equal(outcome.status, 'VERIFIED', name);
+  }
 });
 
 test('relay failures are UNREACHABLE so the caller can fall back', async () => {
@@ -141,6 +261,23 @@ test('relay refuses a payload larger than the provider allows', async () => {
   if (!result.ok) assert.match(result.message, /larger than expected/);
 });
 
+test('relay text refuses a payload larger than the text cap', async () => {
+  const fake: RelayFetch = async () =>
+    jsonResponse({ ok: true, format: 'text', text: 'A'.repeat(200_000 + 1) });
+
+  const result = await relayFetchText(
+    provider('telebirr'),
+    { reference: 'ABC1234567' },
+    fake,
+    'https://relay.example.test',
+  );
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.equal(result.retryRaw, true);
+    assert.match(result.message, /larger than expected/);
+  }
+});
+
 test('relay covers only the geo-blocked rails', () => {
   process.env.RECEIPT_RELAY_URL = 'https://relay.example.test/';
   try {
@@ -161,6 +298,8 @@ test('relay requests never leave the configured base URL unencoded', async () =>
   };
 
   await relayFetchPayload(provider('telebirr'), { reference: 'AB/12 34?#' }, fake, 'https://relay.example.test');
+  await relayFetchText(provider('telebirr'), { reference: 'AB/12 34?#' }, fake, 'https://relay.example.test');
 
   assert.equal(calls[0], 'https://relay.example.test/receipts/telebirr/AB%2F12%2034%3F%23');
+  assert.equal(calls[1], 'https://relay.example.test/receipts/telebirr/AB%2F12%2034%3F%23?format=text');
 });

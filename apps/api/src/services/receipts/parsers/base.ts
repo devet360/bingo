@@ -68,6 +68,13 @@ export abstract class BankParser {
     return this.parseBody(resp.body, resp.contentType, input);
   }
 
+  /**
+   * Read a receipt from text lines instead of the bank's body. Set by the
+   * parsers whose document the relay can flatten (Telebirr HTML, M-Pesa PDF),
+   * so only kilobytes cross the wire between relay and API.
+   */
+  parsePlainText?(text: string): ParsedReceipt | Promise<ParsedReceipt>;
+
   protected abstract parseBody(
     body: Buffer,
     contentType: string,

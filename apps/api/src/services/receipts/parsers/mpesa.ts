@@ -207,6 +207,11 @@ export class MpesaParser extends BankParser {
     return MpesaParser.parseLines((await extractPdfText(envelope.pdf)).split('\n'));
   }
 
+  /** The receipt's text lines: the relay takes the text out of the PDF. */
+  parsePlainText(text: string): ParsedReceipt {
+    return MpesaParser.parseLines(text.split('\n'));
+  }
+
   /** Fail closed on a non-"0" code, bad base64 or a body that is not a PDF. */
   static decodeEnvelope(
     data: Buffer,

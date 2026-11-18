@@ -3,16 +3,18 @@
  *
  * Telebirr and M-Pesa only answer Ethiopian IPs. When RECEIPT_RELAY_URL points
  * at the PHP relay deployed on Ethio Telecom hosting, those two rails are
- * fetched through it; the relay returns the bank's raw body and the local
- * parser and gate still decide the outcome. The result is recorded with
- * source RELAY, so a compromised relay can be traced, never trusted blindly.
+ * fetched through it. The relay flattens the answer to text lines by default
+ * (kilobytes instead of the whole body); the local parser and gate still decide
+ * the outcome, and a raw-body fetch is the fallback. The result is recorded
+ * with source RELAY, so a compromised relay can be traced, never trusted
+ * blindly.
  *
  * With no RECEIPT_RELAY_URL the API behaves exactly as before.
  */
 import { createParser } from './parsers';
 import { normalizeInput } from './reference';
 import type { ReceiptProvider, ReceiptSource, VerifyInput, VerifyOutcome } from './types';
-import { verifyClientPayload } from './verify';
+import { MAX_PLAIN_TEXT_BYTES, verifyClientPayload, verifyClientText } from './verify';
 
 const RELAY_PROVIDERS = new Set(['telebirr', 'mpesa']);
 const DEFAULT_TIMEOUT_MS = 15_000;
@@ -44,10 +46,89 @@ export interface RelayPayload {
 
 export type RelayResult = { ok: true; payload: RelayPayload } | { ok: false; message: string };
 
+export type RelayTextResult =
+  | { ok: true; text: string }
+  | { ok: false; notFound: boolean; retryRaw: boolean; message: string };
+
 /** Base64 inflates the bank's answer by 4/3, plus the JSON envelope. */
 function payloadLimit(provider: ReceiptProvider): number {
   const maxBytes = createParser(provider)?.maxBytes ?? 2 * 1024 * 1024;
   return Math.ceil(maxBytes / 3) * 4 + 64 * 1024;
+}
+
+/**
+ * Ask the relay for the receipt as text lines. The relay extracts them on the
+ * Ethiopian host (page text for Telebirr, PDF text for M-Pesa), so the API
+ * receives kilobytes instead of the bank's whole body. `retryRaw` says the
+ * raw-body endpoint can still succeed, so the caller keeps today's behaviour
+ * whenever extraction is unavailable.
+ */
+export async function relayFetchText(
+  provider: ReceiptProvider,
+  input: VerifyInput,
+  fetchImpl: RelayFetch = fetch,
+  baseUrl: string | null = relayUrl(),
+): Promise<RelayTextResult> {
+  if (!baseUrl || !RELAY_PROVIDERS.has(provider.code)) {
+    return { ok: false, notFound: false, retryRaw: false, message: 'No receipt relay is configured for this provider.' };
+  }
+
+  const url = `${baseUrl}/receipts/${encodeURIComponent(provider.code)}/${encodeURIComponent(input.reference)}?format=text`;
+  let response: Response;
+  try {
+    response = await fetchImpl(url, {
+      headers: { Accept: 'application/json' },
+      redirect: 'error',
+      signal: AbortSignal.timeout(relayTimeoutMs()),
+    });
+  } catch {
+    return { ok: false, notFound: false, retryRaw: false, message: 'The receipt service did not answer.' };
+  }
+
+  if (!response.ok) {
+    // 422 is the relay reporting that it could not extract the text (library
+    // missing, an unexpected document); the raw body may still be readable.
+    return {
+      ok: false,
+      notFound: false,
+      retryRaw: response.status === 422,
+      message: `The receipt service refused the request (HTTP ${response.status}).`,
+    };
+  }
+
+  let body: unknown;
+  try {
+    body = await response.json();
+  } catch {
+    return { ok: false, notFound: false, retryRaw: true, message: 'The receipt service answered with an unreadable response.' };
+  }
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return { ok: false, notFound: false, retryRaw: true, message: 'The receipt service answered with an unreadable response.' };
+  }
+
+  const record = body as Record<string, unknown>;
+  if (record.ok !== true) {
+    return { ok: false, notFound: false, retryRaw: false, message: 'The receipt service could not read the bank receipt.' };
+  }
+  if (record.notFound === true) {
+    return {
+      ok: false,
+      notFound: true,
+      retryRaw: false,
+      message:
+        typeof record.message === 'string' && record.message
+          ? record.message
+          : 'The bank has no receipt for this reference.',
+    };
+  }
+  if (record.format !== 'text' || typeof record.text !== 'string' || record.text.trim() === '') {
+    return { ok: false, notFound: false, retryRaw: true, message: 'The receipt service could not read the bank receipt.' };
+  }
+  if (Buffer.byteLength(record.text, 'utf8') > MAX_PLAIN_TEXT_BYTES) {
+    return { ok: false, notFound: false, retryRaw: true, message: 'The bank response was larger than expected.' };
+  }
+
+  return { ok: true, text: record.text };
 }
 
 /** Ask the relay for the bank's own answer. No parsing happens here. */
@@ -104,22 +185,14 @@ export async function relayFetchPayload(
   };
 }
 
-/**
- * Fetch through the relay, then run the same parser and gate as a direct bank
- * answer. An unreachable relay yields UNREACHABLE so callers can fall back.
- */
-export async function verifyViaRelay(
+/** A failure carries the normalised reference and bank URL when they exist. */
+function relayFailure(
   provider: ReceiptProvider,
   rawInput: VerifyInput,
-  source: ReceiptSource = 'RELAY',
-  fetchImpl: RelayFetch = fetch,
-  baseUrl: string | null = relayUrl(),
-): Promise<VerifyOutcome> {
-  const result = await relayFetchPayload(provider, rawInput, fetchImpl, baseUrl);
-  if (result.ok) {
-    return verifyClientPayload(provider, rawInput, result.payload, source);
-  }
-
+  source: ReceiptSource,
+  status: VerifyOutcome['status'],
+  message: string,
+): VerifyOutcome {
   let reference: string | undefined;
   let url: string | undefined;
   try {
@@ -131,15 +204,46 @@ export async function verifyViaRelay(
       url = undefined;
     }
   } catch {
-    // The reference is invalid for this provider; the caller's UNREACHABLE
-    // result carries the relay's message either way.
+    // The reference is invalid for this provider; the message still explains.
   }
 
   return {
-    status: 'UNREACHABLE',
-    message: result.message,
+    status,
+    message,
     source,
     ...(url ? { url } : {}),
     ...(reference ? { reference } : {}),
   };
+}
+
+/**
+ * Fetch through the relay, then run the same parser and gate as a direct bank
+ * answer. Text extraction is tried first to keep the relay's bandwidth low;
+ * any extraction problem falls back to the raw body, and an unreachable relay
+ * yields UNREACHABLE so callers can fall back to manual review.
+ */
+export async function verifyViaRelay(
+  provider: ReceiptProvider,
+  rawInput: VerifyInput,
+  source: ReceiptSource = 'RELAY',
+  fetchImpl: RelayFetch = fetch,
+  baseUrl: string | null = relayUrl(),
+): Promise<VerifyOutcome> {
+  const text = await relayFetchText(provider, rawInput, fetchImpl, baseUrl);
+  if (text.ok) {
+    return verifyClientText(provider, rawInput, text.text, source);
+  }
+  if (text.notFound) {
+    return relayFailure(provider, rawInput, source, 'NOT_FOUND', text.message);
+  }
+
+  if (text.retryRaw) {
+    const result = await relayFetchPayload(provider, rawInput, fetchImpl, baseUrl);
+    if (result.ok) {
+      return verifyClientPayload(provider, rawInput, result.payload, source);
+    }
+    return relayFailure(provider, rawInput, source, 'UNREACHABLE', result.message);
+  }
+
+  return relayFailure(provider, rawInput, source, 'UNREACHABLE', text.message);
 }

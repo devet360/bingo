@@ -151,15 +151,23 @@ export class TelebirrParser extends BankParser {
     if (!raw.toLowerCase().includes('telebirr receipt')) {
       return { verified: false };
     }
+    return this.parsePlainText(htmlToLines(raw).join('\n'));
+  }
 
-    let text = normalizeReceiptText(htmlToLines(raw).join('\n'))
+  /** The receipt's text lines: the relay flattens the page, or parseBody does. */
+  parsePlainText(text: string): ParsedReceipt {
+    if (text.includes('This request is not correct')) {
+      throw new NotFoundError('Telebirr has no receipt for this reference.');
+    }
+
+    const lines = normalizeReceiptText(text)
       .split('\n')
       .map((l) => l.trim())
       .filter(Boolean);
 
     function valAfter(en: string, am?: string): string | undefined {
-      for (let i = 0; i < text.length; i++) {
-        const line = text[i]!;
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i]!;
         if (line.includes(en) || (am && line.includes(am))) {
           const afterLabel = line.split(en)[1] || (am ? line.split(am)[1] : '');
           if (afterLabel && afterLabel.trim()) {
@@ -173,8 +181,8 @@ export class TelebirrParser extends BankParser {
               if (cleaned) return cleaned;
             }
           }
-          for (let j = i + 1; j < Math.min(i + 4, text.length); j++) {
-            const next = text[j]!;
+          for (let j = i + 1; j < Math.min(i + 4, lines.length); j++) {
+            const next = lines[j]!;
             if (/[\u1200-\u137F]/.test(next) && next.includes('/')) continue;
             return next;
           }
@@ -184,13 +192,13 @@ export class TelebirrParser extends BankParser {
     }
 
     function birrAmount(label: string, am?: string): number | undefined {
-      for (let i = 0; i < text.length; i++) {
-        const line = text[i]!;
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i]!;
         if (line.includes(label) || (am && line.includes(am))) {
           const m = birrAmountIn(line);
           if (m !== undefined) return m;
-          for (let j = i + 1; j < Math.min(i + 4, text.length); j++) {
-            const m2 = birrAmountIn(text[j]!);
+          for (let j = i + 1; j < Math.min(i + 4, lines.length); j++) {
+            const m2 = birrAmountIn(lines[j]!);
             if (m2 !== undefined) return m2;
           }
         }
@@ -221,7 +229,7 @@ export class TelebirrParser extends BankParser {
     const reason = valAfter('Payment Reason', '\u12E8\u12AD\u12CD\u12EB \u121D\u12AD\u12D5\u12EB');
 
     let date: string | undefined;
-    for (const line of text) {
+    for (const line of lines) {
       const m = line.match(/(\d{2}-\d{2}-\d{4}\s+\d{2}:\d{2}:\d{2})/);
       if (m) {
         date = m[1];
@@ -233,7 +241,7 @@ export class TelebirrParser extends BankParser {
     // net of the service fee and VAT (106 paid, 104 settled).
     let amount = totalPaid ?? settledAmount;
     if (amount === undefined) {
-      for (const line of text) {
+      for (const line of lines) {
         const m = birrAmountIn(line);
         if (m !== undefined) {
           amount = m;

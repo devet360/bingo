@@ -217,6 +217,64 @@ export async function verifyClientPayload(
   }
 }
 
+/**
+ * Extracted receipt text is only ever a few KB on the wire; this cap keeps a
+ * broken or hostile relay from turning text mode into a memory problem.
+ */
+export const MAX_PLAIN_TEXT_BYTES = 200_000;
+
+/**
+ * Verify receipt text supplied by the relay. The relay only flattens the
+ * document; the labels are read and gate-checked here, exactly like a raw
+ * body, so the verification gate still has a single implementation.
+ */
+export async function verifyClientText(
+  provider: ReceiptProvider,
+  rawInput: VerifyInput,
+  text: string,
+  source: ReceiptSource = 'RELAY',
+): Promise<VerifyOutcome> {
+  const parser = createParser(provider);
+  if (!parser) {
+    return fail('UNSUPPORTED', 'This deposit method is confirmed by the agent, not automatically.', source);
+  }
+  if (!parser.parsePlainText) {
+    return fail('NOT_VERIFIED', 'This receipt method cannot be checked from extracted text.', source);
+  }
+
+  let input: NormalizedInput;
+  try {
+    input = normalizeInput(provider, rawInput);
+  } catch (e) {
+    if (e instanceof ReferenceError) return fail('INVALID_REFERENCE', e.message, source);
+    throw e;
+  }
+
+  if (text.trim() === '') {
+    return fail('NOT_VERIFIED', 'The submitted receipt is empty.', source, undefined, input.reference);
+  }
+
+  const url = (() => {
+    try {
+      return parser.buildUrl(input);
+    } catch {
+      return undefined;
+    }
+  })();
+
+  if (Buffer.byteLength(text, 'utf8') > MAX_PLAIN_TEXT_BYTES) {
+    return fail('NOT_VERIFIED', 'The submitted receipt is larger than expected.', source, url, input.reference);
+  }
+
+  try {
+    const parsed = await parser.parsePlainText(text);
+    return parseOutcome(parsed, provider, input, source, url ?? '');
+  } catch (e) {
+    if (e instanceof NotFoundError) return fail('NOT_FOUND', e.message || parser.notFoundMessage, source, url, input.reference);
+    return fail('NOT_VERIFIED', 'The submitted receipt could not be read as a receipt.', source, url, input.reference);
+  }
+}
+
 /** Map an internal failure to the deposit record's verification status. */
 export function isVerified(outcome: VerifyOutcome): boolean {
   return outcome.status === 'VERIFIED';

@@ -5,6 +5,8 @@ declare(strict_types=1);
 require_once __DIR__ . '/reference.php';
 require_once __DIR__ . '/fetch.php';
 require_once __DIR__ . '/throttle.php';
+require_once __DIR__ . '/html_text.php';
+require_once __DIR__ . '/pdf_text.php';
 
 function relay_config(): array
 {
@@ -54,6 +56,34 @@ function client_ip(): string
     return $ip !== '' ? $ip : '0.0.0.0';
 }
 
+/**
+ * The receipt as text lines, so the API receives kilobytes instead of the
+ * bank's whole body. The API still parses the labels and runs the gate; this
+ * only turns the document into lines.
+ *
+ * @return array{ok:true, lines:list<string>}|array{ok:true, notFound:true, message:string}|array{ok:false, message:string}
+ */
+function extract_text_body(string $providerCode, string $body): array
+{
+    if ($providerCode === 'telebirr') {
+        $lines = html_to_lines($body);
+        if (!$lines) {
+            return ['ok' => false, 'message' => 'The Telebirr page had no readable text.'];
+        }
+        return ['ok' => true, 'lines' => $lines];
+    }
+
+    $envelope = mpesa_envelope_pdf($body);
+    if (!$envelope['ok']) {
+        return ['ok' => true, 'notFound' => true, 'message' => $envelope['message']];
+    }
+    $pdf = pdf_text_lines($envelope['pdf']);
+    if (!$pdf['ok']) {
+        return ['ok' => false, 'message' => $pdf['message']];
+    }
+    return ['ok' => true, 'lines' => $pdf['lines']];
+}
+
 function handle_request(): void
 {
     $method = strtoupper($_SERVER['REQUEST_METHOD'] ?? 'GET');
@@ -88,6 +118,14 @@ function handle_request(): void
 
     if (!preg_match('#^/receipts/([A-Za-z0-9_-]+)(?:/(.*))?$#', $path, $match)) {
         error_response(404, 'NOT_FOUND', 'Use GET /receipts/{provider}/{reference} or ?reference={reference}.');
+        return;
+    }
+
+    $format = isset($_GET['format']) && is_string($_GET['format'])
+        ? strtolower(trim($_GET['format']))
+        : 'raw';
+    if ($format !== 'raw' && $format !== 'text') {
+        error_response(400, 'INVALID_FORMAT', 'Use format=text, or leave it out for the raw body.');
         return;
     }
 
@@ -127,6 +165,39 @@ function handle_request(): void
 
     if (!$result['ok']) {
         error_response($result['status'], $result['code'], $result['message']);
+        return;
+    }
+
+    if ($format === 'text') {
+        $extracted = extract_text_body($providerCode, $result['body']);
+        if (!empty($extracted['notFound'])) {
+            json_response(200, [
+                'ok' => true,
+                'provider' => $providerCode,
+                'reference' => $reference,
+                'status' => $result['status'],
+                'format' => 'text',
+                'notFound' => true,
+                'message' => $extracted['message'],
+                'sourceUrl' => $url,
+                'fetchedAt' => gmdate('c'),
+            ]);
+            return;
+        }
+        if (!$extracted['ok']) {
+            error_response(422, 'EXTRACTION_FAILED', $extracted['message']);
+            return;
+        }
+        json_response(200, [
+            'ok' => true,
+            'provider' => $providerCode,
+            'reference' => $reference,
+            'status' => $result['status'],
+            'format' => 'text',
+            'text' => implode("\n", $extracted['lines']),
+            'sourceUrl' => $url,
+            'fetchedAt' => gmdate('c'),
+        ]);
         return;
     }
 
