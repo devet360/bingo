@@ -328,14 +328,21 @@ POST /support/receipts/check
 `status` mirrors verification: `VERIFIED`, `FAILED`, `NOT_FOUND`, `NOT_MATCHED`,
 `NOT_VERIFIED`, `UNREACHABLE`, and `UNSUPPORTED` (manual rails have no bank page).
 `INVALID_RECEIPT_REFERENCE` (400) is returned before any fetch when the reference
-fails its provider pattern. `source` is `SERVER` or `CLIENT`.
+fails its provider pattern. `source` is `SERVER`, `CLIENT` or `RELAY`.
 
 The optional `payload` (`{ contentType?, bodyBase64 }`) accepts the bank's own
 response — the saved HTML page, the JSON envelope, or the PDF — and parses it in
 place of a fetch. Screenshots cannot be read; there is no OCR. For the geo-blocked
-rails (`Telebirr`, `M-Pesa`) a reference-only lookup returns `UNREACHABLE` with the
-receipt `url` instead of attempting a doomed request; the same rails parse normally
-when their payload is attached.
+rails (`Telebirr`, `M-Pesa`), when `RECEIPT_RELAY_URL` is configured the lookup goes
+through the Ethio Telecom relay (`apps/receipt-relay`) and reports `source: "RELAY"`;
+without a relay, or when it fails, a reference-only lookup returns `UNREACHABLE`
+with the receipt `url` instead of attempting a doomed request. The same rails parse
+normally when their payload is attached.
+
+The relay returns the bank's raw answer and the API still runs its own parser and
+gate; `source: "RELAY"` records where the bytes came from. Deposit verification and
+the agent/staff "Verify receipt" action use the same precedence: submitted payload,
+then relay, then a direct fetch.
 
 ## SuperAdmin (`SUPER_ADMIN`)
 

@@ -23,6 +23,7 @@ import {
   type VerifyInput,
   type VerifyOutcome,
 } from './types';
+import { relayEnabled, verifyViaRelay } from './relay';
 import { verifyClientPayload, verifyReceipt } from './verify';
 
 export interface ReceiptCheckInput {
@@ -72,6 +73,8 @@ export interface ReceiptCheckDeps {
   loadProvider(code: string): Promise<DepositProvider | null>;
   verify: VerifyFn;
   verifyPayload: VerifyPayloadFn;
+  /** The Ethio Telecom relay for rails only Ethiopian IPs can reach. */
+  verifyRelay?: VerifyFn;
   findUsage(providerCode: string, reference: string): Promise<ReceiptCheckUsage | null>;
 }
 
@@ -79,6 +82,7 @@ const defaultDeps: ReceiptCheckDeps = {
   loadProvider: (code) => prisma.depositProvider.findUnique({ where: { code } }),
   verify: verifyReceipt,
   verifyPayload: verifyClientPayload,
+  verifyRelay: verifyViaRelay,
   findUsage: async (providerCode, reference) => {
     const row = await prisma.receiptVerification.findUnique({
       where: { providerCode_reference: { providerCode, reference } },
@@ -167,6 +171,17 @@ export async function checkReceipt(
     // The person's device opened the bank page (M-Pesa and Telebirr answer
     // only Ethiopian IPs); parse the bytes it returned.
     outcome = await deps.verifyPayload(provider, input, params.payload, 'CLIENT');
+  } else if (relayEnabled(provider)) {
+    outcome = await (deps.verifyRelay ?? verifyViaRelay)(provider, input, 'RELAY');
+    if (outcome.status === 'UNREACHABLE') {
+      outcome = {
+        status: 'UNREACHABLE',
+        message: `${provider.name} only answers Ethiopian IPs. Open the receipt link, or attach the saved page or PDF to read it here.`,
+        source: 'SERVER',
+        url: outcome.url ?? url,
+        reference: input.reference,
+      };
+    }
   } else if (provider.geoBlocked) {
     outcome = {
       status: 'UNREACHABLE',

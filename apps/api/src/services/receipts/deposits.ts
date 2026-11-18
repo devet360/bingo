@@ -31,6 +31,7 @@ import { logger } from '../../lib/logger';
 import { serializeDeposit, serializePaymentAccount } from '../../lib/serializers';
 import { isUniqueViolation } from '../../lib/tx';
 import { creditDeposit } from '../deposits';
+import { relayEnabled, verifyViaRelay } from './relay';
 import { verifyClientPayload, verifyReceipt } from './verify';
 import { createParser } from './parsers';
 import { deriveReceiptAccount, mergeReceiptSubmission, normalizeInput } from './reference';
@@ -183,7 +184,7 @@ export async function verifyDepositReceipt(params: {
   }
 
   const provider = toReceiptProvider(deposit.provider);
-  const source = params.source ?? (params.payload ? VerificationSource.CLIENT : VerificationSource.SERVER);
+  let source = params.source ?? (params.payload ? VerificationSource.CLIENT : VerificationSource.SERVER);
 
   let receiptReference = deposit.receiptReference;
   let receiptAccount = deposit.receiptAccount ?? (await resolveReceiptAccount(deposit)) ?? null;
@@ -264,11 +265,24 @@ export async function verifyDepositReceipt(params: {
     phoneNumber: receiptPhone ?? undefined,
   };
 
-  // Telebirr and M-Pesa only answer Ethiopian IPs. The API tries anyway (the
-  // deployment is in Ethiopia); a refusal is not a failed payment.
-  const outcome = params.payload
-    ? await verifyClientPayload(provider, input, params.payload, source)
-    : await verifyReceipt(provider, input, source);
+  // Telebirr and M-Pesa only answer Ethiopian IPs. Prefer the Ethio Telecom
+  // relay when it is configured; otherwise try directly (the deployment may
+  // itself be in Ethiopia). A refusal is not a failed payment.
+  let outcome: VerifyOutcome;
+  if (params.payload) {
+    outcome = await verifyClientPayload(provider, input, params.payload, source);
+  } else if (relayEnabled(provider)) {
+    source = VerificationSource.RELAY;
+    outcome = await verifyViaRelay(provider, input, 'RELAY');
+    if (outcome.status === 'UNREACHABLE') {
+      // The relay is a convenience, not a dependency: fall back to the direct
+      // attempt before handing the deposit to the agent.
+      source = params.source ?? VerificationSource.SERVER;
+      outcome = await verifyReceipt(provider, input, source);
+    }
+  } else {
+    outcome = await verifyReceipt(provider, input, source);
+  }
 
   if (outcome.status === 'UNREACHABLE') {
     return markManual('The bank did not answer, so your assigned agent will confirm this payment.');
@@ -467,7 +481,8 @@ export async function recheckDepositReceipt(params: {
     }
   })();
 
-  if (provider.geoBlocked) {
+  const viaRelay = relayEnabled(provider);
+  if (provider.geoBlocked && !viaRelay) {
     return {
       check: {
         mode: 'CLIENT',
@@ -478,8 +493,23 @@ export async function recheckDepositReceipt(params: {
     };
   }
 
-  const outcome = await verifyReceipt(provider, input, VerificationSource.SERVER);
+  const checkSource = viaRelay ? VerificationSource.RELAY : VerificationSource.SERVER;
+  const outcome = viaRelay
+    ? await verifyViaRelay(provider, input, 'RELAY')
+    : await verifyReceipt(provider, input, VerificationSource.SERVER);
+
   if (outcome.status === 'UNREACHABLE') {
+    // A relay that is down leaves the operator the same fallback as before.
+    if (viaRelay) {
+      return {
+        check: {
+          mode: 'CLIENT',
+          message: `${provider.name} only answers Ethiopian IPs. Open the receipt and confirm the amount it shows.`,
+          url: outcome.url ?? url,
+        },
+        deposit,
+      };
+    }
     const updated = await prisma.depositRequest.update({
       where: { id: deposit.id },
       data: {
@@ -494,14 +524,14 @@ export async function recheckDepositReceipt(params: {
     };
   }
 
-  await storeOutcome(deposit, outcome, VerificationSource.SERVER);
+  await storeOutcome(deposit, outcome, checkSource);
   const verified = outcome.status === 'VERIFIED';
   const updated = await prisma.depositRequest.update({
     where: { id: deposit.id },
     data: {
       verificationStatus: verified ? VerificationStatus.VERIFIED : VerificationStatus.FAILED,
       verificationMessage: outcome.message,
-      verificationSource: VerificationSource.SERVER,
+      verificationSource: checkSource,
       verifiedAt: verified ? new Date() : null,
     },
   });

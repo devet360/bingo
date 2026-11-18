@@ -1,0 +1,6 @@
+Options -Indexes
+RewriteEngine On
+
+# Everything goes through the front controller; nothing else is servable.
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteRule ^ index.php [QSA,L]

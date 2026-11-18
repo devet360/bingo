@@ -1,0 +1,7 @@
+Options -Indexes
+RewriteEngine On
+
+# Only needed when the document root is this folder; prefer pointing the
+# document root at public/ instead.
+RewriteRule ^(src|tests)/ - [F,L]
+RewriteRule !^public/ public/index.php [L]
