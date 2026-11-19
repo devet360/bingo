@@ -438,10 +438,12 @@ games-provider: listening on 3001
 games-provider: leadership acquired
 ```
 
-Migrations run from `apps/games-provider/drizzle` at boot and the operator row is
-upserted from the config every time. A `wallet rows need operator attention` line means
-`DEAD`/`CAP_REJECTED` outbox rows exist: a payout or rollback was refused terminally and
-needs a human (`dokku logs bingo-crash`).
+Migrations run from `apps/games-provider/drizzle` at boot, including the provider-v2
+operator bot configuration and game-scoped round columns, and the operator row is
+upserted from the config every time. After deploying schema changes, wait for migrations
+to finish before considering the provider healthy. A `wallet rows need operator
+attention` line means `DEAD`/`CAP_REJECTED` outbox rows exist: a payout or rollback was
+refused terminally and needs a human (`dokku logs bingo-crash`).
 
 Register the provider in the bingo admin (**Admin → Providers**):
 
