@@ -62,9 +62,17 @@ opened to players.
 | `GAME_MAX_WIN` | `3000000` | Minor units, per-bet payout ceiling. |
 | `GAME_MAX_BETS_PER_ROUND` | `200` | Bets accepted per round. |
 | `CLIENT_SEEDS` | three prototype seeds | Exactly three comma-separated public client seeds. |
-| `BOT_COUNT` | `0` | Must stay `0` in V1. |
+| `BOT_COUNT` | `0` | Display-only bots; `0` disables them. |
+| `PROVIDER_ADMIN_TOKEN` | — | Bootstrap token for `/api/admin/operators`; replace with a scoped staff-console token in V2 Area E. |
+| `DEFAULT_OPERATOR_CODE` | `OPERATOR_CODE` | Operator used when `/play` or catalogue requests omit `operator`. |
+| `CONSOLE_TOKEN_SECRET` | — | Shared HMAC key used to verify short-lived Bingo-issued provider console tokens. |
+| `CHAT_ENABLED` | `false` | Opt-in per-process chat feature. |
+| `CHAT_RETENTION_DAYS` | `30` | Retention window for room message playback. |
 
 `.env.example` lists every key with placeholder values. Never commit real secrets.
+
+See [the operator onboarding runbook](../../docs/GAMES-PROVIDER-ONBOARDING.md)
+for create, probe, activation and secret-rotation steps.
 
 ## Endpoints
 
@@ -78,8 +86,9 @@ opened to players.
 | `WS` | `/ws` | Authenticated game socket (`auth`, `bet:place`, `bet:cancel`, `bet:cashout`). |
 | `GET` | `/play?operator=<code>` | Embedded game client (`dist/client`). `frame-ancestors` uses the operator's `allowedOrigins`, falling back to `ALLOWED_PARENT_ORIGINS`. |
 
-## Single instance
+## HA
 
-Run exactly one provider process. Round timers live in-process, the outbox has no claim
-lease, and socket fan-out is local, so `web=1` is a requirement, not a tuning knob.
-Scaling above one replica is unsupported in V1.
+Multiple provider instances may serve handshakes and WebSocket clients. One instance
+owns round production and outbox leadership through a Postgres advisory lock; followers
+poll for takeover and a new leader must acquire the lock within 10 seconds. Settlement
+idempotency remains the final guard, and LISTEN/NOTIFY carries leader state.

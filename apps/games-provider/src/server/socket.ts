@@ -11,9 +11,15 @@ const HEARTBEAT_MS = 30_000;
 const PANELS = [0, 1] as const;
 type Panel = (typeof PANELS)[number];
 type EngineView = Pick<RoundEngine, 'snapshot' | 'placeBet' | 'cancelBet' | 'cashout'>;
+type CoinFlipEngineView = {
+  snapshot(): { roundId: number | null; phase: 'BETTING' | 'REVEALED'; outcome: 'HEADS' | 'TAILS' | null };
+  placeBet(input: { session: SessionRecord; panel: 0 | 1; stake: bigint }): Promise<BetRecord>;
+  cancelBet(input: { session: SessionRecord; panel: 0 | 1 }): Promise<void>;
+};
 
 export interface SocketHandle {
   broadcast(event: RoundEngineEvent): void;
+  broadcastCoinFlip(event: import('./coinFlipEngine').CoinFlipEngineEvent): void;
   notifyBet(bet: BetRecord): void;
   notifyBalance(sessionToken: string, balance: bigint): void;
   close(): Promise<void>;
@@ -29,12 +35,18 @@ const betPayload = (bet: BetRecord) => ({
   payout: bet.payout === null ? null : bet.payout.toString(),
 });
 
-interface ClientState { sessionToken: string | null; alive: boolean; tail: Promise<void> }
+interface ClientState { sessionToken: string | null; gameId: string | null; alive: boolean; tail: Promise<void> }
 
 export function attachSocket(
-  input: { server: Server; store: Store; engine: EngineView; registry: OperatorRegistry },
+  input: {
+    server: Server;
+    store: Store;
+    engine: EngineView;
+    coinEngine?: CoinFlipEngineView;
+    registry: OperatorRegistry;
+  },
 ): SocketHandle {
-  const { store, engine, registry } = input;
+  const { store, engine, coinEngine, registry } = input;
   // maxPayload keeps a hostile client from buffering 100 MiB before JSON.parse.
   const wss = new WebSocketServer({ server: input.server, path: '/ws', maxPayload: 64 * 1024 });
   const clients = new Map<WebSocket, ClientState>();
@@ -47,7 +59,7 @@ export function attachSocket(
   };
 
   wss.on('connection', (ws) => {
-    const state: ClientState = { sessionToken: null, alive: true, tail: Promise.resolve() };
+    const state: ClientState = { sessionToken: null, gameId: null, alive: true, tail: Promise.resolve() };
     clients.set(ws, state);
     ws.on('pong', () => { state.alive = true; });
     // `ws` emits 'error' for protocol violations (e.g. an unmasked frame); an
@@ -121,13 +133,26 @@ export function attachSocket(
       const session = await requireLiveSession(ws, token);
       if (session === null) return;
       state.sessionToken = session.token;
-      const snapshot = engine.snapshot();
+      state.gameId = session.gameId;
+      const selectedEngine = session.gameId === 'coinflip' && coinEngine ? coinEngine : engine;
+      const snapshot = selectedEngine.snapshot();
+      const coinSnapshot = session.gameId === 'coinflip' && 'phase' in snapshot
+        ? {
+            roundId: snapshot.roundId,
+            phase: snapshot.phase === 'REVEALED' ? 'CRASHED' as const : 'BETTING' as const,
+            multiplier: snapshot.phase === 'REVEALED' ? 2 : 1,
+            elapsedMs: snapshot.phase === 'REVEALED' ? 5500 : 0,
+            bettingEndsInMs: snapshot.phase === 'REVEALED' ? 0 : 5500,
+            serverSeedHash: null,
+            coinOutcome: 'outcome' in snapshot ? snapshot.outcome : null,
+          }
+        : snapshot;
       const ownBets = snapshot.roundId === null
         ? [null, null]
         : await Promise.all(PANELS.map((panel) => store.getBet(snapshot.roundId as number, session.token, panel)));
       send(ws, {
         type: 'snapshot',
-        ...snapshot,
+        ...coinSnapshot,
         balance: session.displayBalance.toString(),
         bets: ownBets.map((bet) => (bet === null ? null : betPayload(bet))),
       });
@@ -152,9 +177,15 @@ export function attachSocket(
         });
         return;
       }
-      await act(ws, token, panel as Panel, () =>
-        engine.placeBet({ session, panel: panel as Panel, stake: BigInt(stake), autoCashout: autoCashout as number | null }),
-      );
+      if (session.gameId === 'coinflip' && coinEngine) {
+        await act(ws, token, panel as Panel, () =>
+          coinEngine.placeBet({ session, panel: panel as Panel, stake: BigInt(stake) }),
+        );
+      } else {
+        await act(ws, token, panel as Panel, () =>
+          engine.placeBet({ session, panel: panel as Panel, stake: BigInt(stake), autoCashout: autoCashout as number | null }),
+        );
+      }
       return;
     }
     if (type === 'bet:cancel' || type === 'bet:cashout') {
@@ -163,18 +194,28 @@ export function attachSocket(
         send(ws, { type: 'error', code: 'BAD_FRAME', message: `${type} requires panel 0|1` });
         return;
       }
-      await act(ws, token, panel as Panel, () =>
-        type === 'bet:cancel'
+      if (type === 'bet:cashout' && session.gameId === 'coinflip') {
+        send(ws, { type: 'error', code: 'ROUND_NOT_CASHOUT', message: 'Coin flip resolves automatically' });
+        return;
+      }
+      await act(ws, token, panel as Panel, () => {
+        if (session.gameId === 'coinflip' && coinEngine) {
+          return coinEngine.cancelBet({ session, panel: panel as Panel });
+        }
+        return type === 'bet:cancel'
           ? engine.cancelBet({ session, panel: panel as Panel })
-          : engine.cashout({ session, panel: panel as Panel }),
-      );
+          : engine.cashout({ session, panel: panel as Panel });
+      });
       return;
     }
     send(ws, { type: 'error', code: 'BAD_FRAME', message: `Unknown frame type ${type}` });
   }
 
   async function act(ws: WebSocket, token: string, panel: Panel, action: () => Promise<unknown>): Promise<void> {
-    const roundId = engine.snapshot().roundId;
+    const session = await store.getSession(token);
+    const roundId = session?.gameId === 'coinflip' && coinEngine
+      ? coinEngine.snapshot().roundId
+      : engine.snapshot().roundId;
     try {
       await action();
     } catch (error) {
@@ -208,6 +249,15 @@ export function attachSocket(
         ? { type: 'round:tick', roundId: event.payload.roundId, multiplier: event.payload.multiplier, elapsedMs: event.payload.elapsedMs }
         : { type: event.type, ...event.payload };
       for (const [ws, state] of clients) if (state.sessionToken !== null) send(ws, frame);
+    },
+    broadcastCoinFlip(event) {
+      const frame: Record<string, unknown> =
+        event.type === 'coinflip:betting'
+          ? { type: event.type, ...event.payload }
+          : { type: event.type, ...event.payload, revealedAt: event.payload.revealedAt.toISOString() };
+      for (const [ws, state] of clients) {
+        if (state.gameId === 'coinflip') send(ws, frame);
+      }
     },
     notifyBet(bet) {
       sendToSession(bet.sessionToken, { type: 'bet:update', ...betPayload(bet) });

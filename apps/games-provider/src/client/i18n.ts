@@ -56,6 +56,12 @@ export const en = {
   increaseStake: 'Increase stake',
   close: 'Close',
   instantCrashEdge: 'instant crash (edge)',
+  heads: 'Heads',
+  tails: 'Tails',
+  coinFlipTitle: 'Coin Flip',
+  coinFlipReveal: 'Revealed',
+  coinFlipHeadsWin: 'Heads wins',
+  coinFlipTailsWin: 'Tails wins',
 };
 
 const am: Record<keyof typeof en, string> = {
@@ -114,6 +120,12 @@ const am: Record<keyof typeof en, string> = {
   increaseStake: 'ውርርድ ጨምር',
   close: 'ዝጋ',
   instantCrashEdge: 'ቅጽበታዊ መቋረጥ (ጠርዝ)',
+  heads: 'ጭንቅ',
+  tails: 'ወርቅ',
+  coinFlipTitle: 'ሳንቲም መገልበጥ',
+  coinFlipReveal: 'ተገልጧል',
+  coinFlipHeadsWin: 'ጭንቅ አሸንፏል',
+  coinFlipTailsWin: 'ወርቅ አሸንፏል',
 };
 
 export const strings: Record<Lang, Record<string, string>> = { en, am };

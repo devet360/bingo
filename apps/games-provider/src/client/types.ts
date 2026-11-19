@@ -42,6 +42,7 @@ export interface SnapshotFrame {
   serverSeedHash: string | null;
   balance: string;
   bets: [BetFrame | null, BetFrame | null];
+  coinOutcome?: 'HEADS' | 'TAILS';
 }
 export interface BettingFrame {
   type: 'round:betting';
@@ -64,7 +65,22 @@ export interface BetUpdateFrame extends BetFrame { type: 'bet:update' }
 export interface BalanceFrame { type: 'balance:update'; balance: string }
 export interface SessionEndedFrame { type: 'session:ended'; reason: string }
 export interface ErrorFrame { type: 'error'; code: string; message: string }
+export interface CoinFlipBettingFrame {
+  type: 'coinflip:betting';
+  roundId: number;
+  serverSeedHash: string;
+  bettingEndsInMs: number;
+}
+export interface CoinFlipRevealedFrame {
+  type: 'coinflip:revealed';
+  roundId: number;
+  outcome: 'HEADS' | 'TAILS';
+  serverSeed: string;
+  serverSeedHash: string;
+  revealedAt: string;
+}
 
 export type ServerFrame =
   | SnapshotFrame | BettingFrame | TickFrame | CrashedFrame
+  | CoinFlipBettingFrame | CoinFlipRevealedFrame
   | BetUpdateFrame | BalanceFrame | SessionEndedFrame | ErrorFrame;

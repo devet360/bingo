@@ -1113,6 +1113,16 @@ export function deleteGameProvider(code: string): Promise<{ deleted: true }> {
   return apiRequest(`/admin/game-providers/${encodeURIComponent(code)}`, { method: 'DELETE' });
 }
 
+export function issueGameProviderConsoleToken(
+  code: string,
+  role: 'operator_admin' | 'superadmin' = 'superadmin',
+): Promise<{ token: string; expiresAt: string }> {
+  return apiRequest(`/admin/game-providers/${encodeURIComponent(code)}/console-token`, {
+    method: 'POST',
+    body: { role, ttlSeconds: 600 },
+  });
+}
+
 export function fetchProviderSettings(): Promise<{ maxWin: string; defaultMaxWin: string }> {
   return apiRequest('/admin/game-providers/settings');
 }

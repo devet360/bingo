@@ -99,10 +99,15 @@ function toSessionRecord(row: SessionRow): SessionRecord {
 function toRoundRecord(row: RoundRow): RoundRecord {
   return {
     id: row.id,
+    operatorCode: row.operatorCode ?? undefined,
+    gameId: row.gameId,
     serverSeed: row.serverSeed,
     serverSeedHash: row.serverSeedHash,
     clientSeedComposite: row.clientSeedComposite,
     crashPoint: numericToNumber(row.crashPoint),
+    coinOutcome: row.coinOutcome === 'HEADS' || row.coinOutcome === 'TAILS'
+      ? row.coinOutcome
+      : undefined,
     status: row.status,
     startedAt: row.startedAt,
     flewAt: row.flewAt,
@@ -268,6 +273,13 @@ export function createPostgresStore(db: Database): Store {
     async closeSession(token) {
       await db.update(sessions).set({ status: 'CLOSED' }).where(eq(sessions.token, token));
     },
+    async listActiveSessionsByOperator(operatorCode) {
+      const rows = await db
+        .select()
+        .from(sessions)
+        .where(and(eq(sessions.operatorCode, operatorCode), eq(sessions.status, 'OPEN')));
+      return rows.map(toSessionRecord);
+    },
     async setSessionBalance(token, balance) {
       await db
         .update(sessions)
@@ -279,6 +291,8 @@ export function createPostgresStore(db: Database): Store {
       const rows = await db
         .insert(rounds)
         .values({
+          operatorCode: input.operatorCode ?? null,
+          gameId: input.gameId ?? 'crash',
           serverSeed: input.serverSeed,
           serverSeedHash: input.serverSeedHash,
           status: 'BETTING',
@@ -303,7 +317,11 @@ export function createPostgresStore(db: Database): Store {
     async finishRound(id, input) {
       await db
         .update(rounds)
-        .set({ status: input.status, crashedAt: input.at })
+        .set({
+          status: input.status,
+          crashedAt: input.at,
+          ...(input.coinOutcome ? { coinOutcome: input.coinOutcome } : {}),
+        })
         .where(eq(rounds.id, id));
     },
     async getRound(id) {

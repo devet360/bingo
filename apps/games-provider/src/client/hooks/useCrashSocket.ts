@@ -26,6 +26,7 @@ export function useCrashSocket(input: {
   const [balance, setBalance] = useState(initialBalance);
   const [lastError, setLastError] = useState<{ code: string; message: string } | null>(null);
   const [ended, setEnded] = useState<string | null>(null);
+  const [coinOutcome, setCoinOutcome] = useState<'HEADS' | 'TAILS' | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
   const endedRef = useRef(false);
@@ -68,6 +69,7 @@ export function useCrashSocket(input: {
           setServerSeedHash(frame.serverSeedHash);
           setBalance(frame.balance);
           setBets(frame.bets);
+          setCoinOutcome(frame.coinOutcome ?? null);
           break;
         case 'round:betting':
           setPhase('BETTING');
@@ -98,6 +100,26 @@ export function useCrashSocket(input: {
             { roundId: frame.roundId, crashPoint: frame.crashPoint },
             ...prev.filter((item) => item.roundId !== frame.roundId),
           ].slice(0, 24));
+          soundEngine.playCrash();
+          break;
+        case 'coinflip:betting':
+          setPhase('BETTING');
+          setRoundId(frame.roundId);
+          roundIdRef.current = frame.roundId;
+          setMultiplier(1);
+          setElapsedMs(0);
+          setBettingWindowMs(frame.bettingEndsInMs);
+          setBettingEndsAt(Date.now() + frame.bettingEndsInMs);
+          setServerSeedHash(frame.serverSeedHash);
+          setBets([null, null]);
+          setCoinOutcome(null);
+          break;
+        case 'coinflip:revealed':
+          setPhase('CRASHED');
+          setMultiplier(2);
+          setElapsedMs(5500);
+          setBettingEndsAt(null);
+          setCoinOutcome(frame.outcome);
           soundEngine.playCrash();
           break;
         case 'bet:update': {
@@ -184,7 +206,7 @@ export function useCrashSocket(input: {
 
   return {
     connected, phase, roundId, multiplier, elapsedMs, bettingEndsAt, bettingWindowMs,
-    serverSeedHash, history, bets, balance, lastError, ended,
+    serverSeedHash, history, bets, balance, lastError, ended, coinOutcome,
     placeBet, cancelBet, cashout,
   };
 }

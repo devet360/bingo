@@ -97,7 +97,9 @@ export class BetManager implements RoundBetManager {
       status: 'PLACING',
       cashoutMultiplier: null,
       payout: null,
-      betTxnId: this.newId(),
+      betTxnId: round.gameId === 'coinflip'
+        ? `coinflip:${this.newId()}`
+        : this.newId(),
       winTxnId: null,
     });
 
@@ -228,6 +230,30 @@ export class BetManager implements RoundBetManager {
     }
   }
 
+  /** Settles coin-flip bets. Panel 0 is heads and panel 1 is tails. */
+  async settleCoinFlip(input: {
+    round: RoundRecord;
+    outcome: 'HEADS' | 'TAILS';
+  }): Promise<void> {
+    const { round, outcome } = input;
+    if (round.status !== 'CRASHED') throw new Error(`Round is not settled: ${round.status}`);
+    const winningPanel = outcome === 'HEADS' ? 0 : 1;
+    const bets = await this.store.listBetsForRound(round.id);
+
+    for (const bet of bets) {
+      if (bet.status !== 'ACTIVE') continue;
+      if (bet.panel === winningPanel) {
+        const session = await this.store.getSession(bet.sessionToken);
+        if (session === null) continue;
+        await this.settleWin(bet, 2, session);
+      } else {
+        const settledAt = this.now();
+        await this.store.updateBet(bet.id, { status: 'LOST', settledAt });
+        this.onSettled?.({ ...bet, status: 'LOST', settledAt });
+      }
+    }
+  }
+
   /**
    * Serialises settlement of one bet. A manual cashout and the auto-cashout
    * sweep can both pass their ACTIVE pre-check before either writes; the
@@ -259,7 +285,11 @@ export class BetManager implements RoundBetManager {
       if (current === null || current.status !== 'ACTIVE') return;
 
       const payout = payoutFor(current.stake, multiplier, session.maxWin);
-      const winTxnId = this.newId();
+      const round = await this.store.getRound(current.roundId);
+      const rawWinTxnId = this.newId();
+      const winTxnId = round?.gameId === 'coinflip'
+        ? `coinflip:${rawWinTxnId}`
+        : rawWinTxnId;
       const settledAt = this.now();
       await this.store.updateBet(current.id, {
         status: 'CASHED',

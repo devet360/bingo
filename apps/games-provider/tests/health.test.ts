@@ -39,18 +39,16 @@ test('health endpoint reports ok', async () => {
   server.close();
 });
 
-test('config forces bots off in v1', () => {
+test('bot count is configurable and defaults to off', () => {
   assert.equal(config.botCount, 0);
-  assert.throws(
-    () =>
-      loadConfig({
-        DATABASE_URL: 'postgres://x',
-        OPERATOR_CALLBACK_URL: 'https://bingo.example/cb',
-        OPERATOR_HMAC_SECRET: 'test-hmac-secret-value',
-        BOT_COUNT: '5',
-      }),
-    /BOT_COUNT must be 0/,
-  );
+  const enabled = loadConfig({
+    DATABASE_URL: 'postgres://x',
+    OPERATOR_CALLBACK_URL: 'https://bingo.example/cb',
+    OPERATOR_HMAC_SECRET: 'test-hmac-secret-value',
+    BOT_COUNT: '5',
+  });
+  assert.equal(enabled.botCount, 5);
+  assert.equal(enabled.botConfig.enabled, true);
 });
 
 test('config parses minor-unit limit overrides', () => {

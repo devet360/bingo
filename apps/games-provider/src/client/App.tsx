@@ -64,6 +64,7 @@ const GameScreen: React.FC<{ token: string; session: HandshakeData; lang: Lang }
     maxStake: BigInt(session.limits.maxStake),
     maxWin: BigInt(session.limits.maxWin),
   };
+
   const balanceMinor = BigInt(socket.balance);
 
   useEffect(() => {
@@ -189,6 +190,84 @@ const GameScreen: React.FC<{ token: string; session: HandshakeData; lang: Lang }
   );
 };
 
+const CoinFlipScreen: React.FC<{ token: string; session: HandshakeData; lang: Lang }> = ({
+  token, session, lang,
+}) => {
+  const [stake, setStake] = useState('100');
+  const onSessionEnded = useCallback(() => undefined, []);
+  const socket = useCrashSocket({ token, initialBalance: session.balance, onSessionEnded });
+  const limits = {
+    minStake: BigInt(session.limits.minStake),
+    maxStake: BigInt(session.limits.maxStake),
+  };
+  const place = (panel: 0 | 1) => {
+    const parsed = BigInt(stake || '0');
+    if (parsed < limits.minStake || parsed > limits.maxStake) return;
+    socket.placeBet(panel, parsed, null);
+  };
+
+  return (
+    <div className="min-h-dvh bg-[var(--g-bg)] text-[var(--g-text)] px-3 py-2">
+      <header className="flex items-center justify-between">
+        <div className="font-display font-bold">{t(lang, 'coinFlipTitle')}</div>
+        <div className="font-mono font-bold text-[var(--g-gold)]">
+          {money(BigInt(socket.balance), session.currency)}
+        </div>
+      </header>
+      {socket.lastError && (
+        <p className="mt-2 rounded-lg bg-rose-950/70 px-3 py-2 text-xs">{socket.lastError.message}</p>
+      )}
+      <main className="mx-auto mt-5 max-w-[620px] space-y-4">
+        <div className="grid grid-cols-2 gap-3">
+          {([0, 1] as const).map((panel) => (
+            <button
+              key={panel}
+              type="button"
+              disabled={socket.phase !== 'BETTING'}
+              onClick={() => place(panel)}
+              className="min-h-40 rounded-2xl border border-white/10 bg-white/5 p-4 disabled:opacity-50"
+            >
+              <p className="font-display text-2xl font-black">
+                {panel === 0 ? t(lang, 'heads') : t(lang, 'tails')}
+              </p>
+              {socket.bets[panel] ? (
+                <p className="mt-2 text-sm">
+                  {socket.bets[panel]?.status === 'CASHED'
+                    ? t(lang, 'won')
+                    : socket.bets[panel]?.status === 'LOST'
+                      ? t(lang, 'lost')
+                      : socket.bets[panel]?.stake}
+                </p>
+              ) : null}
+            </button>
+          ))}
+        </div>
+        <div className="rounded-xl border border-white/10 p-3">
+          <label className="text-xs text-[var(--g-hint)]">{t(lang, 'stake')}</label>
+          <input
+            value={stake}
+            onChange={(event) => setStake(event.target.value.replace(/\D/g, ''))}
+            inputMode="numeric"
+            className="mt-1 w-full rounded-lg border border-white/10 bg-black/20 px-3 py-3 font-mono"
+          />
+        </div>
+        {socket.phase === 'CRASHED' && (
+          <p className="text-center text-sm text-[var(--g-hint)]">
+            {socket.coinOutcome === null
+              ? t(lang, 'coinFlipReveal')
+              : socket.coinOutcome === 'HEADS'
+                ? t(lang, 'coinFlipHeadsWin')
+                : t(lang, 'coinFlipTailsWin')}
+          </p>
+        )}
+        <button type="button" onClick={exitGame} className="w-full rounded-lg bg-[var(--g-accent)] px-4 py-3 font-semibold">
+          {t(lang, 'backToGames')}
+        </button>
+      </main>
+    </div>
+  );
+};
+
 export default function App() {
   const [lang, setLang] = useState<Lang>(readLang);
   const [boot, setBoot] = useState<Boot>({ state: 'loading' });
@@ -242,5 +321,8 @@ export default function App() {
   }
   if (boot.state === 'ended') return <EndedScreen lang={lang} />;
   if (boot.state === 'error') return <EndedScreen lang={lang} body={t(lang, 'loadFailed')} />;
+  if (boot.session.gameId === 'coinflip') {
+    return <CoinFlipScreen token={token as string} session={boot.session} lang={lang} />;
+  }
   return <GameScreen token={token as string} session={boot.session} lang={lang} />;
 }

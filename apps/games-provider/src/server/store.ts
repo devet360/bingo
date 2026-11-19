@@ -8,7 +8,8 @@ import type {
   SessionRecord,
 } from '../domain/types';
 
-export type NewRound = Pick<RoundRecord, 'serverSeed' | 'serverSeedHash' | 'startedAt'>;
+export type NewRound = Pick<RoundRecord, 'serverSeed' | 'serverSeedHash' | 'startedAt'> &
+  Partial<Pick<RoundRecord, 'operatorCode' | 'gameId'>>;
 export type NewBet = Omit<BetRecord, 'id' | 'createdAt' | 'settledAt'>;
 export type NewOutbox = Pick<
   OutboxRecord,
@@ -27,10 +28,15 @@ export interface Store {
   saveSession(session: SessionRecord): Promise<void>;
   closeSession(token: string): Promise<void>;
   setSessionBalance(token: string, balance: bigint): Promise<void>;
+  listActiveSessionsByOperator(operatorCode: string): Promise<SessionRecord[]>;
 
   createRound(input: NewRound): Promise<RoundRecord>;
   startFlight(id: number, input: { crashPoint: number; clientSeedComposite: string; at: Date }): Promise<void>;
-  finishRound(id: number, input: { status: 'CRASHED' | 'ABANDONED'; at: Date }): Promise<void>;
+  finishRound(id: number, input: {
+    status: 'CRASHED' | 'ABANDONED';
+    at: Date;
+    coinOutcome?: 'HEADS' | 'TAILS';
+  }): Promise<void>;
   getRound(id: number): Promise<RoundRecord | null>;
   lastUnfinishedRound(): Promise<RoundRecord | null>;
 

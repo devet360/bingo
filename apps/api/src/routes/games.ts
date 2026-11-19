@@ -8,6 +8,7 @@ import {
   getOpenSessionForUser,
   handleProviderCallback,
   handleProviderProbe,
+  handleRainCredit,
   launchGame,
   listPlayableGames,
   serializeSession,
@@ -30,6 +31,19 @@ gamesRouter.post(
       signature: req.header('x-provider-signature'),
       body: req.body,
       ip: req.ip,
+    });
+    res.status(result.status).json({ data: result.data });
+  }),
+);
+
+gamesRouter.post(
+  '/rain/:providerCode/credit',
+  asyncHandler(async (req, res) => {
+    const result = await handleRainCredit({
+      providerCode: req.params.providerCode,
+      rawBody: req.rawBody,
+      signature: req.header('x-provider-signature'),
+      body: req.body,
     });
     res.status(result.status).json({ data: result.data });
   }),

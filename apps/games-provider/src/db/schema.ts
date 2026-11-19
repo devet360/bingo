@@ -36,6 +36,7 @@ export const operators = pgTable('operators', {
   maxBetsPerRound: integer('max_bets_per_round').notNull().default(200),
   enabledGames: text('enabled_games').array().notNull().default(sql`'{crash}'::text[]`),
   theme: jsonb('theme').$type<Record<string, unknown> | null>(),
+  botConfig: jsonb('bot_config').$type<Record<string, unknown> | null>(),
   maintenance: boolean('maintenance').notNull().default(false),
   probeOkAt: timestamp('probe_ok_at', { withTimezone: true }),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
@@ -66,10 +67,13 @@ export const sessions = pgTable('sessions', {
 
 export const rounds = pgTable('rounds', {
   id: bigserial('id', { mode: 'number' }).primaryKey(),
+  operatorCode: text('operator_code'),
+  gameId: text('game_id').notNull().default('crash'),
   serverSeed: text('server_seed').notNull(),
   serverSeedHash: text('server_seed_hash').notNull(),
   clientSeedComposite: text('client_seed_composite'),
   crashPoint: numeric('crash_point', { precision: 12, scale: 2 }),
+  coinOutcome: text('coin_outcome'),
   status: roundStatus('status').notNull().default('BETTING'),
   startedAt: timestamp('started_at', { withTimezone: true }).notNull(),
   flewAt: timestamp('flew_at', { withTimezone: true }),

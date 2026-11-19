@@ -7,6 +7,7 @@ import type {
   ProviderKind,
   ProviderSession,
 } from '@prisma/client';
+import { AccountCode, AccountOwnerKind, LedgerKind } from '@prisma/client';
 import { prisma } from '../lib/prisma';
 import { AppError, Errors } from '../lib/errors';
 import { logger } from '../lib/logger';
@@ -25,6 +26,7 @@ import { buildBalanceReply, buildLaunchUrl, isPlayableLaunchUrl, movementRequire
 import { postLedger } from './ledger';
 import { getConfig } from './config';
 import { runTransaction, withTxRetry } from '../lib/tx';
+import { z } from 'zod';
 
 const SESSION_TTL_MS = 2 * 60 * 60 * 1_000;
 
@@ -778,5 +780,80 @@ export async function handleProviderProbe(input: {
     await writeCallbackLog(audit, appError.status, appError.code);
     throw appError;
   }
+}
+
+const RainCreditSchema = z.object({
+  type: z.literal('rain_credit'),
+  operator: z.string().min(1).max(64),
+  fundingId: z.string().uuid(),
+  amount: z.string().regex(/^\d+$/, 'amount must be a positive integer'),
+  recipients: z.array(z.string().uuid()).min(1).max(1000),
+}).strict();
+
+export async function handleRainCredit(input: {
+  providerCode: string;
+  rawBody?: Buffer;
+  signature?: string;
+  body: unknown;
+}): Promise<{ status: number; data: { fundingId: string; credited: number } }> {
+  const provider = await prisma.gameProvider.findUnique({ where: { code: input.providerCode } });
+  if (!provider) throw Errors.notFound('Provider');
+  if (!provider.enabled) throw Errors.forbidden('Provider is disabled', 'PROVIDER_DISABLED');
+  if (!verifyCallbackSignature(provider, input.rawBody, input.signature)) {
+    throw Errors.forbidden('Invalid provider signature', 'SIGNATURE_INVALID');
+  }
+  const parsed = RainCreditSchema.safeParse(input.body);
+  if (!parsed.success) throw Errors.badRequest('Rain credit payload is invalid', 'RAIN_PAYLOAD_INVALID');
+  if (parsed.data.operator !== provider.code) {
+    throw Errors.forbidden('Rain operator does not match provider', 'PROVIDER_MISMATCH');
+  }
+  const total = BigInt(parsed.data.amount);
+  if (total <= 0n) throw Errors.badRequest('Rain amount must be positive', 'RAIN_AMOUNT_INVALID');
+  if (total % BigInt(parsed.data.recipients.length) !== 0n) {
+    throw Errors.badRequest('Rain amount must divide evenly across recipients', 'RAIN_AMOUNT_INVALID');
+  }
+  const perRecipient = total / BigInt(parsed.data.recipients.length);
+  const recipients = await prisma.providerSession.findMany({
+    where: {
+      providerId: provider.id,
+      externalSessionId: { in: parsed.data.recipients },
+      status: 'OPEN',
+    },
+  });
+  if (recipients.length !== parsed.data.recipients.length) {
+    throw Errors.badRequest('One or more rain recipients are not active', 'RAIN_INELIGIBLE');
+  }
+
+  await withTxRetry(async () => {
+    await runTransaction(async (tx) => {
+      for (const recipient of recipients) {
+        await postLedger(tx, {
+          idempotencyKey: `rain:${provider.code}:${parsed.data.fundingId}:${recipient.externalSessionId}`,
+          kind: LedgerKind.RAIN_CREDIT,
+          refType: 'ProviderRain',
+          refId: parsed.data.fundingId,
+          memo: `Operator-funded rain ${parsed.data.fundingId}`,
+          instructions: [
+            {
+              ownerKind: AccountOwnerKind.PLATFORM,
+              ownerId: 'platform',
+              code: AccountCode.TREASURY,
+              delta: -perRecipient,
+            },
+            {
+              ownerKind: AccountOwnerKind.USER,
+              ownerId: recipient.userId,
+              code: AccountCode.AVAILABLE,
+              delta: perRecipient,
+            },
+          ],
+        });
+      }
+    });
+  });
+  return {
+    status: 200,
+    data: { fundingId: parsed.data.fundingId, credited: recipients.length },
+  };
 }
 

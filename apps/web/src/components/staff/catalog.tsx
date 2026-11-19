@@ -9,6 +9,7 @@ import {
   fetchProviderCallbacks,
   fetchProviderSettings,
   fetchProviderTransactions,
+  issueGameProviderConsoleToken,
   updateProviderSettings,
   upsertGameProvider,
   upsertGameProviderGame,
@@ -117,6 +118,24 @@ export function GameProvidersTab() {
     }
   };
 
+  const openConsole = async (provider: GameProvider) => {
+    try {
+      const issued = await issueGameProviderConsoleToken(provider.code);
+      const callback = provider.apiBaseUrl ? new URL(provider.apiBaseUrl) : null;
+      if (!callback) {
+        setError('Configure a provider callback URL before opening the console.');
+        return;
+      }
+      callback.pathname = '/provider-console';
+      callback.search = '';
+      callback.hash = '';
+      callback.searchParams.set('token', issued.token);
+      window.open(callback.toString(), '_blank', 'noopener,noreferrer');
+    } catch (caught) {
+      setError(caught instanceof ApiError ? caught.message : 'Could not open the provider console.');
+    }
+  };
+
   const apiBase = getRuntimeConfig().apiUrl;
 
   return (
@@ -178,6 +197,9 @@ export function GameProvidersTab() {
                     </p>
                   </div>
                   <div className="flex shrink-0 flex-wrap gap-1.5">
+                    <Button size="sm" variant="gold" onClick={() => void openConsole(provider)}>
+                      Console
+                    </Button>
                     <Button size="sm" variant="outline" onClick={() => setEditing(provider)}>
                       Configure
                     </Button>

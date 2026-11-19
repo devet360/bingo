@@ -9,6 +9,7 @@
     "start": "node --import tsx server.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --import tsx --test tests/*.test.ts",
+    "operator": "tsx scripts/operator.ts",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate"
   },

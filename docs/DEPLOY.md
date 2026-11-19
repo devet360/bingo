@@ -109,6 +109,7 @@ dokku config:set bingo-api \
   NODE_ENV=production \
   JWT_ACCESS_SECRET="<64 hex chars>" \
   JWT_REFRESH_SECRET="<64 hex chars>" \
+  CONSOLE_TOKEN_SECRET="<64 hex chars shared with the games provider>" \
   OTP_HASH_PEPPER="<32+ chars>" \
   BOT_TOKEN="<telegram bot token>" \
   SUPPORT_BOT_TOKEN="<second telegram bot token>" \
@@ -245,6 +246,11 @@ routed deposit/withdrawal shows as overdue, and `MEDIA_DIR` / `MEDIA_MAX_BYTES` 
 where screenshots are stored and the upload ceiling. The platform win ceiling lives in
 **Admin → Providers** and defaults to 30,000 ETB per single win.
 
+The games/rain release adds `20261119230000_rain_credit`, which adds the
+`RAIN_CREDIT` ledger kind to the Prisma enum. It is included in the standard
+`prisma migrate deploy` step; no separate SQL is required. Set
+`CONSOLE_TOKEN_SECRET` before issuing provider-console tokens.
+
 ## 8. Access model
 
 - **Players — Telegram only.** There is no web registration. A player opens the bot,
@@ -371,17 +377,49 @@ dokku config:set bingo-crash \
   GAME_MAX_WIN=3000000 \
   GAME_MAX_BETS_PER_ROUND=200 \
   CLIENT_SEEDS="stratos_slot_1_00000001,stratos_slot_2_00000002,stratos_slot_3_00000003" \
-  BOT_COUNT=0
+  BOT_COUNT=0 \
+  BOT_STAKE_MIN=100 \
+  BOT_STAKE_MAX=10000 \
+  BOT_ROUND_PAYOUT_CAP=0 \
+  BOT_DAY_PAYOUT_CAP=0 \
+  BOT_DISCLOSE=false \
+  CHAT_ENABLED=false \
+  CHAT_MAX_MESSAGE_LENGTH=500 \
+  CHAT_RATE_LIMIT_PER_MINUTE=10 \
+  CHAT_BLOCKED_PATTERNS="" \
+  CHAT_RETENTION_DAYS=30 \
+  PROVIDER_ADMIN_TOKEN="<long random bootstrap admin token>" \
+  DEFAULT_OPERATOR_CODE=bingo251 \
+  CONSOLE_TOKEN_SECRET="<the exact same value set on bingo-api>"
 ```
 
 `OPERATOR_HMAC_SECRET` must equal the webhook secret of the provider record in the bingo
 admin; it is never committed and never printed. `ALLOWED_PARENT_ORIGINS` is the
 comma-separated list of origins allowed to iframe `/play`.
 
+The new shared secret variables are:
+
+| Variable | App | Purpose |
+| --- | --- | --- |
+| `CONSOLE_TOKEN_SECRET` | `bingo-api` and `bingo-crash` | Must be identical. Bingo signs short-lived provider-console tokens; the provider verifies the HMAC and operator scope. |
+| `OPERATOR_HMAC_SECRET` | `bingo-crash` | Signs all wallet/rain callbacks for the bootstrap operator. Store the matching secret in Bingo’s provider record. |
+| `PROVIDER_ADMIN_TOKEN` | `bingo-crash` | Bootstrap-only operator CLI/admin API token. Keep set on managed deployments and rotate it through Dokku config. |
+
+Bot variables are display-only and never call the wallet:
+`BOT_COUNT`, `BOT_STAKE_MIN`, `BOT_STAKE_MAX`, `BOT_ROUND_PAYOUT_CAP`,
+`BOT_DAY_PAYOUT_CAP`, and `BOT_DISCLOSE`.
+
+Chat variables control opt-in room chat: `CHAT_ENABLED`,
+`CHAT_MAX_MESSAGE_LENGTH`, `CHAT_RATE_LIMIT_PER_MINUTE`,
+`CHAT_BLOCKED_PATTERNS`, and `CHAT_RETENTION_DAYS`.
+Chat is disabled by default. Rain currently uses the provider callback route
+`POST /api/games/rain/<provider-code>/credit`; it credits Bingo ledger type
+`RAIN_CREDIT` atomically and cannot reuse the settlement `win` callback.
+
 Deploy and expose it:
 
 ```bash
-git push dokku-crash feat/games-provider-v1:main
+git push dokku-crash main:main
 
 dokku domains:add bingo-crash crash.example.com
 dokku letsencrypt:enable bingo-crash
@@ -397,6 +435,7 @@ games-provider: boot drain { sent: 0, retried: 0, capped: 0, dead: 0 }
 games-provider: boot recovery { abandonedRoundIds: [], refundedBets: 0, ... }
 games-provider: recovery drain { ... }
 games-provider: listening on 3001
+games-provider: leadership acquired
 ```
 
 Migrations run from `apps/games-provider/drizzle` at boot and the operator row is
@@ -412,7 +451,9 @@ Register the provider in the bingo admin (**Admin → Providers**):
    `OPERATOR_CALLBACK_URL` points at, and it must be reachable from `bingo-crash`.
 2. Add game: external id `crash`, category `crash`, launch URL template
    `https://<crash-host>/play?token={token}&lang={lang}&currency={currency}`.
-3. Enable both. Players then get the crash game in the Mini App lobby.
+   To publish coin flip later, add external id `coinflip` and launch
+   `https://<crash-host>/play?operator={operator}&game={game}&token={token}&lang={lang}&currency={currency}`.
+3. Enable both. Players then get enabled games in the Mini App lobby.
 
 Smoke test (writes rows, so it demands confirmation; recovery is global, so run it
 before the provider is opened to players or against a staging database). A one-off
@@ -423,7 +464,27 @@ config rejects, so pass a real port explicitly:
 dokku run bingo-crash env PORT=3001 SMOKE_CONFIRM=yes npm run games:smoke
 ```
 
-Keep `web=1`. Round timers live in the process, the outbox has no claim lease and socket
-fan-out is local, so a second replica would run a second game and duplicate wallet
-calls. Scaling the crash provider above one replica is unsupported in V1.
+The games provider now uses a Postgres advisory lock for the round/outbox leader and
+LISTEN/NOTIFY for runtime state. Gateways may run more than one replica, but this HA
+story should be staged before opening a second replica to players. During a rolling
+deploy, keep `web=1` as the conservative default until failover and 20-cycle
+reconciliation have been run in staging.
+
+## Provider dashboard
+
+The games provider has its own `/provider-console` page and protected
+`/api/admin/operators*` API. Bingo staff does not share the provider’s bootstrap admin
+token. From **Admin → Providers**, a SUPER_ADMIN can issue a short-lived, HMAC-signed
+provider-console token for the selected provider. The token is scoped to either that
+operator or all operators and expires after 10 minutes.
+
+Until provider-owned staff accounts are introduced, provider operator staff should use
+this Bingo-issued console-token path. `PROVIDER_ADMIN_TOKEN` remains only a
+bootstrapping/on-call CLI mechanism and should not be shared with staff. Secrets are
+never rendered in the console.
+
+A public marketing/promotions website is not required for gameplay and is not deployed
+with the provider yet. It should be a later separate app that consumes the public
+catalogue and provider landing metadata, while mutations and admin auth remain inside
+the provider/Bingo staff consoles.
 

@@ -19,6 +19,37 @@ export interface OperatorLimits {
   maxBetsPerRound: number;
 }
 
+export interface BotConfig {
+  enabled: boolean;
+  count: number;
+  stakeMin: bigint;
+  stakeMax: bigint;
+  roundPayoutCap: bigint;
+  dayPayoutCap: bigint;
+  disclose: boolean;
+}
+
+export interface ChatMessageRecord {
+  id: string;
+  operatorCode: string;
+  roomId: string;
+  sessionToken: string;
+  body: string;
+  isBot: false;
+  createdAt: Date;
+}
+
+export interface RainEventRecord {
+  id: string;
+  operatorCode: string;
+  amount: bigint;
+  recipientCount: number;
+  expiresAt: Date;
+  fundingId: string | null;
+  status: 'PENDING' | 'FUNDED' | 'CANCELLED';
+  createdAt: Date;
+}
+
 export interface OperatorRecord {
   code: string;
   name: string;
@@ -30,6 +61,7 @@ export interface OperatorRecord {
   limits: OperatorLimits;
   enabledGames: string[];
   theme: Record<string, unknown> | null;
+  botConfig?: BotConfig;
   maintenance: boolean;
   probeOkAt: Date | null;
   createdAt: Date;
@@ -60,10 +92,13 @@ export interface SessionRecord {
 
 export interface RoundRecord {
   id: number;
+  operatorCode?: string;
+  gameId?: string;
   serverSeed: string;
   serverSeedHash: string;
   clientSeedComposite: string | null;
   crashPoint: number | null;
+  coinOutcome?: 'HEADS' | 'TAILS';
   status: RoundStatus;
   startedAt: Date;
   flewAt: Date | null;

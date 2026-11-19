@@ -20,6 +20,7 @@ const EnvSchema = z.object({
   JWT_ACCESS_TTL: z.string().default('15m'),
   JWT_REFRESH_SECRET: z.string().min(32),
   JWT_REFRESH_TTL: z.string().default('30d'),
+  CONSOLE_TOKEN_SECRET: z.string().min(32).optional(),
   OTP_HASH_PEPPER: z.string().min(16),
 
   BOT_TOKEN: z.string().min(10),
@@ -65,6 +66,7 @@ if (!parsed.success) {
 
 export const env = {
   ...parsed.data,
+  consoleTokenSecret: parsed.data.CONSOLE_TOKEN_SECRET ?? parsed.data.JWT_ACCESS_SECRET,
   port: parsed.data.API_PORT ?? (parsed.data.PORT ? parsed.data.PORT : undefined) ?? 4000,
   isProd: parsed.data.NODE_ENV === 'production',
   corsOrigins: parsed.data.CORS_ORIGINS.split(',')

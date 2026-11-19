@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { createHmac } from 'node:crypto';
 import type { Prisma } from '@prisma/client';
 import {
   AgentStatus,
@@ -1317,6 +1318,38 @@ adminRouter.get(
         },
       },
     });
+  }),
+);
+
+adminRouter.post(
+  '/game-providers/:code/console-token',
+  asyncHandler(async (req, res) => {
+    const body = parse(z.object({
+      role: z.enum(['operator_admin', 'superadmin']).default('superadmin'),
+      ttlSeconds: z.coerce.number().int().min(60).max(900).default(600),
+    }), req.body ?? {});
+    const provider = await prisma.gameProvider.findUnique({ where: { code: req.params.code } });
+    if (!provider) throw Errors.notFound('Provider');
+    const payload = {
+      type: 'provider_console',
+      actorId: req.auth!.userId,
+      role: body.role,
+      operatorCode: body.role === 'superadmin' ? '*' : provider.code,
+      exp: Math.floor(Date.now() / 1000) + body.ttlSeconds,
+    };
+    const encoded = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
+    const signature = createHmac('sha256', env.consoleTokenSecret).update(encoded).digest('base64url');
+    await writeAudit({
+      actorId: req.auth!.userId,
+      actorRole: req.auth!.role,
+      action: 'provider.console_token',
+      entityType: 'GameProvider',
+      entityId: provider.code,
+      after: { role: body.role, ttlSeconds: body.ttlSeconds },
+      ip: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
+    res.json({ data: { token: `${encoded}.${signature}`, expiresAt: new Date(payload.exp * 1000).toISOString() } });
   }),
 );
 

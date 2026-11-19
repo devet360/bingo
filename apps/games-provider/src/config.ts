@@ -19,11 +19,21 @@ const EnvSchema = z.object({
     'stratos_slot_1_00000001,stratos_slot_2_00000002,stratos_slot_3_00000003',
   ),
   BOT_COUNT: z.coerce.number().int().min(0).default(0),
+  BOT_STAKE_MIN: z.coerce.bigint().min(1n).default(100n),
+  BOT_STAKE_MAX: z.coerce.bigint().min(1n).default(10_000n),
+  BOT_ROUND_PAYOUT_CAP: z.coerce.bigint().min(0n).default(0n),
+  BOT_DAY_PAYOUT_CAP: z.coerce.bigint().min(0n).default(0n),
+  BOT_DISCLOSE: z.enum(['true', 'false']).default('false'),
+  CHAT_ENABLED: z.enum(['true', 'false']).default('false'),
+  CHAT_MAX_MESSAGE_LENGTH: z.coerce.number().int().positive().default(500),
+  CHAT_RATE_LIMIT_PER_MINUTE: z.coerce.number().int().positive().default(10),
+  CHAT_BLOCKED_PATTERNS: z.string().default(''),
+  CHAT_RETENTION_DAYS: z.coerce.number().int().positive().default(30),
+  CONSOLE_TOKEN_SECRET: z.string().min(32).optional(),
 });
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
   const parsed = EnvSchema.parse(env);
-  if (parsed.BOT_COUNT !== 0) throw new Error('BOT_COUNT must be 0 in V1');
   const clientSeeds = parsed.CLIENT_SEEDS.split(',').map((seed) => seed.trim()).filter(Boolean);
   if (clientSeeds.length !== 3) throw new Error('CLIENT_SEEDS must list exactly 3 comma-separated seeds');
   return {
@@ -46,7 +56,24 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
       maxBetsPerRound: parsed.GAME_MAX_BETS_PER_ROUND,
     },
     clientSeeds,
-    botCount: 0 as const,
+    botCount: parsed.BOT_COUNT,
+    botConfig: {
+      enabled: parsed.BOT_COUNT > 0,
+      count: parsed.BOT_COUNT,
+      stakeMin: parsed.BOT_STAKE_MIN,
+      stakeMax: parsed.BOT_STAKE_MAX,
+      roundPayoutCap: parsed.BOT_ROUND_PAYOUT_CAP,
+      dayPayoutCap: parsed.BOT_DAY_PAYOUT_CAP,
+      disclose: parsed.BOT_DISCLOSE === 'true',
+    } as const,
+    chat: {
+      enabled: parsed.CHAT_ENABLED === 'true',
+      maxMessageLength: parsed.CHAT_MAX_MESSAGE_LENGTH,
+      rateLimitPerMinute: parsed.CHAT_RATE_LIMIT_PER_MINUTE,
+      blockedPatterns: parsed.CHAT_BLOCKED_PATTERNS.split(',').map((item) => item.trim()).filter(Boolean),
+      retentionDays: parsed.CHAT_RETENTION_DAYS,
+    } as const,
+    consoleTokenSecret: parsed.CONSOLE_TOKEN_SECRET ?? null,
     adminToken: parsed.PROVIDER_ADMIN_TOKEN ?? null,
     defaultOperatorCode: parsed.DEFAULT_OPERATOR_CODE ?? parsed.OPERATOR_CODE,
   };

@@ -72,3 +72,8 @@ export function sha512Hex(input: string): string {
 export function deriveCrashPoint(digestHex: string): number {
   return deriveCrashPointFromSha512Hex(digestHex).crashPoint;
 }
+
+export function deriveCoinFlipOutcome(serverSeed: string, clientSeeds: readonly string[]): 'HEADS' | 'TAILS' {
+  const digest = sha512Hex(buildCombinedSeedInput(serverSeed, clientSeeds));
+  return Number.parseInt(digest.slice(0, 1), 16) % 2 === 0 ? 'HEADS' : 'TAILS';
+}

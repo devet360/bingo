@@ -349,7 +349,13 @@ export class RoundEngine {
     const serverSeedHash = sha256Hex(serverSeed);
     const startedAt = this.now();
     // Commit before announcing: the row id comes from the store, never a counter.
-    const round = await this.store.createRound({ serverSeed, serverSeedHash, startedAt });
+    const round = await this.store.createRound({
+      operatorCode: this.operatorCode,
+      gameId: 'crash',
+      serverSeed,
+      serverSeedHash,
+      startedAt,
+    });
 
     this.round = round;
     this.roundClientSeeds = [...this.clientSeedsProvider()];

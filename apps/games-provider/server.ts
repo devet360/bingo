@@ -11,6 +11,8 @@ import { OperatorRegistry } from './src/server/operatorRegistry';
 import { reconcileUnresolvedBets, RECONCILE_INTERVAL_MS, runRecovery } from './src/server/recovery';
 import { RoundEngine } from './src/server/roundEngine';
 import { attachSocket, type SocketHandle } from './src/server/socket';
+import { CoinFlipEngine } from './src/server/coinFlipEngine';
+import { LeaderLock } from './src/server/leaderLock';
 
 const config = loadConfig();
 const database = createDb(config.databaseUrl);
@@ -73,6 +75,14 @@ const betManager = new BetManager({
   newId: () => randomUUID(),
   onSettled: (bet) => socket?.notifyBet(bet),
 });
+const coinEngine = new CoinFlipEngine({
+  store,
+  betManager,
+  operatorCode: config.operator.code,
+  randomSeed: () => randomUUID(),
+  clientSeeds: () => config.clientSeeds,
+  onEvent: (event) => socket?.broadcastCoinFlip(event),
+});
 const engine = new RoundEngine({
   store,
   limits: config.limits,
@@ -83,30 +93,42 @@ const engine = new RoundEngine({
   onEvent: (event) => socket?.broadcast(event),
 });
 const server = createServer(createApp({ config, store, registry }));
-socket = attachSocket({ server, store, engine, registry });
+socket = attachSocket({ server, store, engine, coinEngine, registry });
 
 await new Promise<void>((resolve) => server.listen(config.port, resolve));
 console.log(`games-provider: listening on ${config.port}`);
-// §5.3: the background loop starts only once the port is open.
-outbox.start(1000);
-await engine.start();
-
-// Runtime sweep for bets stranded by a flaky wallet; boot recovery only runs
-// at process start, so without this an UNRESOLVED bet waits for a restart.
-let reconciling = false;
-const reconcileTimer = setInterval(() => {
-  if (reconciling) return;
-  reconciling = true;
-  void reconcileUnresolvedBets({ store, wallets: registry })
-    .then((resolved) => {
-      if (resolved > 0) console.log(`games-provider: reconciled ${resolved} unresolved bets`);
-    })
-    .catch((error: unknown) => console.error('games-provider: reconcile sweep failed', error))
-    .finally(() => {
-      reconciling = false;
-    });
-}, RECONCILE_INTERVAL_MS);
-reconcileTimer.unref();
+const leader = new LeaderLock(database.pool);
+let reconcileTimer: ReturnType<typeof setInterval> | null = null;
+await leader.start((isLeader) => {
+  if (!isLeader) {
+    outbox.stop();
+    engine.stop();
+    coinEngine.stop();
+    if (reconcileTimer) clearInterval(reconcileTimer);
+    reconcileTimer = null;
+    console.log('games-provider: leadership lost');
+    return;
+  }
+  outbox.start(1000);
+  void engine.start();
+  void coinEngine.start();
+  let reconciling = false;
+  reconcileTimer = setInterval(() => {
+    if (reconciling) return;
+    reconciling = true;
+    void reconcileUnresolvedBets({ store, wallets: registry })
+      .then((resolved) => {
+        if (resolved > 0) console.log(`games-provider: reconciled ${resolved} unresolved bets`);
+      })
+      .catch((error: unknown) => console.error('games-provider: reconcile sweep failed', error))
+      .finally(() => {
+        reconciling = false;
+      });
+  }, RECONCILE_INTERVAL_MS);
+  reconcileTimer.unref();
+  void leader.notifyState({ leader: true, at: new Date().toISOString() });
+  console.log('games-provider: leadership acquired');
+});
 
 let shuttingDown = false;
 async function shutdown(signal: string): Promise<void> {
@@ -114,8 +136,10 @@ async function shutdown(signal: string): Promise<void> {
   shuttingDown = true;
   console.log(`games-provider: ${signal}, shutting down`);
   engine.stop(); // no new rounds, no new ticks
+  coinEngine.stop();
   outbox.stop();
-  clearInterval(reconcileTimer);
+  if (reconcileTimer) clearInterval(reconcileTimer);
+  await leader.stop();
   await socket?.close(); // terminates live clients so server.close can finish
   await new Promise<void>((resolve) => server.close(() => resolve()));
   await database.close();

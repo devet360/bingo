@@ -9,6 +9,7 @@ import { SessionEndedError, handshake } from './handshake';
 import { OperatorError, type OperatorRegistry } from './operatorRegistry';
 import type { Store } from './store';
 import { WalletError } from './wallet';
+import { ChatRainError, ChatRainManager } from './chatRain';
 
 export interface AppDeps {
   config: AppConfig;
@@ -35,6 +36,7 @@ function roundId(pathId: string): number | null {
 
 export function createApp(deps: AppDeps): express.Express {
   const app = express();
+  const chatRain = new ChatRainManager(deps.config.chat);
   app.disable('x-powered-by');
 
   app.use((_req, res, next) => {
@@ -47,7 +49,12 @@ export function createApp(deps: AppDeps): express.Express {
 
   app.use(
     '/api/admin',
-    adminRouter({ store: deps.store, registry: deps.registry, adminToken: deps.config.adminToken }),
+    adminRouter({
+      store: deps.store,
+      registry: deps.registry,
+      adminToken: deps.config.adminToken,
+      consoleTokenSecret: deps.config.consoleTokenSecret,
+    }),
   );
 
   app.get('/api/health', (_req, res) => {
@@ -125,6 +132,25 @@ export function createApp(deps: AppDeps): express.Express {
         res.status(409).json({ error: { code: 'ROUND_NOT_FINISHED' } });
         return;
       }
+      if (round.gameId === 'coinflip') {
+        if (!round.coinOutcome) {
+          res.status(409).json({ error: { code: 'ROUND_OUTCOME_PENDING' } });
+          return;
+        }
+        res.json({
+          data: {
+            roundId: round.id,
+            gameId: 'coinflip',
+            outcome: round.coinOutcome,
+            serverSeed: round.serverSeed,
+            serverSeedHash: round.serverSeedHash,
+            clientSeedComposite: round.clientSeedComposite,
+            startedAt: round.startedAt,
+            crashedAt: round.crashedAt,
+          },
+        });
+        return;
+      }
       res.json({
         data: {
           roundId: round.id,
@@ -168,6 +194,102 @@ export function createApp(deps: AppDeps): express.Express {
     } catch (error) {
       next(error);
     }
+  });
+
+  app.get('/api/chat/:roomId', async (req, res, next) => {
+    try {
+      const operator = typeof req.query.operator === 'string'
+        ? req.query.operator
+        : deps.config.defaultOperatorCode;
+      res.json({ data: chatRain.recent(operator, req.params.roomId) });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post('/api/chat/messages', async (req, res, next) => {
+    try {
+      const body = z.object({
+        token: z.string().uuid(),
+        roomId: z.string().min(1).max(64),
+        message: z.string().min(1).max(2000),
+      }).parse(req.body);
+      const session = await deps.store.getSession(body.token);
+      if (session === null || session.status !== 'OPEN') {
+        res.status(410).json({ error: { code: 'SESSION_CLOSED' } });
+        return;
+      }
+      const message = chatRain.post({
+        operatorCode: session.operatorCode,
+        roomId: body.roomId,
+        session,
+        body: body.message,
+      });
+      res.status(201).json({ data: message });
+    } catch (error) {
+      if (error instanceof ChatRainError) {
+        res.status(400).json({ error: { code: error.code, message: error.message } });
+        return;
+      }
+      next(error);
+    }
+  });
+
+  app.post('/api/rain', async (req, res, next) => {
+    try {
+      const body = z.object({
+        operator: z.string().min(1).max(64),
+        amount: z.coerce.bigint().positive(),
+        expiresAt: z.coerce.date(),
+      }).parse(req.body);
+      const operator = await deps.registry.get(body.operator);
+      const recipients = await deps.store.listActiveSessionsByOperator(body.operator);
+      const event = await chatRain.rain({
+        operatorCode: body.operator,
+        amount: body.amount,
+        recipients,
+        expiresAt: body.expiresAt,
+        fund: async (funding) => {
+          const raw = JSON.stringify({
+            type: 'rain_credit',
+            operator: funding.operatorCode,
+            fundingId: funding.fundingId,
+            amount: funding.amount.toString(),
+            recipients: funding.recipients,
+          });
+          const signature = await deps.registry.signOutbound(body.operator, raw);
+          const callback = new URL(operator.callbackUrl);
+          callback.pathname = `/api/games/rain/${encodeURIComponent(body.operator)}/credit`;
+          callback.search = '';
+          callback.hash = '';
+          const response = await fetch(callback, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', 'x-provider-signature': signature },
+            body: raw,
+            signal: AbortSignal.timeout(5_000),
+          });
+          if (!response.ok) throw new Error(`RAIN_CREDIT rejected with HTTP ${response.status}`);
+          const payload = await response.json() as { data?: { fundingId?: string } };
+          if (!payload.data?.fundingId) throw new Error('RAIN_CREDIT returned no funding id');
+          return { fundingId: payload.data.fundingId };
+        },
+      });
+      res.status(201).json({ data: event });
+    } catch (error) {
+      if (error instanceof ChatRainError) {
+        res.status(400).json({ error: { code: error.code, message: error.message } });
+        return;
+      }
+      next(error);
+    }
+  });
+
+  app.get('/provider-console', (req, res) => {
+    const token = typeof req.query.token === 'string' ? req.query.token : '';
+    res.type('html').send(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Provider Console</title></head><body style="font-family:system-ui;margin:24px"><h1>Provider Console</h1><p id="scope">Loading scoped operators…</p><div id="operators"></div><script>
+const token=${JSON.stringify(token)};
+async function load(){const r=await fetch('/api/admin/operators',{headers:{authorization:'Bearer '+token}});const p=await r.json();const scope=document.getElementById('scope');const el=document.getElementById('operators');if(!r.ok){scope.textContent=p.error?.code||'Unauthorized';return}scope.textContent='Scoped operator view';for(const o of p.data||[]){const article=document.createElement('article');article.style.border='1px solid #ccc';article.style.padding='12px';article.style.margin='8px 0';article.textContent=o.name+' ('+o.code+') — '+o.status+' — games: '+(o.enabledGames||[]).join(', ');el.appendChild(article)}}load();
+</script></body></html>`);
   });
 
   // Runs after the global frame-ancestors middleware so a per-operator policy

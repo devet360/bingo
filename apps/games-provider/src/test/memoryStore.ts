@@ -101,10 +101,17 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): MemoryStore
       const row = sessions.get(token);
       if (row) sessions.set(token, { ...row, displayBalance: balance });
     },
+    async listActiveSessionsByOperator(operatorCode) {
+      return [...sessions.values()]
+        .filter((row) => row.operatorCode === operatorCode && row.status === 'OPEN')
+        .map(clone);
+    },
 
     async createRound(input: NewRound) {
       const row: RoundRecord = {
         id: ++nextRoundId,
+        operatorCode: input.operatorCode,
+        gameId: input.gameId ?? 'crash',
         serverSeed: input.serverSeed,
         serverSeedHash: input.serverSeedHash,
         clientSeedComposite: null,
@@ -131,7 +138,12 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): MemoryStore
     async finishRound(id, input) {
       const row = rounds.get(id);
       if (!row) return;
-      rounds.set(id, { ...row, status: input.status, crashedAt: input.at });
+      rounds.set(id, {
+        ...row,
+        status: input.status,
+        crashedAt: input.at,
+        coinOutcome: input.coinOutcome,
+      });
     },
     async getRound(id) {
       const row = rounds.get(id);

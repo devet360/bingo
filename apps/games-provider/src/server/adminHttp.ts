@@ -1,4 +1,4 @@
-import { timingSafeEqual } from 'node:crypto';
+import { createHmac, timingSafeEqual } from 'node:crypto';
 import { Router, type NextFunction, type Request, type Response } from 'express';
 import { ZodError, z } from 'zod';
 import type { OperatorRecord, OperatorSecretRecord, OperatorStatus } from '../domain/types';
@@ -80,17 +80,74 @@ function serializeOperator(operator: OperatorRecord, secrets: OperatorSecretReco
 
 type Handler = (req: Request, res: Response) => Promise<void>;
 
+interface ConsoleScope {
+  role: 'operator_admin' | 'superadmin';
+  actorId: string;
+  operatorCode: string;
+}
+
+function verifyConsoleToken(secret: string | null | undefined, token: string): ConsoleScope | null {
+  if (!secret) return null;
+  const parts = token.split('.');
+  if (parts.length !== 2) return null;
+  const [encoded, signature] = parts;
+  const expected = createHmac('sha256', secret).update(encoded).digest('base64url');
+  const given = Buffer.from(signature, 'utf8');
+  const wanted = Buffer.from(expected, 'utf8');
+  if (given.length !== wanted.length || !timingSafeEqual(given, wanted)) return null;
+  try {
+    const payload = JSON.parse(Buffer.from(encoded, 'base64url').toString('utf8')) as {
+      type?: unknown;
+      actorId?: unknown;
+      role?: unknown;
+      operatorCode?: unknown;
+      exp?: unknown;
+    };
+    if (
+      payload.type !== 'provider_console'
+      || typeof payload.actorId !== 'string'
+      || (payload.role !== 'operator_admin' && payload.role !== 'superadmin')
+      || typeof payload.operatorCode !== 'string'
+      || typeof payload.exp !== 'number'
+      || payload.exp <= Math.floor(Date.now() / 1000)
+    ) return null;
+    return { role: payload.role, actorId: payload.actorId, operatorCode: payload.operatorCode };
+  } catch {
+    return null;
+  }
+}
+
 /** Express 4 does not await handlers; funnel rejections into the router error handler. */
 const route = (handler: Handler) => (req: Request, res: Response, next: NextFunction) => {
   handler(req, res).catch(next);
 };
 
-export function adminRouter(deps: { store: Store; registry: OperatorRegistry; adminToken: string | null }): Router {
+export function adminRouter(deps: {
+  store: Store;
+  registry: OperatorRegistry;
+  adminToken: string | null;
+  consoleTokenSecret?: string | null;
+}): Router {
   const router = Router();
 
   router.use((req, res, next) => {
-    if (deps.adminToken === null) {
+    if (deps.adminToken === null && !deps.consoleTokenSecret) {
       res.status(503).json({ error: { code: 'ADMIN_DISABLED' } });
+      return;
+    }
+    const authorization = req.header('authorization');
+    if (authorization?.startsWith('Bearer ')) {
+      const scope = verifyConsoleToken(deps.consoleTokenSecret, authorization.slice(7));
+      if (!scope) {
+        res.status(401).json({ error: { code: 'ADMIN_UNAUTHORIZED' } });
+        return;
+      }
+      res.locals.consoleScope = scope;
+      next();
+      return;
+    }
+    if (deps.adminToken === null) {
+      res.status(401).json({ error: { code: 'ADMIN_UNAUTHORIZED' } });
       return;
     }
     const given = Buffer.from(req.header('x-provider-admin-token') ?? '', 'utf8');
@@ -102,10 +159,23 @@ export function adminRouter(deps: { store: Store; registry: OperatorRegistry; ad
     next();
   });
 
+  router.use('/operators/:code', (req, res, next) => {
+    const scope = res.locals.consoleScope as ConsoleScope | undefined;
+    if (scope?.role === 'operator_admin' && scope.operatorCode !== req.params.code) {
+      res.status(403).json({ error: { code: 'OPERATOR_SCOPE_DENIED' } });
+      return;
+    }
+    next();
+  });
+
   router.get(
     '/operators',
     route(async (_req, res) => {
-      const operators = await deps.store.listOperators();
+      const scope = res.locals.consoleScope as ConsoleScope | undefined;
+      let operators = await deps.store.listOperators();
+      if (scope?.role === 'operator_admin') {
+        operators = operators.filter((operator) => operator.code === scope.operatorCode);
+      }
       const data = await Promise.all(
         operators.map(async (operator) =>
           serializeOperator(operator, await deps.store.listOperatorSecrets(operator.code)),
