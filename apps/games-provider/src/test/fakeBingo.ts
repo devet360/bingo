@@ -182,6 +182,9 @@ export async function createFakeBingo(options: FakeBingoOptions): Promise<FakeBi
   const secret = options.hmacSecret;
   const operatorCode = options.operatorCode;
   const token = options.token ?? FAKE_BINGO_TOKEN;
+  if (!UUID_RE.test(token)) {
+    throw new Error(`createFakeBingo: token must be a UUID (got ${JSON.stringify(token)})`);
+  }
   const currency = (options.currency ?? 'ETB').toUpperCase();
   const sessionOpen = options.sessionOpen ?? true;
   const limits: FakeBingoLimits = { ...DEFAULT_LIMITS };

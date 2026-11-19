@@ -128,8 +128,14 @@ async function resolveIndeterminate(
     wallet = await wallets.walletFor(bet.operatorCode);
   } catch (error) {
     // An operator that cannot be resolved right now (missing row, no secret) is
-    // not a verdict on the bet: leave it UNRESOLVED for the next pass.
-    if (error instanceof OperatorError) return false;
+    // not a verdict on the bet: leave it UNRESOLVED for the next pass. Name the
+    // tenant and the bet so the stuck replay is traceable — never the secret.
+    if (error instanceof OperatorError) {
+      console.error('recovery: operator unresolved, bet left UNRESOLVED', {
+        operatorCode: bet.operatorCode, betId: bet.id,
+      });
+      return false;
+    }
     throw error;
   }
   try {

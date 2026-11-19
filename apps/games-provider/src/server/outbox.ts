@@ -1,5 +1,5 @@
 import type { OutboxRecord } from '../domain/types';
-import type { OperatorWallets } from './operatorRegistry';
+import { OperatorError, type OperatorWallets } from './operatorRegistry';
 import type { Store } from './store';
 import { WalletError, type MovementReply } from './wallet';
 
@@ -29,6 +29,14 @@ const BACKOFF_CAP_EXPONENT = 6;
  * `attempts === 1` at claim time means this is the retry.
  */
 const DETERMINISTIC_RETRY_LIMIT = 1;
+/**
+ * An operator that cannot be resolved (row deleted, or no active secret) is not a
+ * verdict on the owed movement, but it must not retry forever unseen: the row is
+ * retried on the normal backoff (1s doubling to 60s) for roughly an hour, then it
+ * goes DEAD as `OPERATOR_UNRESOLVED` so the owed movement is auditable and shows
+ * up in the DEAD/CAP_REJECTED attention counts at boot.
+ */
+export const OPERATOR_UNRESOLVED_RETRY_LIMIT = 60;
 
 /**
  * Durable delivery of win/rollback movements.
@@ -39,10 +47,13 @@ const DETERMINISTIC_RETRY_LIMIT = 1;
  * 408/429 is a deterministic refusal that gets one replay before `DEAD`.
  * Everything indeterminate (timeout, 5xx, `WALLET_RESPONSE_INVALID`,
  * `WALLET_HTTP_ERROR`, `CONCURRENT_UPDATE`, unreadable 2xx, 408/429) stays
- * `PENDING` with exponential backoff. A bet must always reach a terminal wallet
- * state, so DEAD rows are the audit trail: the refusing code is kept in
- * `lastError`. Rows are drained sequentially so the wallet call order bingo sees
- * is deterministic.
+ * `PENDING` with exponential backoff. A directory failure — the operator row is
+ * gone or has no active secret — retries on that same backoff but only up to
+ * `OPERATOR_UNRESOLVED_RETRY_LIMIT`, then goes DEAD as `OPERATOR_UNRESOLVED`:
+ * an unresolvable tenant must not swallow the audit trail. A bet must always
+ * reach a terminal wallet state, so DEAD rows are the audit trail: the refusing
+ * code is kept in `lastError`. Rows are drained sequentially so the wallet call
+ * order bingo sees is deterministic.
  *
  * `attempts` is read from the claimed snapshot; only `rescheduleOutbox`
  * increments it, so the backoff schedule is 1s, 2s, 4s ... 60s.
@@ -118,9 +129,9 @@ export class OutboxWorker {
 
     let reply: MovementReply;
     try {
-      // A directory failure (operator unknown or secret-less) is classified like
-      // any unreadable wallet reply: the row stays PENDING and retries, because
-      // the movement may still be owed.
+      // A directory failure (operator unknown or secret-less) is not a wallet
+      // verdict: retry it, but only for the bounded window that keeps an owed
+      // movement auditable instead of unendingly invisible.
       const wallet = await this.wallets.walletFor(row.operatorCode);
       reply = row.type === 'WIN' ? await wallet.win(input) : await wallet.rollback(input);
     } catch (error) {
@@ -150,6 +161,20 @@ export class OutboxWorker {
     summary: DrainSummary,
     error: unknown,
   ): Promise<void> {
+    // An operator that cannot be resolved (deleted row, no active secret) may
+    // still owe this movement, so it is retried on the normal backoff — but not
+    // forever: after the bounded window the row goes DEAD as OPERATOR_UNRESOLVED
+    // so the debt is auditable and surfaces in the boot attention counts.
+    if (error instanceof OperatorError) {
+      if (row.attempts < OPERATOR_UNRESOLVED_RETRY_LIMIT) {
+        await this.retry(row, now, summary, 'OPERATOR_UNRESOLVED');
+      } else {
+        await this.store.markOutbox(row.id, 'DEAD', 'OPERATOR_UNRESOLVED');
+        summary.dead += 1;
+      }
+      return;
+    }
+
     const walletError = error instanceof WalletError ? error : null;
     const code = walletError === null ? 'UNKNOWN' : walletError.code;
     const status = walletError?.status ?? null;

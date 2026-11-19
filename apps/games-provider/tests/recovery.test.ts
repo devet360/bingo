@@ -41,6 +41,8 @@ interface BetSeed {
   stake: bigint;
   status: BetStatus;
   betTxnId: string;
+  /** Defaults to `OPERATOR`; a multi-tenant test sets one per bet. */
+  operatorCode?: string;
   winTxnId?: string | null;
   payout?: bigint | null;
   cashoutMultiplier?: number | null;
@@ -49,7 +51,7 @@ interface BetSeed {
 function seedBet(store: MemoryStore, seed: BetSeed) {
   return store.insertBet({
     roundId: seed.roundId,
-    operatorCode: OPERATOR,
+    operatorCode: seed.operatorCode ?? OPERATOR,
     sessionToken: seed.sessionToken,
     panel: seed.panel ?? 0,
     stake: seed.stake,
@@ -238,13 +240,86 @@ test('an UNRESOLVED bet whose operator cannot be resolved stays UNRESOLVED', asy
     },
   };
 
-  const summary = await runRecovery({ store, wallets, now });
+  const logged: unknown[][] = [];
+  const originalError = console.error;
+  console.error = (...args: unknown[]) => { logged.push(args); };
+  let summary: Awaited<ReturnType<typeof runRecovery>>;
+  let swept: number;
+  try {
+    summary = await runRecovery({ store, wallets, now });
+    // The runtime sweep reaches the same conclusion and stays a no-op.
+    swept = await reconcileUnresolvedBets({ store, wallets, now });
+  } finally {
+    console.error = originalError;
+  }
 
   assert.equal(summary.resolvedIndeterminate, 0);
   assert.equal(betByTxn(store, unresolved.betTxnId).status, 'UNRESOLVED');
   assert.equal(store.dump().outbox.length, 0);
-  // The runtime sweep reaches the same conclusion and stays a no-op.
-  assert.equal(await reconcileUnresolvedBets({ store, wallets, now }), 0);
+  assert.equal(swept, 0);
+  // The stuck replay is traceable: one line per pass naming the tenant and the
+  // bet, never the secret.
+  assert.equal(logged.length, 2);
+  for (const entry of logged) {
+    assert.match(String(entry[0]), /operator unresolved/i);
+    const detail = JSON.stringify(entry[1]);
+    assert.match(detail, new RegExp(`"operatorCode":"${OPERATOR}"`));
+    assert.match(detail, new RegExp(`"betId":"${unresolved.id}"`));
+  }
+});
+
+test('each replay and refund is routed to the operator that owns the bet', async () => {
+  const store = createMemoryStore({ now: () => new Date(AT) });
+  // A directory that tags every call with the code it was resolved for: if
+  // recovery used a config/session default instead of `bet.operatorCode`, the
+  // tags below would collapse onto one operator.
+  const lookups: string[] = [];
+  const replays: Array<{ operatorCode: string; txnId: string; sessionToken: string }> = [];
+  const wallets = {
+    walletFor: async (operatorCode: string): Promise<WalletClient> => {
+      lookups.push(operatorCode);
+      return {
+        balance: async () => { throw new Error('unused'); },
+        bet: async (input) => {
+          replays.push({ operatorCode, txnId: input.txnId, sessionToken: input.sessionToken });
+          return { accepted: true, replayed: false, balance: null } satisfies MovementReply;
+        },
+        win: async () => { throw new Error('unused'); },
+        rollback: async () => { throw new Error('unused'); },
+      };
+    },
+  };
+  const round = await store.createRound({ serverSeed: 's', serverSeedHash: 'h', startedAt: AT });
+  const betA = await seedBet(store, {
+    roundId: round.id, sessionToken: token(1), stake: 1_000n, status: 'UNRESOLVED', betTxnId: txn(1),
+    operatorCode: 'op-a',
+  });
+  const betB = await seedBet(store, {
+    roundId: round.id, sessionToken: token(2), stake: 2_000n, status: 'UNRESOLVED', betTxnId: txn(2),
+    operatorCode: 'op-b',
+  });
+
+  const summary = await runRecovery({ store, wallets, now });
+
+  assert.equal(summary.resolvedIndeterminate, 2);
+  assert.deepEqual([...lookups].sort(), ['op-a', 'op-b']);
+  assert.deepEqual(
+    replays.sort((a, b) => a.operatorCode.localeCompare(b.operatorCode)),
+    [
+      { operatorCode: 'op-a', txnId: betA.betTxnId, sessionToken: betA.sessionToken },
+      { operatorCode: 'op-b', txnId: betB.betTxnId, sessionToken: betB.sessionToken },
+    ],
+  );
+
+  // The refund rows the replay wrote belong to the bet's own operator.
+  for (const bet of [betA, betB]) {
+    const rows = outboxFor(store, 'ROLLBACK', bet.betTxnId);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0]!.operatorCode, bet.operatorCode);
+    assert.equal(rows[0]!.sessionToken, bet.sessionToken);
+    assert.equal(rows[0]!.amount, bet.stake);
+  }
+  assert.deepEqual(store.dump().outbox.map((row) => row.operatorCode).sort(), ['op-a', 'op-b']);
 });
 
 test('a 5xx on the replay leaves the bet UNRESOLVED and uncounted', async () => {

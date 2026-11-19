@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { OutboxWorker } from '../src/server/outbox';
+import { OutboxWorker, OPERATOR_UNRESOLVED_RETRY_LIMIT } from '../src/server/outbox';
 import { OperatorError } from '../src/server/operatorRegistry';
 import type { Store } from '../src/server/store';
 import { WalletError, type MovementReply, type WalletClient } from '../src/server/wallet';
@@ -430,7 +430,7 @@ test('each row is delivered through the wallet of its own operator', async () =>
   ]);
 });
 
-test('a row whose operator cannot be resolved stays retryable, never DEAD', async () => {
+test('a row whose operator cannot be resolved retries with OPERATOR_UNRESOLVED below the limit', async () => {
   const store = createMemoryStore({ now: () => NOW });
   await store.enqueueOutbox({
     operatorCode: 'op-gone', type: 'WIN', txnId: 'win-gone', sessionToken: TOKEN, amount: 1_000n,
@@ -443,7 +443,44 @@ test('a row whose operator cannot be resolved stays retryable, never DEAD', asyn
   assert.deepEqual(await worker.drainOnce(NOW), { sent: 0, retried: 1, capped: 0, dead: 0 });
   const row = rowOf(store, 'win-gone');
   assert.equal(row.status, 'PENDING');
-  assert.equal(row.lastError, 'UNKNOWN');
+  assert.equal(row.lastError, 'OPERATOR_UNRESOLVED');
+  assert.equal(row.attempts, 1);
+  assert.equal(row.nextAttemptAt.getTime(), NOW.getTime() + 1_000);
+});
+
+test('a row whose operator cannot be resolved goes DEAD as OPERATOR_UNRESOLVED at the limit', async () => {
+  const store = createMemoryStore({ now: () => NOW });
+  const seeded = await store.enqueueOutbox({
+    operatorCode: 'op-gone', type: 'WIN', txnId: 'win-gone', sessionToken: TOKEN, amount: 1_000n,
+  });
+  assert.ok(seeded);
+  const worker = new OutboxWorker({
+    store,
+    wallets: { walletFor: async () => { throw new OperatorError(503, 'OPERATOR_SECRET_MISSING', 'no secret'); } },
+  });
+
+  // Burn the bounded window at the store level: one retry round left.
+  for (let attempt = 0; attempt < OPERATOR_UNRESOLVED_RETRY_LIMIT - 1; attempt += 1) {
+    await store.rescheduleOutbox(seeded.id, NOW, 'OPERATOR_UNRESOLVED');
+  }
+
+  // The last in-window attempt still backs off and keeps the code.
+  assert.deepEqual(await worker.drainOnce(NOW), { sent: 0, retried: 1, capped: 0, dead: 0 });
+  const pending = rowOf(store, 'win-gone');
+  assert.equal(pending.status, 'PENDING');
+  assert.equal(pending.attempts, OPERATOR_UNRESOLVED_RETRY_LIMIT);
+  assert.equal(pending.lastError, 'OPERATOR_UNRESOLVED');
+
+  // At the limit the owed movement becomes an auditable DEAD row, not a silent retry.
+  assert.deepEqual(
+    await worker.drainOnce(pending.nextAttemptAt),
+    { sent: 0, retried: 0, capped: 0, dead: 1 },
+  );
+  const dead = rowOf(store, 'win-gone');
+  assert.equal(dead.status, 'DEAD');
+  assert.equal(dead.lastError, 'OPERATOR_UNRESOLVED');
+  assert.equal(dead.attempts, OPERATOR_UNRESOLVED_RETRY_LIMIT);
+  assert.equal(await store.countOutboxByStatus('DEAD'), 1);
 });
 
 test('a rejected drain is logged, never thrown, and the timer keeps running', async (t) => {

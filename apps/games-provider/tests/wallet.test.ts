@@ -288,3 +288,11 @@ test('operator-scoped signatures verify while the bare V1 form stays accepted', 
     assertWalletError('SIGNATURE_INVALID', 403),
   );
 });
+
+test('a fake bingo token option that is not a UUID is rejected at construction', async () => {
+  // A typo would otherwise turn every call into 400 CALLBACK_MALFORMED.
+  await assert.rejects(
+    createFakeBingo({ hmacSecret: SECRET, balance: 10_000n, token: 'op-b-token' }),
+    /token must be a UUID/,
+  );
+});
