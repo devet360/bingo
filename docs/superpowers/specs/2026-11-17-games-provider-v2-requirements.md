@@ -1,16 +1,16 @@
 # Games Provider — V2 Requirements
 
-**Status:** awaiting review
+**Status:** approved (2026-11-19); six open decisions answered in §13
 **Date:** 2026-11-17
 **Predecessor:** `2026-11-17-games-provider-design.md` (V1, implemented)
 **Scope:** Requirements for the second release of `apps/games-provider`. This
 document defines what V2 must do and how it will be accepted. It contains no
 implementation decisions beyond the constraints V1 already fixed.
 
-> V1 must be accepted first (`2026-11-17-games-provider-v1-acceptance.md` §4 is
-> owner-run and still open). No V2 code, scaffolding or stubs exist or may be
-> written until this document is reviewed, tested against, and explicitly
-> approved.
+> V1 local suites and browser E2E are complete; the owner-run deploy steps in
+> `2026-11-17-games-provider-v1-acceptance.md` §4 remain the owner's. The owner
+> approved this document on 2026-11-19 and answered all six open decisions, so
+> V2 implementation proceeds area by area using the V1 SDD process.
 
 ---
 
@@ -86,10 +86,10 @@ maintenance mode are configurable per operator without a redeploy.
   window; the old secret fails after it closes.
 - Config change takes effect on the next round without a restart.
 
-**Decisions needed**
-- Whether bingo's existing single provider row per operator is reused as the
-  registry source, or the provider keeps its own registry and bingo remains a
-  single callback consumer per operator.
+**Decision (resolved 2026-11-19):** the provider keeps its own registry. Each
+operator row carries the callback URL, versioned secret, origins, limits, games
+and theme; bingo keeps one provider row per operator and remains the wallet and
+callback consumer for its own deployment.
 
 ---
 
@@ -120,10 +120,10 @@ settlement).
 - A finished round of the new game verifies in the browser from its proof
   endpoint.
 
-**Decision needed**
-- Which game ships: coin-flip (fastest, reuses the two-panel shell), mines or
-  plinko (grid interactions), or keno (number draw). Product decision; the
-  requirement is only that the chosen game fits the seam.
+**Decision (resolved 2026-11-19):** coin flip ships. It is the fastest path to
+proving the catalogue seam, reuses the session, wallet, outbox and recovery
+machinery unchanged, and fits the existing two-panel client shell with a new
+round engine and screen. Mines and plinko remain candidates for a later release.
 
 ---
 
@@ -147,7 +147,8 @@ operator and take effect without a redeploy. Bots can be disabled entirely.
 
 **Requirement C5 — Honest presentation.** If the operator enables a bot
 disclosure label, the UI can mark bot participants. The data model must make
-that possible (a bot flag on the participant frame).
+that possible (a bot flag on the participant frame). The label is off by
+default; operators may turn it on as a config change.
 
 **Acceptance C**
 - A run with bots produces zero wallet calls (asserted at the wallet client).
@@ -186,10 +187,11 @@ player in plain language.
 - No player-identifying data leaves the provider beyond what the operator
   already holds.
 
-**Decision needed**
-- The bingo-side mechanism for rain funding: a new operator-initiated credit
-  route, an admin action, or a bonus balance. This must not reuse the `win`
-  callback type, which is settlement of a bet.
+**Decision (resolved 2026-11-19):** bingo gains a new operator-initiated credit
+route with its own ledger type (`RAIN_CREDIT`). It is additive on the bingo
+side and never reuses the `win` callback, which remains the settlement of a bet.
+The provider calls it only for rain, records the funding id it receives, and
+cancels the rain if the call fails.
 
 ---
 
@@ -217,6 +219,11 @@ error rates are visible without reading logs, and can trigger an alert.
   denied and logged.
 - Every mutation appears in the audit log with actor and diff.
 - Health views show a real DEAD/CAP_REJECTED backlog and clear it when resolved.
+
+**Decision (resolved 2026-11-19):** console auth uses the existing bingo staff
+identity. Bingo issues a short-lived signed console token scoped to a role
+(operator admin or superadmin) and an operator code; the provider verifies it
+with the shared key and rejects anything outside that scope. No Firebase.
 
 ---
 
@@ -247,10 +254,11 @@ abruptly.
   transactions.
 - A rolling deploy ends with no dropped settlements.
 
-**Decision needed**
-- The coordination substrate (Postgres advisory locks and NOTIFY vs Redis) and
-  the target recovery time. Bingo already runs Redis; the provider currently
-  does not.
+**Decision (resolved 2026-11-19):** coordination uses Postgres advisory locks
+for the leader role and LISTEN/NOTIFY as the shared channel; no new Redis
+dependency. A new leader must take over within 10 seconds of a failure, and
+idempotency keys remain the final settlement guard — locks and leases may speed
+recovery but never substitute for them.
 
 ---
 
@@ -295,30 +303,31 @@ round, enable.
 2. Area G (onboarding) — proves A with a second operator early.
 3. Area C (bots) — cosmetic, isolated, fast to validate.
 4. Area B (second game) — the largest engine effort.
-5. Area D (chat + rain) — needs the bingo funding decision.
+5. Area D (chat + rain) — needs the new bingo `RAIN_CREDIT` route.
 6. Area E (console) — follows the features it exposes.
 7. Area F (HA) — last, because it changes the runtime under everything else.
 
 Sequencing may be re-cut after review; the ordering constraint that matters is
 A before B–G, and E after the surfaces it exposes exist.
 
-## 13. Open decisions (blocking review)
+## 13. Decisions (answered 2026-11-19)
 
-| # | Decision | Blocks |
-|---|---|---|
-| 1 | Operator registry lives in bingo, the provider, or both | A |
-| 2 | Second game choice | B |
-| 3 | Rain funding mechanism on the bingo side | D |
-| 4 | Console auth source (bingo staff identity or signed credential) | E |
-| 5 | Coordination substrate and recovery-time target | F |
-| 6 | Bot disclosure label on/off by default | C |
+| # | Decision | Answer | Blocks |
+|---|---|---|---|
+| 1 | Operator registry lives in bingo, the provider, or both | Provider-owned registry; bingo keeps one provider row per operator as wallet consumer | A |
+| 2 | Second game choice | Coin flip | B |
+| 3 | Rain funding mechanism on the bingo side | New operator-credit route with ledger type `RAIN_CREDIT`, never `win` | D |
+| 4 | Console auth source | Bingo staff identity, short-lived signed token scoped to role + operator | E |
+| 5 | Coordination substrate and recovery-time target | Postgres advisory locks + LISTEN/NOTIFY; leader takeover ≤10s | F |
+| 6 | Bot disclosure label on/off by default | Off by default, operator-configurable | C |
 
 ## 14. Acceptance of the requirements themselves
 
-Before implementation:
+Gate status:
 
-1. This document is reviewed and the six open decisions are answered.
-2. Each area's acceptance criteria are turned into test cases (contract tests
-   for isolation and idempotency first).
-3. Only then does implementation start, area by area, with the V1 SDD process
-   (task briefs, per-task review, whole-branch review).
+1. Document reviewed and all six decisions answered — **done 2026-11-19**.
+2. Each area's acceptance criteria turned into test cases (contract tests for
+   isolation and idempotency first) — **in progress**; the Area A + G plan
+   does this for those areas before their code is written.
+3. Implementation proceeds area by area with the V1 SDD process (task briefs,
+   per-task review, whole-branch review) — **next**.
