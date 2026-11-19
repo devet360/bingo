@@ -5,9 +5,11 @@ import {
   boolean,
   index,
   integer,
+  jsonb,
   numeric,
   pgEnum,
   pgTable,
+  primaryKey,
   text,
   timestamp,
   unique,
@@ -18,23 +20,44 @@ export const roundStatus = pgEnum('round_status', ['BETTING', 'FLYING', 'CRASHED
 export const betStatus = pgEnum('bet_status', ['PLACING', 'ACTIVE', 'CASHED', 'LOST', 'CANCELLED', 'REJECTED', 'UNRESOLVED']);
 export const outboxType = pgEnum('outbox_type', ['WIN', 'ROLLBACK']);
 export const outboxStatus = pgEnum('outbox_status', ['PENDING', 'SENT', 'CAP_REJECTED', 'DEAD']);
+export const operatorStatus = pgEnum('operator_status', ['PENDING', 'ACTIVE', 'SUSPENDED']);
 
 export const operators = pgTable('operators', {
   code: text('code').primaryKey(),
   name: text('name').notNull(),
   callbackUrl: text('callback_url').notNull(),
-  hmacSecret: text('hmac_secret').notNull(),
   currency: text('currency').notNull(),
-  enabled: boolean('enabled').notNull().default(true),
+  status: operatorStatus('status').notNull().default('PENDING'),
+  allowedOrigins: text('allowed_origins').array().notNull().default(sql`'{}'::text[]`),
+  localeDefault: text('locale_default').notNull().default('en'),
+  minStake: bigint('min_stake', { mode: 'bigint' }).notNull().default(sql`100`),
+  maxStake: bigint('max_stake', { mode: 'bigint' }).notNull().default(sql`100000`),
+  maxWin: bigint('max_win', { mode: 'bigint' }).notNull().default(sql`3000000`),
+  maxBetsPerRound: integer('max_bets_per_round').notNull().default(200),
+  enabledGames: text('enabled_games').array().notNull().default(sql`'{crash}'::text[]`),
+  theme: jsonb('theme').$type<Record<string, unknown> | null>(),
+  maintenance: boolean('maintenance').notNull().default(false),
+  probeOkAt: timestamp('probe_ok_at', { withTimezone: true }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
+
+export const operatorSecrets = pgTable('operator_secrets', {
+  operatorCode: text('operator_code').notNull().references(() => operators.code, { onDelete: 'cascade' }),
+  version: integer('version').notNull(),
+  secret: text('secret').notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  retiredAt: timestamp('retired_at', { withTimezone: true }),
+}, (table) => [primaryKey({ columns: [table.operatorCode, table.version] })]);
 
 export const sessions = pgTable('sessions', {
   token: uuid('token').primaryKey(),
   operatorCode: text('operator_code').notNull(),
+  gameId: text('game_id').notNull().default('crash'),
   currency: text('currency').notNull(),
   minStake: bigint('min_stake', { mode: 'bigint' }).notNull(),
   maxStake: bigint('max_stake', { mode: 'bigint' }).notNull(),
   maxWin: bigint('max_win', { mode: 'bigint' }).notNull(),
+  maxBetsPerRound: integer('max_bets_per_round').notNull().default(200),
   displayBalance: bigint('display_balance', { mode: 'bigint' }).notNull().default(sql`0`),
   status: text('status').notNull().default('OPEN'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),

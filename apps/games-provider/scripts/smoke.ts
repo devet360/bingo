@@ -50,23 +50,36 @@ let failure: string | null = null;
 try {
   console.log(`smoke: database ${databaseTarget(config.databaseUrl)}`);
   await database.migrate();
+  const at = new Date();
+  const existing = await store.getOperator(config.operator.code);
   await store.upsertOperator({
     code: config.operator.code,
     name: config.operator.name,
     callbackUrl: config.operator.callbackUrl,
-    hmacSecret: config.operator.hmacSecret,
     currency: config.operator.currency,
-    enabled: true,
+    status: existing?.status ?? 'ACTIVE',
+    allowedOrigins: config.allowedParentOrigins,
+    localeDefault: existing?.localeDefault ?? 'en',
+    limits: config.limits,
+    enabledGames: existing?.enabledGames ?? ['crash'],
+    theme: existing?.theme ?? null,
+    maintenance: existing?.maintenance ?? false,
+    probeOkAt: existing?.probeOkAt ?? at,
+    createdAt: existing?.createdAt ?? at,
   });
+  if ((await store.listOperatorSecrets(config.operator.code)).length === 0) {
+    await store.addOperatorSecret(config.operator.code, config.operator.hmacSecret);
+  }
 
-  const at = new Date();
   const session = {
     token: randomUUID(),
     operatorCode: config.operator.code,
+    gameId: 'crash',
     currency: config.operator.currency,
     minStake: config.limits.minStake,
     maxStake: config.limits.maxStake,
     maxWin: config.limits.maxWin,
+    maxBetsPerRound: config.limits.maxBetsPerRound,
     displayBalance: 0n,
     status: 'OPEN' as const,
     createdAt: at,

@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type {
   BetRecord,
   OperatorRecord,
+  OperatorSecretRecord,
   OutboxRecord,
   OutboxStatus,
   RoundRecord,
@@ -33,11 +34,12 @@ const betKey = (roundId: number, sessionToken: string, panel: number): string =>
   `${roundId}|${sessionToken}|${panel}`;
 const outboxKey = (operatorCode: string, type: string, txnId: string): string =>
   `${operatorCode}|${type}|${txnId}`;
-const clone = <T extends object>(row: T): T => ({ ...row });
+const clone = <T>(value: T): T => structuredClone(value);
 
 export function createMemoryStore(options: MemoryStoreOptions = {}): MemoryStore {
   const now = options.now ?? (() => new Date());
   const operators = new Map<string, OperatorRecord>();
+  const operatorSecrets = new Map<string, OperatorSecretRecord>();
   const sessions = new Map<string, SessionRecord>();
   const rounds = new Map<number, RoundRecord>();
   const bets = new Map<string, BetRecord>();
@@ -53,6 +55,35 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): MemoryStore
     },
     async upsertOperator(operator) {
       operators.set(operator.code, clone(operator));
+    },
+    async listOperators() {
+      return [...operators.values()].map(clone);
+    },
+    async listOperatorSecrets(operatorCode) {
+      return [...operatorSecrets.values()]
+        .filter((row) => row.operatorCode === operatorCode)
+        .sort((a, b) => b.version - a.version)
+        .map(clone);
+    },
+    async addOperatorSecret(operatorCode, secret) {
+      const version =
+        [...operatorSecrets.values()]
+          .filter((row) => row.operatorCode === operatorCode)
+          .reduce((max, row) => Math.max(max, row.version), 0) + 1;
+      const row: OperatorSecretRecord = {
+        operatorCode,
+        version,
+        secret,
+        createdAt: now(),
+        retiredAt: null,
+      };
+      operatorSecrets.set(`${operatorCode}|${version}`, row);
+      return clone(row);
+    },
+    async retireOperatorSecret(operatorCode, version) {
+      const key = `${operatorCode}|${version}`;
+      const row = operatorSecrets.get(key);
+      if (row) operatorSecrets.set(key, { ...row, retiredAt: now() });
     },
 
     async getSession(token) {
@@ -143,6 +174,11 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): MemoryStore
     },
     async countBetsForRound(roundId) {
       return [...bets.values()].filter((row) => row.roundId === roundId).length;
+    },
+    async countBetsForRoundByOperator(roundId, operatorCode) {
+      return [...bets.values()].filter(
+        (row) => row.roundId === roundId && row.operatorCode === operatorCode,
+      ).length;
     },
     async listUnsettledBets() {
       return [...bets.values()]

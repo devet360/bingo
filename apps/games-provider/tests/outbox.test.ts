@@ -20,10 +20,12 @@ function session(displayBalance = 10_000n): SessionRecord {
   return {
     token: TOKEN,
     operatorCode: 'bingo251',
+    gameId: 'crash',
     currency: 'ETB',
     minStake: 100n,
     maxStake: 100_000n,
     maxWin: 3_000_000n,
+    maxBetsPerRound: 200,
     displayBalance,
     status: 'OPEN',
     createdAt: new Date(0),

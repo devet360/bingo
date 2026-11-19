@@ -38,3 +38,16 @@ test('limits and client seeds have production defaults and are overridable', () 
 test('CLIENT_SEEDS must contain exactly three seeds', () => {
   assert.throws(() => loadConfig({ ...baseEnv, CLIENT_SEEDS: 'a,b' }), /exactly 3/);
 });
+
+test('admin token and default operator code are optional and additive', () => {
+  const defaults = loadConfig(baseEnv);
+  assert.equal(defaults.adminToken, null);
+  assert.equal(defaults.defaultOperatorCode, 'bingo251');
+  const custom = loadConfig({
+    ...baseEnv,
+    PROVIDER_ADMIN_TOKEN: 'admin-token-for-tests',
+    DEFAULT_OPERATOR_CODE: 'op-main',
+  });
+  assert.equal(custom.adminToken, 'admin-token-for-tests');
+  assert.equal(custom.defaultOperatorCode, 'op-main');
+});

@@ -3,6 +3,7 @@ import { and, asc, count, desc, eq, inArray, isNotNull, lte, notExists, or, sql 
 import type {
   BetRecord,
   OperatorRecord,
+  OperatorSecretRecord,
   OutboxRecord,
   OutboxStatus,
   RoundRecord,
@@ -10,9 +11,10 @@ import type {
 } from '../domain/types';
 import type { NewBet, NewOutbox, NewRound, Store } from '../server/store';
 import type { Database } from './index';
-import { bets, operators, rounds, sessions, walletOutbox } from './schema';
+import { bets, operatorSecrets, operators, rounds, sessions, walletOutbox } from './schema';
 
 type OperatorRow = typeof operators.$inferSelect;
+type OperatorSecretRow = typeof operatorSecrets.$inferSelect;
 type SessionRow = typeof sessions.$inferSelect;
 type RoundRow = typeof rounds.$inferSelect;
 type BetRow = typeof bets.$inferSelect;
@@ -49,9 +51,31 @@ function toOperatorRecord(row: OperatorRow): OperatorRecord {
     code: row.code,
     name: row.name,
     callbackUrl: row.callbackUrl,
-    hmacSecret: row.hmacSecret,
     currency: row.currency,
-    enabled: row.enabled,
+    status: row.status,
+    allowedOrigins: [...row.allowedOrigins],
+    localeDefault: row.localeDefault === 'am' ? 'am' : 'en',
+    limits: {
+      minStake: row.minStake,
+      maxStake: row.maxStake,
+      maxWin: row.maxWin,
+      maxBetsPerRound: row.maxBetsPerRound,
+    },
+    enabledGames: [...row.enabledGames],
+    theme: row.theme ?? null,
+    maintenance: row.maintenance,
+    probeOkAt: row.probeOkAt,
+    createdAt: row.createdAt,
+  };
+}
+
+function toOperatorSecretRecord(row: OperatorSecretRow): OperatorSecretRecord {
+  return {
+    operatorCode: row.operatorCode,
+    version: row.version,
+    secret: row.secret,
+    createdAt: row.createdAt,
+    retiredAt: row.retiredAt,
   };
 }
 
@@ -59,10 +83,12 @@ function toSessionRecord(row: SessionRow): SessionRecord {
   return {
     token: row.token,
     operatorCode: row.operatorCode,
+    gameId: row.gameId,
     currency: row.currency,
     minStake: row.minStake,
     maxStake: row.maxStake,
     maxWin: row.maxWin,
+    maxBetsPerRound: row.maxBetsPerRound,
     displayBalance: row.displayBalance,
     status: toSessionStatus(row.status),
     createdAt: row.createdAt,
@@ -133,7 +159,24 @@ export function createPostgresStore(db: Database): Store {
       return row === undefined ? null : toOperatorRecord(row);
     },
     async upsertOperator(operator) {
-      const values = toOperatorRecord(operator);
+      const values: typeof operators.$inferInsert = {
+        code: operator.code,
+        name: operator.name,
+        callbackUrl: operator.callbackUrl,
+        currency: operator.currency,
+        status: operator.status,
+        allowedOrigins: operator.allowedOrigins,
+        localeDefault: operator.localeDefault,
+        minStake: operator.limits.minStake,
+        maxStake: operator.limits.maxStake,
+        maxWin: operator.limits.maxWin,
+        maxBetsPerRound: operator.limits.maxBetsPerRound,
+        enabledGames: operator.enabledGames,
+        theme: operator.theme,
+        maintenance: operator.maintenance,
+        probeOkAt: operator.probeOkAt,
+        createdAt: operator.createdAt,
+      };
       await db
         .insert(operators)
         .values(values)
@@ -142,11 +185,57 @@ export function createPostgresStore(db: Database): Store {
           set: {
             name: values.name,
             callbackUrl: values.callbackUrl,
-            hmacSecret: values.hmacSecret,
             currency: values.currency,
-            enabled: values.enabled,
+            status: values.status,
+            allowedOrigins: values.allowedOrigins,
+            localeDefault: values.localeDefault,
+            minStake: values.minStake,
+            maxStake: values.maxStake,
+            maxWin: values.maxWin,
+            maxBetsPerRound: values.maxBetsPerRound,
+            enabledGames: values.enabledGames,
+            theme: values.theme,
+            maintenance: values.maintenance,
+            probeOkAt: values.probeOkAt,
+            createdAt: values.createdAt,
           },
         });
+    },
+    async listOperators() {
+      const rows = await db.select().from(operators).orderBy(asc(operators.code));
+      return rows.map(toOperatorRecord);
+    },
+    async listOperatorSecrets(operatorCode) {
+      const rows = await db
+        .select()
+        .from(operatorSecrets)
+        .where(eq(operatorSecrets.operatorCode, operatorCode))
+        .orderBy(desc(operatorSecrets.version));
+      return rows.map(toOperatorSecretRecord);
+    },
+    async addOperatorSecret(operatorCode, secret) {
+      // One statement so two rotations cannot both read the same `max(version)`:
+      // the version is computed by the INSERT's own SELECT rather than a round
+      // trip. A concurrent pair still races on the composite primary key.
+      const nextVersion = sql`(SELECT COALESCE(MAX(${operatorSecrets.version}), 0) + 1 FROM ${operatorSecrets} WHERE ${operatorSecrets.operatorCode} = ${operatorCode})`;
+      const rows = await db
+        .insert(operatorSecrets)
+        .values({ operatorCode, version: nextVersion, secret })
+        .returning();
+      const row = rows[0];
+      if (row === undefined) throw new Error('operator secret insert returned no row');
+      return toOperatorSecretRecord(row);
+    },
+    async retireOperatorSecret(operatorCode, version) {
+      await db
+        .update(operatorSecrets)
+        .set({ retiredAt: new Date() })
+        .where(
+          and(
+            eq(operatorSecrets.operatorCode, operatorCode),
+            eq(operatorSecrets.version, version),
+          ),
+        );
     },
 
     async getSession(token) {
@@ -163,10 +252,12 @@ export function createPostgresStore(db: Database): Store {
           target: sessions.token,
           set: {
             operatorCode: values.operatorCode,
+            gameId: values.gameId,
             currency: values.currency,
             minStake: values.minStake,
             maxStake: values.maxStake,
             maxWin: values.maxWin,
+            maxBetsPerRound: values.maxBetsPerRound,
             displayBalance: values.displayBalance,
             status: values.status,
             createdAt: values.createdAt,
@@ -301,6 +392,13 @@ export function createPostgresStore(db: Database): Store {
         .select({ total: count() })
         .from(bets)
         .where(eq(bets.roundId, roundId));
+      return rows[0]?.total ?? 0;
+    },
+    async countBetsForRoundByOperator(roundId, operatorCode) {
+      const rows = await db
+        .select({ total: count() })
+        .from(bets)
+        .where(and(eq(bets.roundId, roundId), eq(bets.operatorCode, operatorCode)));
       return rows[0]?.total ?? 0;
     },
     async listUnsettledBets() {

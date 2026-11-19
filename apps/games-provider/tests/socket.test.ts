@@ -175,7 +175,8 @@ const OTHER_TOKEN = '22222222-2222-4222-8222-222222222222';
 async function openSecondSession(store: Awaited<ReturnType<typeof setup>>['store']) {
   await store.saveSession({
     token: OTHER_TOKEN, operatorCode: 'bingo251', currency: 'ETB',
-    minStake: 100n, maxStake: 100_000n, maxWin: 3_000_000n, displayBalance: 5_000n,
+    gameId: 'crash', minStake: 100n, maxStake: 100_000n, maxWin: 3_000_000n,
+    maxBetsPerRound: 200, displayBalance: 5_000n,
     status: 'OPEN', createdAt: new Date(0), lastHandshakeAt: new Date(0),
   });
 }

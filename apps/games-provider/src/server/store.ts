@@ -1,6 +1,7 @@
 import type {
   BetRecord,
   OperatorRecord,
+  OperatorSecretRecord,
   OutboxRecord,
   OutboxStatus,
   RoundRecord,
@@ -17,6 +18,10 @@ export type NewOutbox = Pick<
 export interface Store {
   getOperator(code: string): Promise<OperatorRecord | null>;
   upsertOperator(operator: OperatorRecord): Promise<void>;
+  listOperators(): Promise<OperatorRecord[]>;
+  listOperatorSecrets(operatorCode: string): Promise<OperatorSecretRecord[]>;
+  addOperatorSecret(operatorCode: string, secret: string): Promise<OperatorSecretRecord>;
+  retireOperatorSecret(operatorCode: string, version: number): Promise<void>;
 
   getSession(token: string): Promise<SessionRecord | null>;
   saveSession(session: SessionRecord): Promise<void>;
@@ -34,6 +39,7 @@ export interface Store {
   getBet(roundId: number, sessionToken: string, panel: 0 | 1): Promise<BetRecord | null>;
   listBetsForRound(roundId: number): Promise<BetRecord[]>;
   countBetsForRound(roundId: number): Promise<number>;
+  countBetsForRoundByOperator(roundId: number, operatorCode: string): Promise<number>;
   listUnsettledBets(): Promise<BetRecord[]>;
   /**
    * Terminal bets whose wallet reconciliation row was never written: a CASHED

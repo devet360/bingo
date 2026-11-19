@@ -36,7 +36,8 @@ async function fixture(
   };
   const session: SessionRecord = {
     token: '11111111-1111-4111-8111-111111111111', operatorCode: 'bingo251', currency: 'ETB',
-    minStake: 100n, maxStake: 100_000n, maxWin: 3_000_000n, displayBalance: 10_000n,
+    gameId: 'crash', minStake: 100n, maxStake: 100_000n, maxWin: 3_000_000n,
+    maxBetsPerRound: 200, displayBalance: 10_000n,
     status: 'OPEN', createdAt: new Date(0), lastHandshakeAt: new Date(0),
     ...sessionOverrides,
   };

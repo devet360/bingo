@@ -13,6 +13,8 @@ const EnvSchema = z.object({
   GAME_MAX_STAKE: z.coerce.bigint().min(1n).default(100_000n),
   GAME_MAX_WIN: z.coerce.bigint().min(1n).default(3_000_000n),
   GAME_MAX_BETS_PER_ROUND: z.coerce.number().int().positive().default(200),
+  PROVIDER_ADMIN_TOKEN: z.string().min(16).optional(),
+  DEFAULT_OPERATOR_CODE: z.string().min(1).optional(),
   CLIENT_SEEDS: z.string().default(
     'stratos_slot_1_00000001,stratos_slot_2_00000002,stratos_slot_3_00000003',
   ),
@@ -45,6 +47,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     },
     clientSeeds,
     botCount: 0 as const,
+    adminToken: parsed.PROVIDER_ADMIN_TOKEN ?? null,
+    defaultOperatorCode: parsed.DEFAULT_OPERATOR_CODE ?? parsed.OPERATOR_CODE,
   };
 }
 

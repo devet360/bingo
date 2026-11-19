@@ -10,22 +10,48 @@ export type BetStatus =
 export type OutboxType = 'WIN' | 'ROLLBACK';
 export type OutboxStatus = 'PENDING' | 'SENT' | 'CAP_REJECTED' | 'DEAD';
 
+export type OperatorStatus = 'PENDING' | 'ACTIVE' | 'SUSPENDED';
+
+export interface OperatorLimits {
+  minStake: bigint;
+  maxStake: bigint;
+  maxWin: bigint;
+  maxBetsPerRound: number;
+}
+
 export interface OperatorRecord {
   code: string;
   name: string;
   callbackUrl: string;
-  hmacSecret: string;
   currency: string;
-  enabled: boolean;
+  status: OperatorStatus;
+  allowedOrigins: string[];
+  localeDefault: 'en' | 'am';
+  limits: OperatorLimits;
+  enabledGames: string[];
+  theme: Record<string, unknown> | null;
+  maintenance: boolean;
+  probeOkAt: Date | null;
+  createdAt: Date;
+}
+
+export interface OperatorSecretRecord {
+  operatorCode: string;
+  version: number;
+  secret: string;
+  createdAt: Date;
+  retiredAt: Date | null;
 }
 
 export interface SessionRecord {
   token: string;
   operatorCode: string;
+  gameId: string;
   currency: string;
   minStake: bigint;
   maxStake: bigint;
   maxWin: bigint;
+  maxBetsPerRound: number;
   displayBalance: bigint;
   status: 'OPEN' | 'CLOSED';
   createdAt: Date;

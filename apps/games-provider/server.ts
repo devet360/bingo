@@ -16,14 +16,32 @@ const config = loadConfig();
 const database = createDb(config.databaseUrl);
 await database.migrate();
 const store = createPostgresStore(database.db);
-await store.upsertOperator({
-  code: config.operator.code,
-  name: config.operator.name,
-  callbackUrl: config.operator.callbackUrl,
-  hmacSecret: config.operator.hmacSecret,
-  currency: config.operator.currency,
-  enabled: true,
-});
+
+// The bootstrap operator stays env-seeded: `OPERATOR_*` owns identity, callback,
+// currency, limits and origins, while lifecycle fields survive a restart.
+async function seedBootstrapOperator(store: ReturnType<typeof createPostgresStore>, config: ReturnType<typeof loadConfig>) {
+  const existing = await store.getOperator(config.operator.code);
+  const now = new Date();
+  await store.upsertOperator({
+    code: config.operator.code,
+    name: config.operator.name,
+    callbackUrl: config.operator.callbackUrl,
+    currency: config.operator.currency,
+    status: existing?.status ?? 'ACTIVE',
+    allowedOrigins: config.allowedParentOrigins,
+    localeDefault: existing?.localeDefault ?? 'en',
+    limits: config.limits,
+    enabledGames: existing?.enabledGames ?? ['crash'],
+    theme: existing?.theme ?? null,
+    maintenance: existing?.maintenance ?? false,
+    probeOkAt: existing?.probeOkAt ?? now,
+    createdAt: existing?.createdAt ?? now,
+  });
+  if ((await store.listOperatorSecrets(config.operator.code)).length === 0) {
+    await store.addOperatorSecret(config.operator.code, config.operator.hmacSecret);
+  }
+}
+await seedBootstrapOperator(store, config);
 
 const wallet = new HttpWalletClient({
   callbackUrl: config.operator.callbackUrl,

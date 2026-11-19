@@ -42,10 +42,12 @@ export async function handshake(input: {
   const session = {
     token: input.token,
     operatorCode: input.config.operator.code,
+    gameId: 'crash',
     currency: reply.currency,
     minStake: reply.minStake ?? input.config.limits.minStake,
     maxStake: reply.maxStake ?? input.config.limits.maxStake,
     maxWin: reply.maxWin ?? input.config.limits.maxWin,
+    maxBetsPerRound: input.config.limits.maxBetsPerRound,
     displayBalance: reply.balance,
     status: 'OPEN' as const,
     createdAt: now,
