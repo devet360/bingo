@@ -75,7 +75,7 @@ const DEFAULT_LIMITS: FakeBingoLimits = { minStake: 100n, maxStake: 100_000n, ma
 const CALLBACK_TYPES = ['balance', 'bet', 'win', 'rollback'] as const;
 type CallbackType = (typeof CALLBACK_TYPES)[number];
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const CALLBACK_PATH_RE = /^\/api\/games\/callback\/[A-Za-z0-9_-]+$/;
+const CALLBACK_PATH_RE = /^\/api\/games\/callback\/[A-Za-z0-9_-]+(?:\/probe)?$/;
 const MAX_BODY_BYTES = 1_000_000;
 
 interface AppliedMovement {
@@ -250,6 +250,12 @@ export async function createFakeBingo(options: FakeBingoOptions): Promise<FakeBi
     if (!signed) {
       record({ type: 'malformed', status: 403, signatureValid: false, txnId: null, replayed: false });
       sendError(res, 403, 'SIGNATURE_INVALID', 'Invalid provider signature');
+      return;
+    }
+    // Onboarding probe: verified above, no session and no money involved.
+    if (isRecord(body) && body.type === 'probe') {
+      record({ type: 'probe', status: 200, signatureValid: signed, txnId: null, replayed: false });
+      sendData(res, 200, { ok: true });
       return;
     }
     if (!isRecord(body) || !CALLBACK_TYPES.includes(body.type as CallbackType)) {

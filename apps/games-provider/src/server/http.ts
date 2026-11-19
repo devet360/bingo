@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import express from 'express';
 import { ZodError, z } from 'zod';
 import type { AppConfig } from '../config';
+import { adminRouter } from './adminHttp';
 import { SessionEndedError, handshake } from './handshake';
 import { OperatorError, type OperatorRegistry } from './operatorRegistry';
 import type { Store } from './store';
@@ -43,6 +44,11 @@ export function createApp(deps: AppDeps): express.Express {
   });
 
   app.use(express.json({ limit: '32kb' }));
+
+  app.use(
+    '/api/admin',
+    adminRouter({ store: deps.store, registry: deps.registry, adminToken: deps.config.adminToken }),
+  );
 
   app.get('/api/health', (_req, res) => {
     res.json({ data: { status: 'ok', game: 'crash' } });
