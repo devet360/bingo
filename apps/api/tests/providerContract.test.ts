@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
-import { buildBalanceReply, buildLaunchUrl, isPlayableLaunchUrl, movementRequiresOpenSession, withBalance } from '../src/lib/providerContract';
+import { buildBalanceReply, buildLaunchUrl, isPlayableLaunchUrl, movementRequiresOpenSession, publicProviderConfig, withBalance } from '../src/lib/providerContract';
 
 test('launch url substitutes the real currency, not the legacy CREDIT literal', () => {
   const url = buildLaunchUrl('https://crash.example/play?token={token}&lang={lang}&currency={currency}', {
@@ -95,4 +95,11 @@ test('settlements do not require an open session but reads and debits do', () =>
   assert.equal(movementRequiresOpenSession('rollback'), false);
   assert.equal(movementRequiresOpenSession('bet'), true);
   assert.equal(movementRequiresOpenSession('balance'), true);
+});
+
+test('provider config serialization never exposes the previous webhook secret', () => {
+  assert.deepEqual(publicProviderConfig({ previousWebhookSecret: 'old-secret', locale: 'en' }), { locale: 'en' });
+  assert.deepEqual(publicProviderConfig({ locale: 'en' }), { locale: 'en' });
+  assert.equal(publicProviderConfig(null), null);
+  assert.deepEqual(publicProviderConfig({ nested: { a: 1 } }), { nested: { a: 1 } });
 });

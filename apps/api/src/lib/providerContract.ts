@@ -33,6 +33,17 @@ export function isPlayableLaunchUrl(template: string | null): boolean {
   }
 }
 
+/**
+ * Provider config as API consumers may see it: the previous signing secret
+ * stays server-side during rotation.
+ */
+export function publicProviderConfig(config: unknown): unknown {
+  if (typeof config !== 'object' || config === null || Array.isArray(config)) return config;
+  const copy = { ...(config as Record<string, unknown>) };
+  delete copy.previousWebhookSecret;
+  return copy;
+}
+
 export type ProviderMovementType = 'balance' | 'bet' | 'win' | 'rollback';
 
 /**

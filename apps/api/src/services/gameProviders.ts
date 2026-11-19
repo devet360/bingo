@@ -20,7 +20,7 @@ import {
   rollbackLedgerKey,
   verifyCallbackSignature,
 } from '../lib/providerCallback';
-import { buildBalanceReply, buildLaunchUrl, isPlayableLaunchUrl, movementRequiresOpenSession, withBalance } from '../lib/providerContract';
+import { buildBalanceReply, buildLaunchUrl, isPlayableLaunchUrl, movementRequiresOpenSession, publicProviderConfig, withBalance } from '../lib/providerContract';
 import { postLedger } from './ledger';
 import { getConfig } from './config';
 import { runTransaction, withTxRetry } from '../lib/tx';
@@ -40,7 +40,7 @@ export function serializeProvider(provider: GameProvider) {
     maxWin: minorToWire(provider.maxWin),
     enabled: provider.enabled,
     sortOrder: provider.sortOrder,
-    config: provider.config ?? null,
+    config: publicProviderConfig(provider.config) ?? null,
     createdAt: provider.createdAt,
   };
 }
