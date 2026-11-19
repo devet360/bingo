@@ -7,6 +7,7 @@ import { createPostgresStore } from './src/db/storePostgres';
 import { BetManager } from './src/server/betManager';
 import { createApp } from './src/server/http';
 import { OutboxWorker } from './src/server/outbox';
+import { OperatorRegistry } from './src/server/operatorRegistry';
 import { reconcileUnresolvedBets, RECONCILE_INTERVAL_MS, runRecovery } from './src/server/recovery';
 import { RoundEngine } from './src/server/roundEngine';
 import { attachSocket, type SocketHandle } from './src/server/socket';
@@ -42,6 +43,7 @@ async function seedBootstrapOperator(store: ReturnType<typeof createPostgresStor
   }
 }
 await seedBootstrapOperator(store, config);
+const registry = new OperatorRegistry({ store });
 
 const wallet = new HttpWalletClient({
   callbackUrl: config.operator.callbackUrl,
@@ -85,8 +87,8 @@ const engine = new RoundEngine({
   clientSeeds: () => config.clientSeeds,
   onEvent: (event) => socket?.broadcast(event),
 });
-const server = createServer(createApp({ config, store, wallet }));
-socket = attachSocket({ server, store, engine });
+const server = createServer(createApp({ config, store, registry }));
+socket = attachSocket({ server, store, engine, registry });
 
 await new Promise<void>((resolve) => server.listen(config.port, resolve));
 console.log(`games-provider: listening on ${config.port}`);

@@ -3,6 +3,7 @@ import type { AddressInfo } from 'node:net';
 import type { AppConfig } from '../config';
 import { createApp } from '../server/http';
 import { BetManager } from '../server/betManager';
+import type { OperatorRegistry } from '../server/operatorRegistry';
 import { RoundEngine, type EngineLimits } from '../server/roundEngine';
 import { attachSocket, type SocketHandle } from '../server/socket';
 import type { Store } from '../server/store';
@@ -17,7 +18,9 @@ export interface TestServer {
   close(): Promise<void>;
 }
 
-export async function startTestServer(input: { config: AppConfig; store: Store; wallet: WalletClient }): Promise<TestServer> {
+export async function startTestServer(
+  input: { config: AppConfig; store: Store; wallet: WalletClient; registry: OperatorRegistry },
+): Promise<TestServer> {
   const limits: EngineLimits = { ...input.config.limits, maxBetsPerRound: 4 };
   let socket: SocketHandle | null = null;
   const betManager = new BetManager({
@@ -34,10 +37,10 @@ export async function startTestServer(input: { config: AppConfig; store: Store; 
     onEvent: (event) => socket?.broadcast(event),
     betManager,
   });
-  const server = createServer(createApp(input));
+  const server = createServer(createApp({ config: input.config, store: input.store, registry: input.registry }));
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const { port } = server.address() as AddressInfo;
-  socket = attachSocket({ server, store: input.store, engine });
+  socket = attachSocket({ server, store: input.store, engine, registry: input.registry });
   const attached: SocketHandle = socket;
   return {
     url: `http://127.0.0.1:${port}`,

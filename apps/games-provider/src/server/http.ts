@@ -5,13 +5,14 @@ import express from 'express';
 import { ZodError, z } from 'zod';
 import type { AppConfig } from '../config';
 import { SessionEndedError, handshake } from './handshake';
+import { OperatorError, type OperatorRegistry } from './operatorRegistry';
 import type { Store } from './store';
-import { WalletError, type WalletClient } from './wallet';
+import { WalletError } from './wallet';
 
 export interface AppDeps {
   config: AppConfig;
   store: Store;
-  wallet: WalletClient;
+  registry: OperatorRegistry;
 }
 
 // The client is emitted to `dist/client` next to this module's build output,
@@ -19,7 +20,11 @@ export interface AppDeps {
 const clientDir = path.resolve(fileURLToPath(new URL('../../dist/client', import.meta.url)));
 const clientIndex = path.join(clientDir, 'index.html');
 const SESSION_TTL_MS = 2 * 3600_000;
-const SessionBody = z.object({ token: z.string().uuid() });
+const SessionBody = z.object({
+  token: z.string().uuid(),
+  operator: z.string().min(1).max(64).optional(),
+  game: z.string().min(1).max(32).optional(),
+});
 
 function roundId(pathId: string): number | null {
   if (!/^\d+$/.test(pathId)) return null;
@@ -45,17 +50,20 @@ export function createApp(deps: AppDeps): express.Express {
 
   app.post('/api/sessions/handshake', async (req, res, next) => {
     try {
-      const { token } = SessionBody.parse(req.body);
+      const { token, operator: operatorCode, game: gameId } = SessionBody.parse(req.body);
       const session = await handshake({
         token,
+        operatorCode,
+        gameId,
         config: deps.config,
         store: deps.store,
-        wallet: deps.wallet,
+        registry: deps.registry,
       });
       res.json({
         data: {
           sessionId: session.token,
-          gameId: 'crash',
+          operator: session.operatorCode,
+          gameId: session.gameId,
           currency: session.currency,
           balance: session.displayBalance.toString(),
           limits: {
@@ -69,6 +77,10 @@ export function createApp(deps: AppDeps): express.Express {
     } catch (error) {
       if (error instanceof SessionEndedError) {
         res.status(410).json({ error: { code: 'SESSION_CLOSED' } });
+        return;
+      }
+      if (error instanceof OperatorError) {
+        res.status(error.status).json({ error: { code: error.code } });
         return;
       }
       // A parse or signature failure is a broken wallet call, not a dead session.

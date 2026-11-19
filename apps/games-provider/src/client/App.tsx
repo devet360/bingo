@@ -192,7 +192,10 @@ const GameScreen: React.FC<{ token: string; session: HandshakeData; lang: Lang }
 export default function App() {
   const [lang, setLang] = useState<Lang>(readLang);
   const [boot, setBoot] = useState<Boot>({ state: 'loading' });
-  const token = useRef(new URLSearchParams(window.location.search).get('token')).current;
+  const params = new URLSearchParams(window.location.search);
+  const token = useRef(params.get('token')).current;
+  const operator = useRef(params.get('operator') ?? undefined).current;
+  const game = useRef(params.get('game') ?? undefined).current;
 
   useEffect(() => {
     installBridge({ onLocale: setLang });
@@ -207,7 +210,7 @@ export default function App() {
     fetch('/api/sessions/handshake', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ token }),
+      body: JSON.stringify({ token, ...(operator ? { operator } : {}), ...(game ? { game } : {}) }),
     })
       .then(async (response) => {
         if (cancelled) return;

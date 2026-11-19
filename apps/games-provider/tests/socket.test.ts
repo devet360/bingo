@@ -4,10 +4,14 @@ import WebSocket from 'ws';
 import { createFakeBingo } from '../src/test/fakeBingo';
 import { createMemoryStore } from '../src/test/memoryStore';
 import { HttpWalletClient } from '../src/server/wallet';
+import { OperatorRegistry } from '../src/server/operatorRegistry';
 import { loadConfig } from '../src/config';
 import { handshake } from '../src/server/handshake';
 import { startTestServer } from '../src/test/server';
 import { BETTING_WINDOW_MS } from '../src/server/roundEngine';
+
+const OPERATOR_CODE = 'stratos';
+const HMAC_SECRET = 'test-hmac-secret-value';
 
 interface Frame { type: string; [key: string]: unknown }
 
@@ -34,16 +38,36 @@ function collector(ws: WebSocket) {
 }
 
 async function setup() {
-  const fake = await createFakeBingo({ hmacSecret: 'test-hmac-secret-value', balance: 10_000n, currency: 'ETB' });
+  const fake = await createFakeBingo({
+    hmacSecret: HMAC_SECRET, balance: 10_000n, currency: 'ETB', operatorCode: OPERATOR_CODE,
+  });
   const config = loadConfig({
     DATABASE_URL: 'postgres://x',
-    OPERATOR_CALLBACK_URL: `${fake.url}/api/games/callback/stratos`,
-    OPERATOR_HMAC_SECRET: 'test-hmac-secret-value',
+    OPERATOR_CODE,
+    OPERATOR_CALLBACK_URL: `${fake.url}/api/games/callback/${OPERATOR_CODE}`,
+    OPERATOR_HMAC_SECRET: HMAC_SECRET,
   });
   const store = createMemoryStore();
+  await store.upsertOperator({
+    code: config.operator.code,
+    name: config.operator.name,
+    callbackUrl: config.operator.callbackUrl,
+    currency: config.operator.currency,
+    status: 'ACTIVE',
+    allowedOrigins: [],
+    localeDefault: 'en',
+    limits: config.limits,
+    enabledGames: ['crash'],
+    theme: null,
+    maintenance: false,
+    probeOkAt: null,
+    createdAt: new Date('2026-11-19T00:00:00Z'),
+  });
+  await store.addOperatorSecret(config.operator.code, HMAC_SECRET);
+  const registry = new OperatorRegistry({ store });
   const wallet = new HttpWalletClient({ callbackUrl: config.operator.callbackUrl, hmacSecret: config.operator.hmacSecret });
-  await handshake({ token: fake.token, config, store, wallet });
-  const server = await startTestServer({ config, store, wallet });
+  await handshake({ token: fake.token, config, store, registry });
+  const server = await startTestServer({ config, store, wallet, registry });
   return { fake, ...server };
 }
 
@@ -123,6 +147,32 @@ test('authing a closed or unknown session ends the socket', async (t) => {
   await closed.frames.next((frame) => frame.type === 'session:ended');
 });
 
+test('a session of a suspended operator is refused at auth and on the next action', async (t) => {
+  const env = await setup();
+  t.after(async () => { await env.close(); await env.fake.close(); });
+  const operator = await env.store.getOperator(OPERATOR_CODE);
+  assert.ok(operator);
+
+  await env.store.upsertOperator({ ...operator, status: 'SUSPENDED' });
+  const refused = await connect(env.wsUrl);
+  refused.frames.send({ type: 'auth', token: env.fake.token });
+  const ended = await refused.frames.next((frame) => frame.type === 'session:ended');
+  assert.equal(ended.reason, 'OPERATOR_INACTIVE');
+  await new Promise<void>((resolve) => refused.ws.once('close', () => resolve()));
+
+  await env.store.upsertOperator(operator);
+  const live = await connect(env.wsUrl);
+  live.frames.send({ type: 'auth', token: env.fake.token });
+  await live.frames.next((frame) => frame.type === 'snapshot');
+
+  // Suspension reaches sockets that were already authenticated.
+  await env.store.upsertOperator({ ...operator, maintenance: true });
+  live.frames.send({ type: 'bet:place', panel: 0, stake: '1000' });
+  const endedLive = await live.frames.next((frame) => frame.type === 'session:ended');
+  assert.equal(endedLive.reason, 'OPERATOR_INACTIVE');
+  await new Promise<void>((resolve) => live.ws.once('close', () => resolve()));
+});
+
 test('a bad frame is answered with BAD_FRAME and the socket keeps its auth', async (t) => {
   const env = await setup();
   t.after(async () => { await env.close(); await env.fake.close(); });
@@ -174,7 +224,7 @@ const OTHER_TOKEN = '22222222-2222-4222-8222-222222222222';
 
 async function openSecondSession(store: Awaited<ReturnType<typeof setup>>['store']) {
   await store.saveSession({
-    token: OTHER_TOKEN, operatorCode: 'bingo251', currency: 'ETB',
+    token: OTHER_TOKEN, operatorCode: OPERATOR_CODE, currency: 'ETB',
     gameId: 'crash', minStake: 100n, maxStake: 100_000n, maxWin: 3_000_000n,
     maxBetsPerRound: 200, displayBalance: 5_000n,
     status: 'OPEN', createdAt: new Date(0), lastHandshakeAt: new Date(0),
@@ -194,7 +244,7 @@ test('notifyBet and notifyBalance address only the target session', async (t) =>
   await b.frames.next((frame) => frame.type === 'snapshot');
 
   env.socket.notifyBet({
-    id: 'bet-a', roundId: 7, operatorCode: 'bingo251', sessionToken: env.fake.token, panel: 1,
+    id: 'bet-a', roundId: 7, operatorCode: OPERATOR_CODE, sessionToken: env.fake.token, panel: 1,
     stake: 1_000n, autoCashout: 1.5, status: 'CASHED', cashoutMultiplier: 2, payout: 2_000n,
     betTxnId: 'bet-txn', winTxnId: 'win-txn', createdAt: new Date(0), settledAt: new Date(0),
   });

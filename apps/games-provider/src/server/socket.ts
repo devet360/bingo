@@ -1,7 +1,8 @@
 import type { Server } from 'node:http';
 import { WebSocketServer, WebSocket } from 'ws';
-import type { BetRecord } from '../domain/types';
+import type { BetRecord, SessionRecord } from '../domain/types';
 import { BetRuleError } from './betManager';
+import type { OperatorRegistry } from './operatorRegistry';
 import type { RoundEngine, RoundEngineEvent } from './roundEngine';
 import type { Store } from './store';
 import { WalletError } from './wallet';
@@ -30,8 +31,10 @@ const betPayload = (bet: BetRecord) => ({
 
 interface ClientState { sessionToken: string | null; alive: boolean; tail: Promise<void> }
 
-export function attachSocket(input: { server: Server; store: Store; engine: EngineView }): SocketHandle {
-  const { store, engine } = input;
+export function attachSocket(
+  input: { server: Server; store: Store; engine: EngineView; registry: OperatorRegistry },
+): SocketHandle {
+  const { store, engine, registry } = input;
   // maxPayload keeps a hostile client from buffering 100 MiB before JSON.parse.
   const wss = new WebSocketServer({ server: input.server, path: '/ws', maxPayload: 64 * 1024 });
   const clients = new Map<WebSocket, ClientState>();
@@ -70,6 +73,23 @@ export function attachSocket(input: { server: Server; store: Store; engine: Engi
     });
   });
 
+  /** Loads an OPEN session whose operator still serves it, or ends the socket. */
+  async function requireLiveSession(ws: WebSocket, token: string): Promise<SessionRecord | null> {
+    const session = await store.getSession(token);
+    if (session === null || session.status !== 'OPEN') {
+      send(ws, { type: 'session:ended', reason: session === null ? 'UNKNOWN' : 'CLOSED' });
+      ws.close(4001, 'session ended');
+      return null;
+    }
+    const operator = await registry.get(session.operatorCode);
+    if (operator.status !== 'ACTIVE' || operator.maintenance) {
+      send(ws, { type: 'session:ended', reason: 'OPERATOR_INACTIVE' });
+      ws.close(4001, 'operator inactive');
+      return null;
+    }
+    return session;
+  }
+
   async function handleFrame(ws: WebSocket, raw: string): Promise<void> {
     const state = clients.get(ws);
     if (!state) return;
@@ -98,12 +118,8 @@ export function attachSocket(input: { server: Server; store: Store; engine: Engi
         send(ws, { type: 'error', code: 'BAD_FRAME', message: 'auth requires a token' });
         return;
       }
-      const session = await store.getSession(token);
-      if (session === null || session.status !== 'OPEN') {
-        send(ws, { type: 'session:ended', reason: session === null ? 'UNKNOWN' : 'CLOSED' });
-        ws.close(4001, 'session ended');
-        return;
-      }
+      const session = await requireLiveSession(ws, token);
+      if (session === null) return;
       state.sessionToken = session.token;
       const snapshot = engine.snapshot();
       const ownBets = snapshot.roundId === null
@@ -120,12 +136,8 @@ export function attachSocket(input: { server: Server; store: Store; engine: Engi
 
     const token = state.sessionToken;
     if (token === null) return;
-    const session = await store.getSession(token);
-    if (session === null || session.status !== 'OPEN') {
-      send(ws, { type: 'session:ended', reason: session === null ? 'UNKNOWN' : 'CLOSED' });
-      ws.close(4001, 'session ended');
-      return;
-    }
+    const session = await requireLiveSession(ws, token);
+    if (session === null) return;
 
     if (type === 'bet:place') {
       const panel = frame.panel;

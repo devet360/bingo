@@ -2,23 +2,36 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import type { AddressInfo } from 'node:net';
 import { createApp } from '../src/server/http';
-import { HttpWalletClient } from '../src/server/wallet';
+import { OperatorRegistry } from '../src/server/operatorRegistry';
 import { createMemoryStore } from '../src/test/memoryStore';
 import { loadConfig } from '../src/config';
 
 const config = loadConfig({
   DATABASE_URL: 'postgres://user:pass@localhost:5432/db',
+  OPERATOR_CODE: 'stratos',
   OPERATOR_CALLBACK_URL: 'https://bingo.example/api/games/callback/stratos',
   OPERATOR_HMAC_SECRET: 'test-hmac-secret-value',
 });
 
 test('health endpoint reports ok', async () => {
   const store = createMemoryStore();
-  const wallet = new HttpWalletClient({
+  await store.upsertOperator({
+    code: config.operator.code,
+    name: config.operator.name,
     callbackUrl: config.operator.callbackUrl,
-    hmacSecret: config.operator.hmacSecret,
+    currency: config.operator.currency,
+    status: 'ACTIVE',
+    allowedOrigins: [],
+    localeDefault: 'en',
+    limits: config.limits,
+    enabledGames: ['crash'],
+    theme: null,
+    maintenance: false,
+    probeOkAt: null,
+    createdAt: new Date('2026-11-19T00:00:00Z'),
   });
-  const server = createApp({ config, store, wallet }).listen(0);
+  await store.addOperatorSecret(config.operator.code, config.operator.hmacSecret);
+  const server = createApp({ config, store, registry: new OperatorRegistry({ store }) }).listen(0);
   const { port } = server.address() as AddressInfo;
   const response = await fetch(`http://127.0.0.1:${port}/api/health`);
   assert.equal(response.status, 200);

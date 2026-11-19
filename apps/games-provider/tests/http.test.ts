@@ -1,27 +1,50 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import type { AddressInfo } from 'node:net';
-import { createFakeBingo } from '../src/test/fakeBingo';
+import { createFakeBingo, type FakeBingoOptions } from '../src/test/fakeBingo';
 import { createMemoryStore } from '../src/test/memoryStore';
 import { createApp } from '../src/server/http';
-import { HttpWalletClient } from '../src/server/wallet';
+import { OperatorRegistry } from '../src/server/operatorRegistry';
 import { loadConfig } from '../src/config';
+
+const OPERATOR_CODE = 'stratos';
+const HMAC_SECRET = 'test-hmac-secret-value';
+
+const fakeBingo = (options: Partial<FakeBingoOptions> = {}) =>
+  createFakeBingo({ hmacSecret: HMAC_SECRET, balance: 0n, currency: 'ETB', operatorCode: OPERATOR_CODE, ...options });
 
 async function boot(fake: Awaited<ReturnType<typeof createFakeBingo>>) {
   const config = loadConfig({
     DATABASE_URL: 'postgres://x',
-    OPERATOR_CALLBACK_URL: `${fake.url}/api/games/callback/stratos`,
-    OPERATOR_HMAC_SECRET: 'test-hmac-secret-value',
+    OPERATOR_CODE,
+    OPERATOR_CALLBACK_URL: `${fake.url}/api/games/callback/${OPERATOR_CODE}`,
+    OPERATOR_HMAC_SECRET: HMAC_SECRET,
   });
   const store = createMemoryStore();
-  const wallet = new HttpWalletClient({ callbackUrl: config.operator.callbackUrl, hmacSecret: config.operator.hmacSecret });
-  const server = createApp({ config, store, wallet }).listen(0);
+  await store.upsertOperator({
+    code: config.operator.code,
+    name: config.operator.name,
+    callbackUrl: config.operator.callbackUrl,
+    currency: config.operator.currency,
+    status: 'ACTIVE',
+    allowedOrigins: [],
+    localeDefault: 'en',
+    limits: config.limits,
+    enabledGames: ['crash'],
+    theme: null,
+    maintenance: false,
+    probeOkAt: null,
+    createdAt: new Date('2026-11-19T00:00:00Z'),
+  });
+  await store.addOperatorSecret(config.operator.code, HMAC_SECRET);
+  const registry = new OperatorRegistry({ store });
+  const server = createApp({ config, store, registry }).listen(0);
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   return { server, base, store };
 }
 
 test('handshake stores the session and returns signed limits', async (t) => {
-  const fake = await createFakeBingo({ hmacSecret: 'test-hmac-secret-value', balance: 50_000n, currency: 'ETB' });
+  const fake = await fakeBingo({ balance: 50_000n });
   const { server, base, store } = await boot(fake);
   t.after(async () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
@@ -33,13 +56,31 @@ test('handshake stores the session and returns signed limits', async (t) => {
   });
   assert.equal(response.status, 200);
   const body = await response.json();
+  assert.equal(body.data.operator, OPERATOR_CODE);
+  assert.equal(body.data.gameId, 'crash');
   assert.equal(body.data.balance, '50000');
   assert.equal(body.data.limits.minStake, '100');
   assert.equal(store.dump().sessions.length, 1);
 });
 
+test('an unknown operator answers 404 before the wallet is called', async (t) => {
+  const fake = await fakeBingo({ balance: 50_000n });
+  const { server, base } = await boot(fake);
+  t.after(async () => {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await fake.close();
+  });
+  const response = await fetch(`${base}/api/sessions/handshake`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ token: fake.token, operator: 'missing' }),
+  });
+  assert.equal(response.status, 404);
+  assert.equal((await response.json()).error.code, 'OPERATOR_NOT_FOUND');
+  assert.equal(fake.state().calls.length, 0);
+});
+
 test('a closed bingo session answers 410', async (t) => {
-  const fake = await createFakeBingo({ hmacSecret: 'test-hmac-secret-value', balance: 0n, currency: 'ETB', sessionOpen: false });
+  const fake = await fakeBingo({ sessionOpen: false });
   const { server, base } = await boot(fake);
   t.after(async () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
@@ -53,7 +94,7 @@ test('a closed bingo session answers 410', async (t) => {
 });
 
 test('proof is available only after the round crashed', async (t) => {
-  const fake = await createFakeBingo({ hmacSecret: 'test-hmac-secret-value', balance: 0n, currency: 'ETB' });
+  const fake = await fakeBingo();
   const { server, base, store } = await boot(fake);
   t.after(async () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
@@ -71,7 +112,7 @@ test('proof is available only after the round crashed', async (t) => {
 });
 
 test('closing a session is idempotent and flips the stored status', async (t) => {
-  const fake = await createFakeBingo({ hmacSecret: 'test-hmac-secret-value', balance: 0n, currency: 'ETB' });
+  const fake = await fakeBingo();
   const { server, base, store } = await boot(fake);
   t.after(async () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
@@ -93,7 +134,7 @@ test('closing a session is idempotent and flips the stored status', async (t) =>
 });
 
 test('proof answers 404 for an unknown round and 409 for an abandoned one', async (t) => {
-  const fake = await createFakeBingo({ hmacSecret: 'test-hmac-secret-value', balance: 0n, currency: 'ETB' });
+  const fake = await fakeBingo();
   const { server, base, store } = await boot(fake);
   t.after(async () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
@@ -110,7 +151,7 @@ test('proof answers 404 for an unknown round and 409 for an abandoned one', asyn
 });
 
 test('a 5xx wallet answers 502 instead of declaring the session dead', async (t) => {
-  const fake = await createFakeBingo({ hmacSecret: 'test-hmac-secret-value', balance: 0n, currency: 'ETB' });
+  const fake = await fakeBingo();
   const { server, base } = await boot(fake);
   t.after(async () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
@@ -126,7 +167,7 @@ test('a 5xx wallet answers 502 instead of declaring the session dead', async (t)
 });
 
 test('a 2xx wallet reply without a signature answers 502 rather than declaring the session dead', async (t) => {
-  const fake = await createFakeBingo({ hmacSecret: 'test-hmac-secret-value', balance: 0n, currency: 'ETB' });
+  const fake = await fakeBingo();
   const { server, base } = await boot(fake);
   t.after(async () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
@@ -142,7 +183,7 @@ test('a 2xx wallet reply without a signature answers 502 rather than declaring t
 });
 
 test('a malformed handshake body answers 400 rather than 500', async (t) => {
-  const fake = await createFakeBingo({ hmacSecret: 'test-hmac-secret-value', balance: 0n, currency: 'ETB' });
+  const fake = await fakeBingo();
   const { server, base } = await boot(fake);
   t.after(async () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
