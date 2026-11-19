@@ -24,7 +24,7 @@ export const BROWSER_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit
 const ALLOWED_HOSTS: Record<string, readonly string[]> = {
   telebirr: ['transactioninfo.ethiotelecom.et'],
   mpesa: ['m-pesabusiness.safaricom.et'],
-  cbe: ['mb.cbe.com.et'],
+  cbe: ['apps.cbe.com.et:100'],
   boa: ['cs.bankofabyssinia.com'],
   dashen: ['receipts.dashenbanksc.com'],
   awash: ['awashpay.awashbank.com:8225'],

@@ -1,89 +1,138 @@
 /**
- * Commercial Bank of Ethiopia, current receipt format.
+ * Commercial Bank of Ethiopia, legacy branch receipt.
  *
- * The CBE app shares a receipt as https://mbreciept.cbe.com.et/{receiptId} or
- * a QR code. The page itself carries no data; the JSON API answers with the
- * record:
+ * The CBE app receipt API (mb.cbe.com.et) has been down since late 2026. The
+ * legacy branch receipt endpoint still answers, keyed by the FT reference and
+ * the last eight digits of the receiving account:
  *
- *   https://mb.cbe.com.et/api/v1/transactions/public/transaction-detail/{id}
+ *   https://apps.cbe.com.et:100/BranchReceipt/{reference}&{accountSuffix}
  *
- * The API needs the CBE web app's X-App-ID / X-App-Version headers, and
- * answers an unknown or tampered token with HTTP 500 problem+json
- * "Invalid or tampered legacy token", which is a not-found, not an outage.
+ * It answers a PDF. A reference the bank does not know, or an account suffix
+ * that does not belong to the receiving account, comes back as a JSON
+ * `{"status":"failed",...}` body (HTTP 500 for an unknown reference, HTTP 200
+ * "Please Check Your Link" for a bad suffix) — a not-found, not an outage.
  *
- * The older FT reference + receiving-account PDF endpoint (apps.cbe.com.et)
- * has been unreachable since July 2026 and is not offered as a deposit rail.
+ * The PDF prints the reference as "Reference No. (VAT Invoice No)", the
+ * credited amount as "Transferred Amount", and masks both accounts to their
+ * last digits ("1****5909").
  */
 import { BankParser, NotFoundError } from './base';
 import type { NormalizedInput } from '../reference';
 import type { ParsedReceipt } from '../types';
+import { ReferenceError } from '../types';
 import type { SafeResponse } from '../http';
-import { parseMoney } from '../text';
+import { extractPdfText, isPdf, parseMoney } from '../text';
 
-/** The CBE web app's public headers, needed by the JSON API. */
-const CBE_HEADERS: Record<string, string> = {
-  'X-App-ID': 'd1292e42-7400-49de-a2d3-9731caa4c819',
-  'X-App-Version': '0a01980b-9859-1369-8198-59f403820000',
-  Origin: 'https://mbreciept.cbe.com.et',
-  Referer: 'https://mbreciept.cbe.com.et/',
-  Accept: 'application/json',
-};
+const LEGACY_BASE = 'https://apps.cbe.com.et:100/BranchReceipt/';
 
-function str(v: unknown): string | undefined {
-  if (typeof v === 'string') return v.trim() || undefined;
-  if (typeof v === 'number' && Number.isFinite(v)) return String(v);
-  return undefined;
+const FAILED_BODY_RE = /"status"\s*:\s*"failed"|please check your link|receipt data is not correct/i;
+
+/** Strip a label from the front of a line, or return undefined. */
+function after(label: string, line: string): string | undefined {
+  if (!line.startsWith(label)) return undefined;
+  const v = line.slice(label.length).trim();
+  return v || undefined;
 }
 
 export class CbeParser extends BankParser {
   readonly key = 'cbe';
-
-  requestHeaders(): Record<string, string> {
-    return { ...CBE_HEADERS };
-  }
+  readonly pdfResponse = true;
 
   buildUrl(input: NormalizedInput): string {
-    return `https://mb.cbe.com.et/api/v1/transactions/public/transaction-detail/${encodeURIComponent(input.reference)}`;
+    if (!input.accountNumber) {
+      throw new ReferenceError('Enter at least the last 8 digits of the receiving account.');
+    }
+    return `${LEGACY_BASE}${encodeURIComponent(input.reference)}&${encodeURIComponent(input.accountNumber)}`;
   }
 
   isNotFoundResponse(resp: SafeResponse): boolean {
-    return /invalid or tampered legacy token/i.test(resp.body.toString('utf8'));
+    return FAILED_BODY_RE.test(resp.body.toString('utf8').slice(0, 2000));
   }
 
-  protected parseBody(body: Buffer): ParsedReceipt {
-    let json: Record<string, unknown>;
-    try {
-      const parsed: unknown = JSON.parse(body.toString('utf8'));
-      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return { verified: false };
-      json = parsed as Record<string, unknown>;
-    } catch {
+  protected async parseBody(body: Buffer): Promise<ParsedReceipt> {
+    if (!isPdf(body)) {
+      if (FAILED_BODY_RE.test(body.toString('utf8').slice(0, 2000))) {
+        throw new NotFoundError('CBE has no receipt for this reference and receiving account.');
+      }
       return { verified: false };
     }
+    return CbeParser.parseText(await extractPdfText(body));
+  }
 
-    const id = str(json.id);
-    if (!id) throw new NotFoundError('CBE has no receipt for this Receipt ID.');
+  /** Read the legacy receipt from the PDF's text. */
+  static parseText(text: string): ParsedReceipt {
+    const lines = text
+      .split('\n')
+      .map((l) => l.replace(/\s+/g, ' ').trim())
+      .filter(Boolean);
 
-    const debitHolder = str(json.debitAccountHolder);
-    const creditHolder = str(json.creditAccountHolder);
-    const debitAccount = str(json.debitAccountNo);
-    const creditAccount = str(json.creditAccountNo);
-    // "1,250.00" must not parse as 1.
-    const amount = parseMoney(json.amountCredited) ?? parseMoney(json.amountDebited);
-    const currency = str(json.creditCurrency) || 'ETB';
-    const date = Array.isArray(json.dateTimes) ? str(json.dateTimes[0]) : undefined;
-    const reason = Array.isArray(json.paymentDetails) ? str(json.paymentDetails[0]) : undefined;
+    let senderName: string | undefined;
+    let senderAccount: string | undefined;
+    let receiverName: string | undefined;
+    let receiverAccount: string | undefined;
+    let date: string | undefined;
+    let reference: string | undefined;
+    let amount: number | undefined;
+    let totalDebited: number | undefined;
+    let party: 'sender' | 'receiver' | undefined;
+
+    for (const line of lines) {
+      const payer = after('Payer', line);
+      if (payer) {
+        senderName = payer;
+        party = 'sender';
+        continue;
+      }
+      const receiver = after('Receiver', line);
+      if (receiver) {
+        receiverName = receiver;
+        party = 'receiver';
+        continue;
+      }
+      const account = after('Account', line);
+      if (account) {
+        if (party === 'sender' && !senderAccount) senderAccount = account;
+        else if (party === 'receiver' && !receiverAccount) receiverAccount = account;
+        continue;
+      }
+      if (/^(?:\d+\s+)?Payment Date & Time/i.test(line)) {
+        date = line.replace(/^(?:\d+\s+)?Payment Date & Time/i, '').trim() || undefined;
+        continue;
+      }
+      if (/^Reference No\./i.test(line)) {
+        // The reference is printed on the same line, glued to the label.
+        const v = line.replace(/^Reference No\.\s*\(VAT Invoice No\)\s*/i, '').trim();
+        if (v && v !== line) reference = v;
+        continue;
+      }
+      if (/^VAT Receipt No:/i.test(line) && !reference) {
+        reference = line.replace(/^VAT Receipt No:\s*/i, '').trim() || undefined;
+        continue;
+      }
+      if (/^Transferred Amount/i.test(line) && amount === undefined) {
+        amount = parseMoney(line.replace(/^Transferred Amount\s*/i, ''));
+        continue;
+      }
+      if (/^Total amount debited/i.test(line) && totalDebited === undefined) {
+        totalDebited = parseMoney(line.replace(/^Total amount debited[^\d]*/i, ''));
+      }
+    }
+
+    // What the receiver got is the credited amount; the debited total only
+    // moves when CBE charges a commission on top.
+    const credited = amount ?? totalDebited;
 
     return {
-      verified: !!(amount !== undefined && amount > 0 && (debitHolder || creditHolder || debitAccount || creditAccount)),
-      senderName: debitHolder,
-      senderAccount: debitAccount,
-      receiverName: creditHolder,
-      receiverAccount: creditAccount,
-      amount,
-      currency,
+      verified: !!(credited !== undefined && credited > 0 && (senderName || receiverName || senderAccount || receiverAccount)),
+      amount: credited,
+      currency: 'ETB',
+      senderName,
+      senderAccount,
+      receiverName,
+      receiverAccount,
       date,
-      reference: id,
-      reason,
+      reference,
+      reason: 'Branch receipt',
     };
   }
 }

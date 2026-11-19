@@ -80,13 +80,20 @@ export function referenceFromUrl(code: string, raw: string): string | null {
   switch (code) {
     case 'telebirr':
       return parts[0] === 'receipt' && parts[1] ? parts[1] : null;
-    case 'cbe':
+    case 'cbe': {
+      // Legacy: apps.cbe.com.et:100/BranchReceipt/{ref}&{accountSuffix}.
+      if (host.startsWith('apps.cbe.com.et')) {
+        const at = parts.findIndex((p) => p.toLowerCase() === 'branchreceipt');
+        const segment = at >= 0 ? parts[at + 1] : parts[parts.length - 1];
+        return segment ? segment.split('&')[0] || null : null;
+      }
       // mbreciept.cbe.com.et/receipt/{id}, or /{id} on the API host.
       return host.startsWith('mb.cbe.com.et')
         ? parts[parts.length - 1] ?? null
         : parts[0] === 'receipt' && parts[1]
           ? parts[1]
           : null;
+    }
     case 'boa': {
       // /slip/?trx=REF12345
       const trx = url.searchParams.get('trx');

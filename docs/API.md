@@ -148,6 +148,15 @@ Two verification paths exist for supported rails:
   The deposit waits as `MANUAL` until an agent or staff member opens the receipt from an
   Ethiopian connection and confirms the amount (see below).
 
+CBE is server-side and not geo-blocked, but its app receipt API is down; the parser
+uses the legacy branch receipt page,
+`https://apps.cbe.com.et:100/BranchReceipt/{reference}&{last eight digits of the receiving account}`,
+which answers a PDF whose reference prints as "Reference No. (VAT Invoice No)". The
+suffix belongs to the agent's receiving account: it is derived server-side and the
+provider row must set `accountDigits: 8`. The bank answers an unknown reference or a
+wrong suffix with a `{"status":"failed", ...}` JSON body, which is reported as
+`NOT_FOUND`, not as an outage.
+
 The payload from the phone is **untrusted**. The server re-parses it against the
 code-owned parser, ignores any amount/status the client might claim, stores one
 `ReceiptVerification` row per deposit (`@@unique([providerCode, reference])` rejects
@@ -316,7 +325,7 @@ POST /support/receipts/check
     "reference": "FT25ABCDEFGH",
     "status": "VERIFIED",
     "message": "The bank confirms this receipt.",
-    "url": "https://mb.cbe.com.et/...",
+    "url": "https://apps.cbe.com.et:100/BranchReceipt/FT25ABCDEFGH&12345678",
     "source": "SERVER",
     "parsed": { "amount": 250, "senderName": "ABEBE KEBEDE", "date": "01-02-2026 10:11:12", ... },
     "usedBy": null,
@@ -329,6 +338,10 @@ POST /support/receipts/check
 `NOT_VERIFIED`, `UNREACHABLE`, and `UNSUPPORTED` (manual rails have no bank page).
 `INVALID_RECEIPT_REFERENCE` (400) is returned before any fetch when the reference
 fails its provider pattern. `source` is `SERVER`, `CLIENT` or `RELAY`.
+
+The optional `accountNumber` supplies the receiving-account suffix for rails that need
+one. CBE's legacy page cannot exist without it, so a CBE lookup without the last eight
+digits returns no `url` (the lookup itself still runs).
 
 The optional `payload` (`{ contentType?, bodyBase64 }`) accepts the bank's own
 response — the saved HTML page, the JSON envelope, or the PDF — and parses it in

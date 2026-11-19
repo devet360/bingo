@@ -14,7 +14,9 @@ import { parseMoney, birrAmountIn, htmlToLines } from '../src/services/receipts/
 import { ReferenceError, type ParsedReceipt, type ReceiptProvider } from '../src/services/receipts/types';
 import { TelebirrParser } from '../src/services/receipts/parsers/telebirr';
 import { MpesaParser } from '../src/services/receipts/parsers/mpesa';
+import { CbeParser } from '../src/services/receipts/parsers/cbe';
 import { NotFoundError } from '../src/services/receipts/parsers/base';
+import { assertAllowedUrl, HostNotAllowedError, type SafeResponse } from '../src/services/receipts/http';
 
 function provider(code: string, patch: Partial<ReceiptProvider> = {}): ReceiptProvider {
   return {
@@ -329,6 +331,105 @@ test('mpesa joins labels and values that the PDF puts on separate lines', () => 
     requestedReference: 'ABC1234567',
   });
   assert.deepEqual(gate, { ok: true });
+});
+
+// The legacy CBE branch receipt PDF flattens each label onto the same line as
+// its value and masks both accounts to their trailing digits. This fixture
+// mirrors the extracted text with invented data.
+const CBE_LINES = [
+  'PayerClaim On Bole Atlantic',
+  'AccountE****0010',
+  'ReceiverBINGO PLC',
+  'Account1****5909',
+  'Payment Date & Time01-02-2026, 6:16:00 PM',
+  'Reference No. (VAT Invoice No)FT26266ZN54F',
+  'Transferred Amount1,200.00 ETB',
+  'Total amount debited from customers account1,200.00 ETB',
+];
+
+test('cbe reads the legacy branch receipt text lines', () => {
+  const parsed = CbeParser.parseText(CBE_LINES.join('\n'));
+
+  assert.equal(parsed.verified, true);
+  assert.equal(parsed.reference, 'FT26266ZN54F');
+  assert.equal(parsed.amount, 1200);
+  assert.equal(parsed.currency, 'ETB');
+  assert.equal(parsed.senderName, 'Claim On Bole Atlantic');
+  assert.equal(parsed.senderAccount, 'E****0010');
+  assert.equal(parsed.receiverName, 'BINGO PLC');
+  assert.equal(parsed.receiverAccount, '1****5909');
+  assert.equal(parsed.date, '01-02-2026, 6:16:00 PM');
+
+  const gate = verificationGate(parsed, {
+    provider: provider('cbe'),
+    requestedReference: 'ft26266 zn54f',
+  });
+  assert.deepEqual(gate, { ok: true });
+
+  const mismatch = verificationGate(parsed, {
+    provider: provider('cbe'),
+    requestedReference: 'FT25ABCDEFGH',
+  });
+  assert.equal(mismatch.ok, false);
+  if (!mismatch.ok) assert.equal(mismatch.reason, 'reference');
+});
+
+test('cbe builds the legacy URL and demands the account suffix', () => {
+  const parser = new CbeParser();
+  const url = parser.buildUrl({ reference: 'FT26266ZN54F', accountNumber: '23145909' });
+  assert.equal(url, 'https://apps.cbe.com.et:100/BranchReceipt/FT26266ZN54F&23145909');
+  assert.doesNotThrow(() => assertAllowedUrl('cbe', url));
+
+  assert.throws(() => parser.buildUrl({ reference: 'FT26266ZN54F' }), ReferenceError);
+  // Only the legacy host:port is on the allowlist now.
+  assert.throws(
+    () => assertAllowedUrl('cbe', 'https://mb.cbe.com.et/api/v1/transactions/public/transaction-detail/FT26266ZN54F'),
+    HostNotAllowedError,
+  );
+  assert.throws(
+    () => assertAllowedUrl('cbe', 'https://apps.cbe.com.et/BranchReceipt/FT26266ZN54F&23145909'),
+    HostNotAllowedError,
+  );
+});
+
+test('cbe reads the failed-link bodies as not found, not as a receipt', async () => {
+  const parser = new CbeParser();
+  const input = { reference: 'FT26266ZN54F', accountNumber: '23145909' };
+  const badSuffix = {
+    status: 200,
+    contentType: 'application/json',
+    body: Buffer.from('{"status":"failed","message":"Please Check Your Link "}'),
+    url: '',
+  };
+  const unknownReference = {
+    status: 500,
+    contentType: 'application/json',
+    body: Buffer.from('{"status":"failed","message":"Receipt Data is not correct. Please Check Your Inputs"}'),
+    url: '',
+  };
+
+  assert.equal(parser.isNotFoundResponse(badSuffix), true);
+  assert.equal(parser.isNotFoundResponse(unknownReference), true);
+  await assert.rejects(async () => parser.parse(badSuffix, input), NotFoundError);
+  await assert.rejects(async () => parser.parse(unknownReference, input), NotFoundError);
+
+  // Neither a PDF nor the failure envelope: unreadable, not a receipt.
+  const garbage = await parser.parse(textResponse('<html>maintenance</html>'), input);
+  assert.equal(garbage.verified, false);
+});
+
+test('cbe reads the reference out of a pasted legacy link', () => {
+  assert.equal(
+    referenceFromUrl('cbe', 'https://apps.cbe.com.et:100/BranchReceipt/FT26266ZN54F&23145909'),
+    'FT26266ZN54F',
+  );
+  assert.deepEqual(
+    normalizeInput(provider('cbe', { accountDigits: 8 }), {
+      reference: 'https://apps.cbe.com.et:100/BranchReceipt/ft26266zn54f&12345909',
+      accountNumber: '100012345909',
+    }),
+    { reference: 'FT26266ZN54F', accountNumber: '12345909', phoneNumber: undefined },
+  );
 });
 
 test('mpesa reads the JSON envelope: code 0 carries the PDF, 2032 is not found', () => {

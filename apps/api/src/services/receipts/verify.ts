@@ -103,6 +103,7 @@ export async function verifyReceipt(
     url = parser.buildUrl(input);
     assertAllowedUrl(key, url);
   } catch (e) {
+    if (e instanceof ReferenceError) return fail('INVALID_REFERENCE', e.message, source);
     return fail('UNREACHABLE', describeFetchError(e), source, undefined, input.reference);
   }
 

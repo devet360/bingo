@@ -60,7 +60,7 @@ function verifiedOutcome(patch: Partial<VerifyOutcome> = {}): VerifyOutcome {
     message: 'Receipt verified by the bank.',
     source: 'SERVER',
     reference: 'FT25ABCDEFGH',
-    url: 'https://mb.cbe.com.et/receipt/FT25ABCDEFGH',
+    url: 'https://apps.cbe.com.et:100/BranchReceipt/FT25ABCDEFGH&12345678',
     parsed: {
       verified: true,
       amount: 250,
@@ -249,7 +249,7 @@ test('a reference already attached to a deposit is reported', async () => {
 
 test('an unreachable bank still returns the link to open', async () => {
   const { checkReceipt } = await import('../src/services/receipts/checker');
-  const { deps } = fakeDeps(providerRow('cbe'), {
+  const { deps } = fakeDeps(providerRow('cbe', { accountDigits: 8 }), {
     outcome: verifiedOutcome({
       status: 'UNREACHABLE',
       message: 'CBE did not answer.',
@@ -259,10 +259,37 @@ test('an unreachable bank still returns the link to open', async () => {
   });
 
   const result = await checkReceipt(
-    { providerCode: 'cbe', reference: 'FT25ABCDEFGH' },
+    { providerCode: 'cbe', reference: 'FT25ABCDEFGH', accountNumber: '100012345678' },
     deps,
   );
 
   assert.equal(result.status, 'UNREACHABLE');
-  assert.match(result.url ?? '', /^https:\/\/mb\.cbe\.com\.et\/.*FT25ABCDEFGH$/);
+  // The suffix is the last eight digits of the receiving account.
+  assert.equal(result.url, 'https://apps.cbe.com.et:100/BranchReceipt/FT25ABCDEFGH&12345678');
+});
+
+test('the CBE checker needs the account suffix to build the legacy link', async () => {
+  const { checkReceipt } = await import('../src/services/receipts/checker');
+  const { deps } = fakeDeps(providerRow('cbe', { accountDigits: 8 }), {
+    outcome: verifiedOutcome({ url: undefined }),
+  });
+
+  const result = await checkReceipt({ providerCode: 'cbe', reference: 'FT25ABCDEFGH' }, deps);
+
+  // Without the suffix there is no page to open; the lookup itself still ran.
+  assert.equal(result.status, 'VERIFIED');
+  assert.equal(result.url, undefined);
+});
+
+test('masked receiver accounts match on their visible tail', async () => {
+  const { receiverAccountMatches } = await import('../src/services/receipts/deposits');
+
+  assert.equal(receiverAccountMatches('1****5909', '100023145909'), true);
+  assert.equal(receiverAccountMatches('1****5909', '100023140000'), false);
+  // Unmasked numbers compare the same way.
+  assert.equal(receiverAccountMatches('100023145909', '100023145909'), true);
+  // Too little overlap to tell: a soft pass, never a false claim.
+  assert.equal(receiverAccountMatches('1****', '100023145909'), undefined);
+  assert.equal(receiverAccountMatches(undefined, '100023145909'), undefined);
+  assert.equal(receiverAccountMatches('1****5909', undefined), undefined);
 });

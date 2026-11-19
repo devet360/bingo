@@ -123,11 +123,13 @@ export function receiverAccountMatches(
   const receipt = receiptAccount.replace(/[^0-9*]/g, '');
   const agent = agentAccount.replace(/\D/g, '');
   if (!receipt || !agent) return undefined;
-  // A masked number keeps its first and last digits; the suffix is stable.
-  const visible = receipt.replace(/\*/g, '');
-  const len = Math.min(6, visible.length, agent.length);
+  // A masked number ("1****5909") keeps its trailing digits visible. Only that
+  // run is contiguous in the real account; gluing first and last digits into
+  // "15909" would never match.
+  const run = /(\d+)\**$/.exec(receipt)?.[1] ?? '';
+  const len = Math.min(6, run.length, agent.length);
   if (len < 4) return undefined;
-  return agent.endsWith(visible.slice(-len));
+  return agent.endsWith(run.slice(-len));
 }
 
 /** The receiving-account suffix for a deposit: what was stored with it, or the
