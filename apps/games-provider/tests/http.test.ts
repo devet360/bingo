@@ -13,12 +13,13 @@ const HMAC_SECRET = 'test-hmac-secret-value';
 const fakeBingo = (options: Partial<FakeBingoOptions> = {}) =>
   createFakeBingo({ hmacSecret: HMAC_SECRET, balance: 0n, currency: 'ETB', operatorCode: OPERATOR_CODE, ...options });
 
-async function boot(fake: Awaited<ReturnType<typeof createFakeBingo>>) {
+async function boot(fake: Awaited<ReturnType<typeof createFakeBingo>>, env: NodeJS.ProcessEnv = {}) {
   const config = loadConfig({
     DATABASE_URL: 'postgres://x',
     OPERATOR_CODE,
     OPERATOR_CALLBACK_URL: `${fake.url}/api/games/callback/${OPERATOR_CODE}`,
     OPERATOR_HMAC_SECRET: HMAC_SECRET,
+    ...env,
   });
   const store = createMemoryStore();
   await store.upsertOperator({
@@ -180,6 +181,64 @@ test('a 2xx wallet reply without a signature answers 502 rather than declaring t
   });
   assert.equal(response.status, 502);
   assert.equal((await response.json()).error.code, 'WALLET_UNAVAILABLE');
+});
+
+test('catalogue exposes only the requested operator', async (t) => {
+  const fake = await createFakeBingo({ hmacSecret: 'test-hmac-secret-value', balance: 1_000n, operatorCode: 'stratos' });
+  const { server, base, store } = await boot(fake);
+  t.after(async () => {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await fake.close();
+  });
+  await store.upsertOperator({
+    code: 'other', name: 'Other', callbackUrl: 'https://other.example/cb', currency: 'ETB',
+    status: 'SUSPENDED', allowedOrigins: ['https://other.example'], localeDefault: 'am',
+    limits: { minStake: 100n, maxStake: 100_000n, maxWin: 3_000_000n, maxBetsPerRound: 200 },
+    enabledGames: ['crash'], theme: null, maintenance: false, probeOkAt: null,
+    createdAt: new Date('2026-11-19T00:00:00Z'),
+  });
+  const response = await fetch(`${base}/api/catalogue?operator=other`);
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.data.operator.code, 'other');
+  assert.equal(body.data.localeDefault, 'am');
+  assert.equal(body.data.limits.minStake, '100');
+  const missing = await fetch(`${base}/api/catalogue?operator=nope`);
+  assert.equal(missing.status, 404);
+});
+
+test('the play page uses the requested operator origins', async (t) => {
+  const fake = await createFakeBingo({ hmacSecret: 'test-hmac-secret-value', balance: 1_000n, operatorCode: 'stratos' });
+  const { server, base, store } = await boot(fake);
+  t.after(async () => {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await fake.close();
+  });
+  await store.upsertOperator({
+    code: 'tenant', name: 'Tenant', callbackUrl: 'https://tenant.example/cb', currency: 'ETB',
+    status: 'ACTIVE', allowedOrigins: ['https://tenant.example'], localeDefault: 'en',
+    limits: { minStake: 100n, maxStake: 100_000n, maxWin: 3_000_000n, maxBetsPerRound: 200 },
+    enabledGames: ['crash'], theme: null, maintenance: false, probeOkAt: null,
+    createdAt: new Date('2026-11-19T00:00:00Z'),
+  });
+  const response = await fetch(`${base}/play?operator=tenant`);
+  assert.match(response.headers.get('content-security-policy') ?? '', /frame-ancestors 'self' https:\/\/tenant\.example/);
+  assert.doesNotMatch(response.headers.get('content-security-policy') ?? '', /other/);
+});
+
+test('the play page falls back to env origins when the operator has none', async (t) => {
+  const fake = await fakeBingo();
+  const { server, base } = await boot(fake, { ALLOWED_PARENT_ORIGINS: 'https://env.example' });
+  t.after(async () => {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await fake.close();
+  });
+  // The bootstrap operator is seeded with no allowedOrigins of its own.
+  const known = await fetch(`${base}/play?operator=${OPERATOR_CODE}`);
+  assert.equal(known.headers.get('content-security-policy'), "frame-ancestors 'self' https://env.example");
+  // An unknown operator keeps the env policy instead of failing the page.
+  const unknown = await fetch(`${base}/play?operator=ghost`);
+  assert.equal(unknown.headers.get('content-security-policy'), "frame-ancestors 'self' https://env.example");
 });
 
 test('a malformed handshake body answers 400 rather than 500', async (t) => {

@@ -136,6 +136,53 @@ export function createApp(deps: AppDeps): express.Express {
     }
   });
 
+  app.get('/api/catalogue', async (req, res, next) => {
+    try {
+      const code = typeof req.query.operator === 'string' ? req.query.operator : deps.config.defaultOperatorCode;
+      const operator = await deps.store.getOperator(code);
+      if (operator === null) {
+        res.status(404).json({ error: { code: 'OPERATOR_NOT_FOUND' } });
+        return;
+      }
+      res.json({
+        data: {
+          operator: { code: operator.code, name: operator.name },
+          currency: operator.currency,
+          localeDefault: operator.localeDefault,
+          games: operator.enabledGames,
+          limits: {
+            minStake: operator.limits.minStake.toString(),
+            maxStake: operator.limits.maxStake.toString(),
+            maxWin: operator.limits.maxWin.toString(),
+            maxBetsPerRound: operator.limits.maxBetsPerRound,
+          },
+          theme: operator.theme,
+        },
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  // Runs after the global frame-ancestors middleware so a per-operator policy
+  // wins, and before static serving so the header is set on 404s too.
+  app.use('/play', async (req, res, next) => {
+    try {
+      const code = typeof req.query.operator === 'string' ? req.query.operator : deps.config.defaultOperatorCode;
+      const operator = await deps.store.getOperator(code);
+      const origins = operator?.allowedOrigins.length
+        ? operator.allowedOrigins
+        : deps.config.allowedParentOrigins;
+      res.setHeader(
+        'Content-Security-Policy',
+        `frame-ancestors 'self' ${origins.join(' ')}`.trim(),
+      );
+      next();
+    } catch (error) {
+      next(error);
+    }
+  });
+
   app.use('/play', express.static(clientDir));
   app.get(['/play', '/play/*'], (_req, res) => {
     // The client bundle is emitted by a later task. Until it exists, sending the

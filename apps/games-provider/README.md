@@ -70,12 +70,13 @@ opened to players.
 
 | Method | Path | Purpose |
 | --- | --- | --- |
+| `GET` | `/api/catalogue?operator=<code>` | Operator identity, currency, locale, enabled games, limits and theme. Unknown codes answer `404`. |
 | `POST` | `/api/sessions/handshake` | Exchange the launch token for a signed balance and limits. |
 | `POST` | `/api/sessions/close` | Close a session. |
 | `GET` | `/api/rounds/:id/proof` | Server seed, hash, client seed composite and crash point of a finished round. |
 | `GET` | `/api/health` | Liveness probe. |
 | `WS` | `/ws` | Authenticated game socket (`auth`, `bet:place`, `bet:cancel`, `bet:cashout`). |
-| `GET` | `/play` | Embedded game client (`dist/client`). |
+| `GET` | `/play?operator=<code>` | Embedded game client (`dist/client`). `frame-ancestors` uses the operator's `allowedOrigins`, falling back to `ALLOWED_PARENT_ORIGINS`. |
 
 ## Single instance
 
