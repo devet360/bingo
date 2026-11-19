@@ -116,7 +116,8 @@ dokku config:set bingo-api \
   TELEGRAM_BOT_USERNAME="<bot username without @>" \
   CORS_ORIGINS="https://app.example.com" \
   BINGO_ENGINE_ENABLED=true \
-  WORKER_CONCURRENCY=2
+  WORKER_CONCURRENCY=2 \
+  RECEIPT_RELAY_URL="https://YOUR-RELAY-HOST"
 
 dokku config:set bingo-web \
   NODE_ENV=production \
@@ -135,6 +136,13 @@ the theme/locale bridge — from that URL at runtime.
 
 `CORS_ORIGINS` is a comma-separated allow-list and must contain every browser origin
 that calls the API (the Mini App origin and any staff dashboard preview origin).
+
+`RECEIPT_RELAY_URL` points at the PHP relay (`apps/receipt-relay`) on Ethio Telecom
+hosting. With it set, Telebirr and M-Pesa deposits **and** the staff/agent receipt
+checker (`POST /support|/admin|/agent/receipts/check`) verify through the relay and
+record `source: "RELAY"`; without it those rails stay `UNREACHABLE` for the checker
+and `MANUAL` for deposits. `RECEIPT_RELAY_TIMEOUT_MS` (default 15000, max 30000) is
+optional.
 
 Dokku injects `PORT`, which the API honours (`API_PORT` overrides it for local runs).
 Do not set `PORT` yourself.

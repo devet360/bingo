@@ -89,10 +89,11 @@ function fakeDeps(
   options: {
     outcome?: VerifyOutcome;
     payloadOutcome?: VerifyOutcome;
+    relayOutcome?: VerifyOutcome;
     usage?: Usage | null;
   } = {},
 ) {
-  const calls = { verify: 0, verifyPayload: 0, usage: [] as string[], loads: [] as string[] };
+  const calls = { verify: 0, verifyPayload: 0, relay: 0, usage: [] as string[], loads: [] as string[] };
   const verify = (async () => {
     calls.verify += 1;
     return options.outcome ?? verifiedOutcome();
@@ -101,6 +102,10 @@ function fakeDeps(
     calls.verifyPayload += 1;
     return options.payloadOutcome ?? verifiedOutcome({ source: 'CLIENT' });
   }) as VerifyPayloadFn;
+  const verifyRelay = (async () => {
+    calls.relay += 1;
+    return options.relayOutcome ?? verifiedOutcome({ source: 'RELAY' });
+  }) as VerifyFn;
   return {
     calls,
     deps: {
@@ -110,6 +115,7 @@ function fakeDeps(
       },
       verify,
       verifyPayload,
+      verifyRelay,
       findUsage: async (providerCode: string, reference: string) => {
         calls.usage.push(`${providerCode}:${reference}`);
         return options.usage ?? null;
@@ -245,6 +251,58 @@ test('a reference already attached to a deposit is reported', async () => {
     depositStatus: 'CREDITED',
     verificationStatus: 'VERIFIED',
   });
+});
+
+test('a relay-enabled rail is checked through the Ethio Telecom relay', async () => {
+  process.env.RECEIPT_RELAY_URL = 'https://relay.example.test';
+  try {
+    const { checkReceipt } = await import('../src/services/receipts/checker');
+    const { calls, deps } = fakeDeps(providerRow('telebirr', { refPattern: '^[A-Z0-9]{10}$' }), {
+      relayOutcome: verifiedOutcome({
+        source: 'RELAY',
+        reference: 'ABC1234567',
+        url: 'https://transactioninfo.ethiotelecom.et/receipt/ABC1234567',
+      }),
+    });
+
+    const result = await checkReceipt({ providerCode: 'telebirr', reference: 'ABC1234567' }, deps);
+
+    assert.equal(result.status, 'VERIFIED');
+    assert.equal(result.source, 'RELAY');
+    assert.equal(result.url, 'https://transactioninfo.ethiotelecom.et/receipt/ABC1234567');
+    assert.equal(calls.relay, 1);
+    assert.equal(calls.verify, 0);
+    assert.equal(calls.verifyPayload, 0);
+  } finally {
+    delete process.env.RECEIPT_RELAY_URL;
+  }
+});
+
+test('a relay failure still returns the open-the-link message', async () => {
+  process.env.RECEIPT_RELAY_URL = 'https://relay.example.test';
+  try {
+    const { checkReceipt } = await import('../src/services/receipts/checker');
+    const { calls, deps } = fakeDeps(providerRow('telebirr', { refPattern: '^[A-Z0-9]{10}$' }), {
+      relayOutcome: verifiedOutcome({
+        status: 'UNREACHABLE',
+        message: 'The receipt service did not answer.',
+        source: 'RELAY',
+        parsed: undefined,
+        url: 'https://transactioninfo.ethiotelecom.et/receipt/ABC1234567',
+      }),
+    });
+
+    const result = await checkReceipt({ providerCode: 'telebirr', reference: 'ABC1234567' }, deps);
+
+    assert.equal(result.status, 'UNREACHABLE');
+    assert.equal(result.source, 'SERVER');
+    assert.match(result.message, /Ethiopian IP/);
+    assert.equal(result.url, 'https://transactioninfo.ethiotelecom.et/receipt/ABC1234567');
+    assert.equal(calls.relay, 1);
+    assert.equal(calls.verify, 0);
+  } finally {
+    delete process.env.RECEIPT_RELAY_URL;
+  }
 });
 
 test('an unreachable bank still returns the link to open', async () => {
