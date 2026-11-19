@@ -81,7 +81,12 @@ test('rotateSecret retries the insert once when a concurrent rotation wins the v
     ...store,
     async addOperatorSecret(code: string, secret: string) {
       calls += 1;
-      if (calls === 1) throw Object.assign(new Error('duplicate key value violates unique constraint'), { code: '23505' });
+      if (calls === 1) {
+        // Mirrors drizzle: the SQLSTATE lives on the wrapped cause, not the outer error.
+        throw Object.assign(new Error('Failed query: insert into operator_secrets'), {
+          cause: Object.assign(new Error('duplicate key value violates unique constraint'), { code: '23505' }),
+        });
+      }
       return add(code, secret);
     },
   };

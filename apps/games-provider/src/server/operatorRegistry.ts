@@ -102,7 +102,9 @@ export class OperatorRegistry implements OperatorWallets {
     try {
       row = await this.store.addOperatorSecret(code, secret);
     } catch (error) {
-      if ((error as { code?: unknown } | null)?.code !== '23505') throw error;
+      // Drizzle wraps driver errors, leaving the pg SQLSTATE on `cause` only.
+      const failure = error as { code?: unknown; cause?: { code?: unknown } } | null;
+      if ((failure?.code ?? failure?.cause?.code) !== '23505') throw error;
       row = await this.store.addOperatorSecret(code, secret);
     }
     return { version: row.version, secret: row.secret };
