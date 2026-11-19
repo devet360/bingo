@@ -34,6 +34,12 @@ export const ProviderCallbackSchema = z.discriminatedUnion('type', [
 
 export type ProviderCallbackPayload = z.infer<typeof ProviderCallbackSchema>;
 
+export const ProviderProbeSchema = z.object({
+  type: z.literal('probe'),
+  operator: z.string().max(64).optional(),
+  timestamp: z.number().int().optional(),
+});
+
 export const CALLBACK_ENUM: Record<ProviderCallbackPayload['type'], ProviderCallbackType> = {
   bet: 'BET',
   win: 'WIN',
@@ -41,21 +47,39 @@ export const CALLBACK_ENUM: Record<ProviderCallbackPayload['type'], ProviderCall
   balance: 'BALANCE',
 };
 
+const SAFE_EQUAL = (a: string, b: string): boolean => {
+  const left = Buffer.from(a, 'utf8');
+  const right = Buffer.from(b, 'utf8');
+  return left.length === right.length && timingSafeEqual(left, right);
+};
+
+function signingSecrets(
+  provider: Pick<GameProvider, 'webhookSecret' | 'code'> & Partial<Pick<GameProvider, 'config'>>,
+): string[] {
+  if (!provider.webhookSecret) return [];
+  const config = (provider.config ?? null) as { previousWebhookSecret?: unknown } | null;
+  const previous =
+    typeof config?.previousWebhookSecret === 'string' ? config.previousWebhookSecret : null;
+  return previous ? [provider.webhookSecret, previous] : [provider.webhookSecret];
+}
+
 /**
- * HMAC-SHA256 over the raw request body with the provider's shared secret.
- * The secret is per provider, rotated from the admin console.
+ * Providers sign `${code}.${rawBody}`; V1 deployments signed the bare body.
+ * Both remain valid, and rotation allows the previous secret in the overlap.
  */
 export function verifyCallbackSignature(
-  provider: Pick<GameProvider, 'webhookSecret' | 'code'>,
+  provider: Pick<GameProvider, 'webhookSecret' | 'code'> & Partial<Pick<GameProvider, 'config'>>,
   rawBody: Buffer | undefined,
   signature: string | undefined,
 ): boolean {
-  if (!provider.webhookSecret || !rawBody || !signature) return false;
-  const expected = createHmac('sha256', provider.webhookSecret).update(rawBody).digest('hex');
+  if (!rawBody || !signature) return false;
   const given = signature.replace(/^sha256=/, '').toLowerCase();
-  const a = Buffer.from(expected, 'utf8');
-  const b = Buffer.from(given, 'utf8');
-  return a.length === b.length && timingSafeEqual(a, b);
+  const scoped = Buffer.concat([Buffer.from(`${provider.code}.`, 'utf8'), rawBody]);
+  return signingSecrets(provider).some((secret) => {
+    const scopedExpected = createHmac('sha256', secret).update(scoped).digest('hex');
+    const legacyExpected = createHmac('sha256', secret).update(rawBody).digest('hex');
+    return SAFE_EQUAL(scopedExpected, given) || SAFE_EQUAL(legacyExpected, given);
+  });
 }
 
 /** Signed balance replies bind the amount, currency, timestamp and nonce. */

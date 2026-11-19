@@ -269,6 +269,7 @@ export async function launchGame(input: {
         token: externalSessionId,
         lang: input.lang,
         currency: game.provider.currency,
+        operator: game.provider.code,
       }),
       expiresAt: new Date(Date.now() + SESSION_TTL_MS),
     },

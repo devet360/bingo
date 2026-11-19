@@ -4,6 +4,7 @@ export interface LaunchContext {
   token: string;
   lang: string;
   currency: string;
+  operator?: string;
 }
 
 export function buildLaunchUrl(template: string | null, ctx: LaunchContext): string | null {
@@ -12,7 +13,8 @@ export function buildLaunchUrl(template: string | null, ctx: LaunchContext): str
     .replaceAll('{token}', encodeURIComponent(ctx.token))
     .replaceAll('{sessionId}', encodeURIComponent(ctx.token))
     .replaceAll('{lang}', encodeURIComponent(ctx.lang))
-    .replaceAll('{currency}', encodeURIComponent(ctx.currency));
+    .replaceAll('{currency}', encodeURIComponent(ctx.currency))
+    .replaceAll('{operator}', encodeURIComponent(ctx.operator ?? ''));
 }
 
 /**

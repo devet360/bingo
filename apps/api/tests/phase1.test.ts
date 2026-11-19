@@ -84,6 +84,32 @@ test('signature verification uses the exact raw bytes sent by the provider', () 
   assert.equal(verifyCallbackSignature(provider, body, undefined), false);
 });
 
+test('callback verification accepts the operator-scoped and the legacy signature', () => {
+  const provider = { webhookSecret: 'secret-value', code: 'stratos', config: null };
+  const body = Buffer.from('{"type":"balance"}');
+  const legacy = createHmac('sha256', 'secret-value').update(body).digest('hex');
+  const scoped = createHmac('sha256', 'secret-value')
+    .update(Buffer.concat([Buffer.from('stratos.'), body]))
+    .digest('hex');
+  assert.equal(verifyCallbackSignature(provider, body, legacy), true);
+  assert.equal(verifyCallbackSignature(provider, body, scoped), true);
+  assert.equal(verifyCallbackSignature(provider, body, `sha256=${scoped}`), true);
+  assert.equal(verifyCallbackSignature(provider, Buffer.from('{}'), scoped), false);
+});
+
+test('callback verification honors a previous secret during rotation', () => {
+  const body = Buffer.from('{"type":"win"}');
+  const oldScoped = createHmac('sha256', 'old-secret')
+    .update(Buffer.concat([Buffer.from('stratos.'), body]))
+    .digest('hex');
+  const provider = {
+    webhookSecret: 'new-secret',
+    code: 'stratos',
+    config: { previousWebhookSecret: 'old-secret' },
+  };
+  assert.equal(verifyCallbackSignature(provider, body, oldScoped), true);
+});
+
 test('signed balances bind amount, currency, timestamp and nonce', () => {
   const secret = 'provider-shared-secret';
   const base = {

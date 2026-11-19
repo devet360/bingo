@@ -15,6 +15,18 @@ test('launch url substitutes the real currency, not the legacy CREDIT literal', 
   );
 });
 
+test('launch url substitutes the operator code when the template asks for it', () => {
+  const ctx = { token: 't', lang: 'en', currency: 'ETB', operator: 'op-a' };
+  assert.equal(
+    buildLaunchUrl('https://crash.example/play?token={token}&operator={operator}', ctx),
+    'https://crash.example/play?token=t&operator=op-a',
+  );
+  assert.equal(
+    buildLaunchUrl('https://crash.example/play?token={token}', ctx),
+    'https://crash.example/play?token=t',
+  );
+});
+
 test('launch url is null without a template and encodes the token', () => {
   assert.equal(buildLaunchUrl(null, { token: 'a b', lang: 'en', currency: 'ETB' }), null);
   assert.equal(
