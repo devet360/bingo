@@ -43,8 +43,9 @@ export interface WalletClient {
   rollback(input: MovementInput): Promise<MovementReply>;
 }
 
-export function signBody(secret: string, rawBody: string): string {
-  return createHmac('sha256', secret).update(rawBody).digest('hex');
+export function signBody(secret: string, rawBody: string, operatorCode = ''): string {
+  const payload = operatorCode.length > 0 ? `${operatorCode}.${rawBody}` : rawBody;
+  return createHmac('sha256', secret).update(payload).digest('hex');
 }
 
 export function balanceSignatureInput(input: {
@@ -103,6 +104,7 @@ export function verifyBalanceReply(
 interface WalletConfig {
   callbackUrl: string;
   hmacSecret: string;
+  operatorCode?: string;
   timeoutMs?: number;
 }
 
@@ -151,7 +153,7 @@ export class HttpWalletClient implements WalletClient {
     try {
       response = await this.fetchImpl(this.cfg.callbackUrl, {
         method: 'POST',
-        headers: { 'content-type': 'application/json', 'x-provider-signature': signBody(this.cfg.hmacSecret, raw) },
+        headers: { 'content-type': 'application/json', 'x-provider-signature': signBody(this.cfg.hmacSecret, raw, this.cfg.operatorCode) },
         body: raw,
         signal: AbortSignal.timeout(this.timeoutMs),
       });

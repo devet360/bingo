@@ -22,6 +22,11 @@ export interface FakeBingoOptions {
   hmacSecret: string;
   balance: bigint;
   currency?: string;
+  /**
+   * When set, scoped signatures over `${operatorCode}.${rawBody}` are accepted
+   * alongside the V1 bare-body form, mirroring bingo's dual verification.
+   */
+  operatorCode?: string;
   /** When false, every signed callback answers 409 SESSION_CLOSED. Defaults to true. */
   sessionOpen?: boolean;
   /** Delays the bet response only, before the movement is applied. */
@@ -98,11 +103,23 @@ function balanceSigningString(input: {
   return `${input.sessionId}.${input.currency}.${input.balance}.${input.timestamp}.${input.nonce}`;
 }
 
-function signatureValid(secret: string, raw: Buffer, header: string | string[] | undefined): boolean {
+function signatureValid(
+  secret: string,
+  raw: Buffer,
+  header: string | string[] | undefined,
+  operatorCode: string | undefined,
+): boolean {
   if (typeof header !== 'string' || header.length === 0) return false;
-  const expected = Buffer.from(hmacHex(secret, raw), 'utf8');
-  const given = Buffer.from(header.replace(/^sha256=/, '').toLowerCase(), 'utf8');
-  return expected.length === given.length && timingSafeEqual(expected, given);
+  const given = header.replace(/^sha256=/, '').toLowerCase();
+  const bare = Buffer.from(hmacHex(secret, raw), 'utf8');
+  const scoped = Buffer.from(
+    hmacHex(secret, Buffer.concat([Buffer.from(`${operatorCode}.`, 'utf8'), raw])),
+    'utf8',
+  );
+  const match = (buf: Buffer) => buf.length === given.length && timingSafeEqual(buf, Buffer.from(given, 'utf8'));
+  return operatorCode !== undefined
+    ? match(scoped) || match(bare)
+    : match(bare);
 }
 
 async function readRawBody(req: IncomingMessage): Promise<Buffer> {
@@ -157,6 +174,7 @@ function parseAmount(value: unknown): bigint | null {
 
 export async function createFakeBingo(options: FakeBingoOptions): Promise<FakeBingo> {
   const secret = options.hmacSecret;
+  const operatorCode = options.operatorCode;
   const currency = (options.currency ?? 'ETB').toUpperCase();
   const sessionOpen = options.sessionOpen ?? true;
   const limits: FakeBingoLimits = { ...DEFAULT_LIMITS };
@@ -209,7 +227,7 @@ export async function createFakeBingo(options: FakeBingoOptions): Promise<FakeBi
       return;
     }
 
-    const signed = signatureValid(secret, raw, req.headers['x-provider-signature']);
+    const signed = signatureValid(secret, raw, req.headers['x-provider-signature'], operatorCode);
     let body: unknown;
     try {
       body = raw.length === 0 ? {} : JSON.parse(raw.toString('utf8'));

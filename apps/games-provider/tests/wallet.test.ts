@@ -272,3 +272,19 @@ test('an unparseable non-2xx body surfaces WALLET_HTTP_ERROR with the status', a
   );
   assert.equal(fake.state().balance, 10_000n);
 });
+
+test('operator-scoped signatures verify while the bare V1 form stays accepted', async (t) => {
+  const fake = await createFakeBingo({ hmacSecret: SECRET, balance: 10_000n, operatorCode: 'op-a' });
+  t.after(() => fake.close());
+  const callbackUrl = `${fake.url}/api/games/callback/op-a`;
+  const scoped = new HttpWalletClient({ callbackUrl, hmacSecret: SECRET, operatorCode: 'op-a' });
+  const legacy = new HttpWalletClient({ callbackUrl, hmacSecret: SECRET });
+  const base = { sessionToken: fake.token, amount: 100n, roundId: '1' };
+  assert.equal((await scoped.bet({ ...base, txnId: '77777777-7777-4777-8777-777777777777' })).accepted, true);
+  assert.equal((await legacy.bet({ ...base, txnId: '88888888-8888-4888-8888-888888888888' })).accepted, true);
+  const wrongOperator = new HttpWalletClient({ callbackUrl, hmacSecret: SECRET, operatorCode: 'op-b' });
+  await assert.rejects(
+    wrongOperator.bet({ ...base, txnId: '99999999-9999-4999-8999-999999999999' }),
+    assertWalletError('SIGNATURE_INVALID', 403),
+  );
+});
