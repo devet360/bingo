@@ -1,10 +1,12 @@
 import type { BetRecord } from '../domain/types';
+import { OperatorError, type OperatorWallets } from './operatorRegistry';
 import type { Store } from './store';
 import { WalletError, type WalletClient } from './wallet';
 
 export interface RecoveryDeps {
   store: Store;
-  wallet: WalletClient;
+  /** Each bet's replay goes to the wallet of the operator that owns it. */
+  wallets: OperatorWallets;
   /** Timestamp source for repaired rows. Defaults to the real clock. */
   now?: () => Date;
 }
@@ -30,7 +32,7 @@ export interface RecoverySummary {
  */
 export async function runRecovery(deps: RecoveryDeps): Promise<RecoverySummary> {
   const now = deps.now ?? (() => new Date());
-  const { store, wallet } = deps;
+  const { store, wallets } = deps;
   const summary: RecoverySummary = {
     abandonedRoundIds: [], refundedBets: 0, lostBets: 0, resolvedIndeterminate: 0, repairedSettlements: 0,
   };
@@ -64,7 +66,7 @@ export async function runRecovery(deps: RecoveryDeps): Promise<RecoverySummary> 
       }
       continue;
     }
-    if (await resolveIndeterminate(store, wallet, bet, now)) summary.resolvedIndeterminate += 1;
+    if (await resolveIndeterminate(store, wallets, bet, now)) summary.resolvedIndeterminate += 1;
   }
 
   for (const bet of orphanedSettlements) {
@@ -102,7 +104,7 @@ export async function reconcileUnresolvedBets(deps: RecoveryDeps): Promise<numbe
   let resolved = 0;
   for (const bet of await deps.store.listUnsettledBets()) {
     if (bet.status !== 'UNRESOLVED') continue;
-    if (await resolveIndeterminate(deps.store, deps.wallet, bet, now)) resolved += 1;
+    if (await resolveIndeterminate(deps.store, deps.wallets, bet, now)) resolved += 1;
   }
   return resolved;
 }
@@ -115,7 +117,21 @@ async function refundBet(store: Store, bet: BetRecord, now: () => Date): Promise
   });
 }
 
-async function resolveIndeterminate(store: Store, wallet: WalletClient, bet: BetRecord, now: () => Date): Promise<boolean> {
+async function resolveIndeterminate(
+  store: Store,
+  wallets: OperatorWallets,
+  bet: BetRecord,
+  now: () => Date,
+): Promise<boolean> {
+  let wallet: WalletClient;
+  try {
+    wallet = await wallets.walletFor(bet.operatorCode);
+  } catch (error) {
+    // An operator that cannot be resolved right now (missing row, no secret) is
+    // not a verdict on the bet: leave it UNRESOLVED for the next pass.
+    if (error instanceof OperatorError) return false;
+    throw error;
+  }
   try {
     const reply = await wallet.bet({
       sessionToken: bet.sessionToken, txnId: bet.betTxnId,

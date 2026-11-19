@@ -37,7 +37,7 @@ async function fixture(
   const session: SessionRecord = {
     token: '11111111-1111-4111-8111-111111111111', operatorCode: 'bingo251', currency: 'ETB',
     gameId: 'crash', minStake: 100n, maxStake: 100_000n, maxWin: 3_000_000n,
-    maxBetsPerRound: 200, displayBalance: 10_000n,
+    maxBetsPerRound: 4, displayBalance: 10_000n,
     status: 'OPEN', createdAt: new Date(0), lastHandshakeAt: new Date(0),
     ...sessionOverrides,
   };
@@ -46,10 +46,10 @@ async function fixture(
   await store.saveSession(session);
   // Typed as the seam interface so a missing method fails the typecheck, not just a test.
   const manager: RoundBetManager = new BetManager({
-    store, wallet, limits: { minStake: 100n, maxStake: 100_000n, maxWin: 3_000_000n, maxBetsPerRound: 2 },
+    store, wallets: { walletFor: async () => wallet },
     now: () => new Date(1_000), newId: () => randomUUID(), onSettled: hooks.onSettled,
   });
-  return { store, wallet, calls, round, session, manager };
+  return { store, calls, round, session, manager };
 }
 
 test('a bet persists PLACING then ACTIVE and calls the wallet once', async () => {
@@ -88,8 +88,9 @@ test('stakes exactly at the session minimum and maximum are accepted', async () 
   assert.equal(high.status, 'ACTIVE');
 });
 
-test('the round bet limit rejects the bet after maxBetsPerRound', async () => {
-  const { manager, round, session } = await fixture();
+test('the session maxBetsPerRound rejects the bet after that many for the operator', async () => {
+  // The cap is signed into the session by handshake, not read from config.
+  const { manager, round, session } = await fixture({}, {}, { maxBetsPerRound: 2 });
   await manager.place({ round, session, panel: 0, stake: 1_000n, autoCashout: null });
   await manager.place({ round, session, panel: 1, stake: 1_000n, autoCashout: null });
   const other = { ...session, token: '33333333-3333-4333-8333-333333333333' };

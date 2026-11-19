@@ -7,7 +7,6 @@ function engine(store = createMemoryStore(), betManager?: RoundBetManager) {
   const events: string[] = [];
   const instance = new RoundEngine({
     store,
-    wallet: {} as never, // this test only exercises rounds, not bets
     limits: { minStake: 100n, maxStake: 100_000n, maxWin: 3_000_000n, maxBetsPerRound: 500 },
     operatorCode: 'bingo251',
     randomSeed: () => 'server-seed-fixed',

@@ -7,7 +7,6 @@ import type { OperatorRegistry } from '../server/operatorRegistry';
 import { RoundEngine, type EngineLimits } from '../server/roundEngine';
 import { attachSocket, type SocketHandle } from '../server/socket';
 import type { Store } from '../server/store';
-import type { WalletClient } from '../server/wallet';
 
 export interface TestServer {
   url: string;
@@ -19,18 +18,19 @@ export interface TestServer {
 }
 
 export async function startTestServer(
-  input: { config: AppConfig; store: Store; wallet: WalletClient; registry: OperatorRegistry },
+  input: { config: AppConfig; store: Store; registry: OperatorRegistry },
 ): Promise<TestServer> {
-  const limits: EngineLimits = { ...input.config.limits, maxBetsPerRound: 4 };
+  // The engine only needs the round timings and `maxWin`; the per-operator bet
+  // cap now comes from each session (`maxBetsPerRound`).
+  const limits: EngineLimits = input.config.limits;
   let socket: SocketHandle | null = null;
   const betManager = new BetManager({
     store: input.store,
-    wallet: input.wallet,
-    limits,
+    wallets: input.registry,
     onSettled: (bet) => socket?.notifyBet(bet),
   });
   const engine = new RoundEngine({
-    store: input.store, wallet: input.wallet, limits,
+    store: input.store, limits,
     operatorCode: input.config.operator.code,
     randomSeed: () => 'test-server-seed',
     clientSeeds: () => ['alpha', 'beta', 'gamma'],

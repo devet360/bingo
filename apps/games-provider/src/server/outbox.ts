@@ -1,10 +1,12 @@
 import type { OutboxRecord } from '../domain/types';
+import type { OperatorWallets } from './operatorRegistry';
 import type { Store } from './store';
-import { WalletError, type MovementReply, type WalletClient } from './wallet';
+import { WalletError, type MovementReply } from './wallet';
 
 export interface OutboxWorkerDeps {
   store: Store;
-  wallet: WalletClient;
+  /** Each row is delivered to the wallet of the operator that owns it. */
+  wallets: OperatorWallets;
   /** Called after a delivered movement moved the local balance mirror. */
   onDelivered?: (input: { sessionToken: string; balance: bigint }) => void;
 }
@@ -47,14 +49,14 @@ const DETERMINISTIC_RETRY_LIMIT = 1;
  */
 export class OutboxWorker {
   private readonly store: Store;
-  private readonly wallet: WalletClient;
+  private readonly wallets: OperatorWallets;
   private readonly onDelivered: ((input: { sessionToken: string; balance: bigint }) => void) | null;
   private timer: ReturnType<typeof setInterval> | null = null;
   private running = false;
 
   constructor(deps: OutboxWorkerDeps) {
     this.store = deps.store;
-    this.wallet = deps.wallet;
+    this.wallets = deps.wallets;
     this.onDelivered = deps.onDelivered ?? null;
   }
 
@@ -116,7 +118,11 @@ export class OutboxWorker {
 
     let reply: MovementReply;
     try {
-      reply = row.type === 'WIN' ? await this.wallet.win(input) : await this.wallet.rollback(input);
+      // A directory failure (operator unknown or secret-less) is classified like
+      // any unreadable wallet reply: the row stays PENDING and retries, because
+      // the movement may still be owed.
+      const wallet = await this.wallets.walletFor(row.operatorCode);
+      reply = row.type === 'WIN' ? await wallet.win(input) : await wallet.rollback(input);
     } catch (error) {
       await this.classifyFailure(row, now, summary, error);
       return;

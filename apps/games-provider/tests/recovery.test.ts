@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { reconcileUnresolvedBets, runRecovery } from '../src/server/recovery';
+import { OperatorError } from '../src/server/operatorRegistry';
 import {
   WalletError,
   type MovementInput,
@@ -30,7 +31,7 @@ function fixture(walletOverrides: Partial<WalletClient> = {}) {
     rollback: async () => { throw new Error('unused'); },
     ...walletOverrides,
   };
-  return { store, wallet, replays };
+  return { store, wallets: { walletFor: async () => wallet }, replays };
 }
 
 interface BetSeed {
@@ -104,10 +105,10 @@ const outboxFor = (store: MemoryStore, type: 'WIN' | 'ROLLBACK', txnId: string) 
   store.dump().outbox.filter((row) => row.type === type && row.txnId === txnId);
 
 test('boot recovery abandons the round, refunds ACTIVE bets, resolves the indeterminate charge and repairs settlements', async () => {
-  const { store, wallet, replays } = fixture();
+  const { store, wallets, replays } = fixture();
   const seeded = await seedInterruptedBoot(store);
 
-  const summary = await runRecovery({ store, wallet, now });
+  const summary = await runRecovery({ store, wallets, now });
 
   assert.deepEqual(summary, {
     abandonedRoundIds: [seeded.round.id],
@@ -168,13 +169,13 @@ test('boot recovery abandons the round, refunds ACTIVE bets, resolves the indete
 });
 
 test('a replayed placement that is accepted is refunded and counted', async () => {
-  const { store, wallet } = fixture();
+  const { store, wallets } = fixture();
   const round = await store.createRound({ serverSeed: 's', serverSeedHash: 'h', startedAt: AT });
   const placing = await seedBet(store, {
     roundId: round.id, sessionToken: token(1), stake: 750n, status: 'PLACING', betTxnId: txn(1),
   });
 
-  const summary = await runRecovery({ store, wallet, now });
+  const summary = await runRecovery({ store, wallets, now });
 
   assert.equal(summary.resolvedIndeterminate, 1);
   assert.equal(summary.refundedBets, 0);
@@ -189,7 +190,7 @@ test('a replayed placement that is accepted is refunded and counted', async () =
 });
 
 test('a placement the wallet reports as replayed is refunded and counted', async () => {
-  const { store, wallet } = fixture({
+  const { store, wallets } = fixture({
     bet: async () => ({ accepted: false, replayed: true, balance: null }) satisfies MovementReply,
   });
   const round = await store.createRound({ serverSeed: 's', serverSeedHash: 'h', startedAt: AT });
@@ -197,7 +198,7 @@ test('a placement the wallet reports as replayed is refunded and counted', async
     roundId: round.id, sessionToken: token(1), stake: 800n, status: 'UNRESOLVED', betTxnId: txn(1),
   });
 
-  const summary = await runRecovery({ store, wallet, now });
+  const summary = await runRecovery({ store, wallets, now });
 
   assert.equal(summary.resolvedIndeterminate, 1);
   assert.equal(betByTxn(store, unresolved.betTxnId).status, 'CANCELLED');
@@ -207,7 +208,7 @@ test('a placement the wallet reports as replayed is refunded and counted', async
 });
 
 test('a 2xx that accepts nothing leaves the bet UNRESOLVED and uncounted', async () => {
-  const { store, wallet } = fixture({
+  const { store, wallets } = fixture({
     bet: async () => ({ accepted: false, replayed: false, balance: null }) satisfies MovementReply,
   });
   const round = await store.createRound({ serverSeed: 's', serverSeedHash: 'h', startedAt: AT });
@@ -215,7 +216,7 @@ test('a 2xx that accepts nothing leaves the bet UNRESOLVED and uncounted', async
     roundId: round.id, sessionToken: token(1), stake: 800n, status: 'UNRESOLVED', betTxnId: txn(1),
   });
 
-  const summary = await runRecovery({ store, wallet, now });
+  const summary = await runRecovery({ store, wallets, now });
 
   assert.equal(summary.resolvedIndeterminate, 0);
   const bet = betByTxn(store, unresolved.betTxnId);
@@ -224,8 +225,30 @@ test('a 2xx that accepts nothing leaves the bet UNRESOLVED and uncounted', async
   assert.equal(store.dump().outbox.length, 0);
 });
 
+test('an UNRESOLVED bet whose operator cannot be resolved stays UNRESOLVED', async () => {
+  const { store } = fixture();
+  const round = await store.createRound({ serverSeed: 's', serverSeedHash: 'h', startedAt: AT });
+  const unresolved = await seedBet(store, {
+    roundId: round.id, sessionToken: token(1), stake: 800n, status: 'UNRESOLVED', betTxnId: txn(1),
+  });
+  // The operator row or its secret is missing: that is not a verdict on the bet.
+  const wallets = {
+    walletFor: async (): Promise<WalletClient> => {
+      throw new OperatorError(404, 'OPERATOR_NOT_FOUND', 'unknown operator');
+    },
+  };
+
+  const summary = await runRecovery({ store, wallets, now });
+
+  assert.equal(summary.resolvedIndeterminate, 0);
+  assert.equal(betByTxn(store, unresolved.betTxnId).status, 'UNRESOLVED');
+  assert.equal(store.dump().outbox.length, 0);
+  // The runtime sweep reaches the same conclusion and stays a no-op.
+  assert.equal(await reconcileUnresolvedBets({ store, wallets, now }), 0);
+});
+
 test('a 5xx on the replay leaves the bet UNRESOLVED and uncounted', async () => {
-  const { store, wallet } = fixture({
+  const { store, wallets } = fixture({
     bet: async () => { throw new WalletError(500, 'WALLET_HTTP_ERROR', 'boom'); },
   });
   const round = await store.createRound({ serverSeed: 's', serverSeedHash: 'h', startedAt: AT });
@@ -233,7 +256,7 @@ test('a 5xx on the replay leaves the bet UNRESOLVED and uncounted', async () => 
     roundId: round.id, sessionToken: token(1), stake: 800n, status: 'UNRESOLVED', betTxnId: txn(1),
   });
 
-  const summary = await runRecovery({ store, wallet, now });
+  const summary = await runRecovery({ store, wallets, now });
 
   assert.equal(summary.resolvedIndeterminate, 0);
   const bet = betByTxn(store, unresolved.betTxnId);
@@ -243,7 +266,7 @@ test('a 5xx on the replay leaves the bet UNRESOLVED and uncounted', async () => 
 });
 
 test('an ACTIVE bet in an already-ABANDONED round is refunded without re-abandoning the round', async () => {
-  const { store, wallet } = fixture();
+  const { store, wallets } = fixture();
   const round = await store.createRound({ serverSeed: 's', serverSeedHash: 'h', startedAt: AT });
   // A previous pass died between `finishRound(ABANDONED)` and the refund loop.
   await store.finishRound(round.id, { status: 'ABANDONED', at: AT });
@@ -251,7 +274,7 @@ test('an ACTIVE bet in an already-ABANDONED round is refunded without re-abandon
     roundId: round.id, sessionToken: token(1), stake: 900n, status: 'ACTIVE', betTxnId: txn(1),
   });
 
-  const summary = await runRecovery({ store, wallet, now });
+  const summary = await runRecovery({ store, wallets, now });
 
   assert.deepEqual(summary.abandonedRoundIds, []);
   assert.equal(summary.refundedBets, 1);
@@ -266,7 +289,7 @@ test('an ACTIVE bet in an already-ABANDONED round is refunded without re-abandon
 });
 
 test('an ACTIVE bet in a CRASHED round is lost, not refunded', async () => {
-  const { store, wallet } = fixture();
+  const { store, wallets } = fixture();
   const round = await store.createRound({ serverSeed: 's', serverSeedHash: 'h', startedAt: AT });
   await store.startFlight(round.id, { crashPoint: 1.5, clientSeedComposite: 'composite', at: AT });
   // A crash before settleRound swept the round leaves the bet ACTIVE.
@@ -275,7 +298,7 @@ test('an ACTIVE bet in a CRASHED round is lost, not refunded', async () => {
     roundId: round.id, sessionToken: token(1), stake: 700n, status: 'ACTIVE', betTxnId: txn(1),
   });
 
-  const summary = await runRecovery({ store, wallet, now });
+  const summary = await runRecovery({ store, wallets, now });
 
   assert.equal(summary.lostBets, 1);
   assert.equal(summary.refundedBets, 0);
@@ -287,7 +310,7 @@ test('an ACTIVE bet in a CRASHED round is lost, not refunded', async () => {
 });
 
 test('a 5xx carrying TRANSACTION_ROLLED_BACK is not definitive and leaves the bet UNRESOLVED', async () => {
-  const { store, wallet } = fixture({
+  const { store, wallets } = fixture({
     bet: async () => { throw new WalletError(500, 'TRANSACTION_ROLLED_BACK', 'upstream mislabelled'); },
   });
   const round = await store.createRound({ serverSeed: 's', serverSeedHash: 'h', startedAt: AT });
@@ -295,7 +318,7 @@ test('a 5xx carrying TRANSACTION_ROLLED_BACK is not definitive and leaves the be
     roundId: round.id, sessionToken: token(1), stake: 800n, status: 'UNRESOLVED', betTxnId: txn(1),
   });
 
-  const summary = await runRecovery({ store, wallet, now });
+  const summary = await runRecovery({ store, wallets, now });
 
   assert.equal(summary.resolvedIndeterminate, 0);
   const bet = betByTxn(store, unresolved.betTxnId);
@@ -305,7 +328,7 @@ test('a 5xx carrying TRANSACTION_ROLLED_BACK is not definitive and leaves the be
 });
 
 test('a 409 TRANSACTION_ROLLED_BACK tombstones the rollback so the next pass is a no-op', async () => {
-  const { store, wallet } = fixture({
+  const { store, wallets } = fixture({
     bet: async () => { throw new WalletError(409, 'TRANSACTION_ROLLED_BACK', 'already refunded'); },
   });
   const round = await store.createRound({ serverSeed: 's', serverSeedHash: 'h', startedAt: AT });
@@ -313,7 +336,7 @@ test('a 409 TRANSACTION_ROLLED_BACK tombstones the rollback so the next pass is 
     roundId: round.id, sessionToken: token(1), stake: 800n, status: 'UNRESOLVED', betTxnId: txn(1),
   });
 
-  const summary = await runRecovery({ store, wallet, now });
+  const summary = await runRecovery({ store, wallets, now });
 
   assert.equal(summary.resolvedIndeterminate, 1);
   assert.equal(summary.repairedSettlements, 0);
@@ -326,7 +349,7 @@ test('a 409 TRANSACTION_ROLLED_BACK tombstones the rollback so the next pass is 
   assert.equal(rows[0]!.lastError, 'ALREADY_ROLLED_BACK');
   assert.equal(rows[0]!.amount, 800n);
 
-  const second = await runRecovery({ store, wallet, now });
+  const second = await runRecovery({ store, wallets, now });
 
   assert.equal(second.repairedSettlements, 0);
   assert.equal(outboxFor(store, 'ROLLBACK', unresolved.betTxnId).length, 1);
@@ -334,7 +357,7 @@ test('a 409 TRANSACTION_ROLLED_BACK tombstones the rollback so the next pass is 
 });
 
 test('any other 4xx rejects the bet without a rollback', async () => {
-  const { store, wallet } = fixture({
+  const { store, wallets } = fixture({
     bet: async () => { throw new WalletError(409, 'SESSION_CLOSED', 'session closed'); },
   });
   const round = await store.createRound({ serverSeed: 's', serverSeedHash: 'h', startedAt: AT });
@@ -342,7 +365,7 @@ test('any other 4xx rejects the bet without a rollback', async () => {
     roundId: round.id, sessionToken: token(1), stake: 800n, status: 'UNRESOLVED', betTxnId: txn(1),
   });
 
-  const summary = await runRecovery({ store, wallet, now });
+  const summary = await runRecovery({ store, wallets, now });
 
   assert.equal(summary.resolvedIndeterminate, 1);
   const bet = betByTxn(store, unresolved.betTxnId);
@@ -352,12 +375,12 @@ test('any other 4xx rejects the bet without a rollback', async () => {
 });
 
 test('a second recovery pass on the same store is a clean no-op', async () => {
-  const { store, wallet } = fixture();
+  const { store, wallets } = fixture();
   await seedInterruptedBoot(store);
-  await runRecovery({ store, wallet, now });
+  await runRecovery({ store, wallets, now });
   const settled = store.dump();
 
-  const summary = await runRecovery({ store, wallet, now });
+  const summary = await runRecovery({ store, wallets, now });
 
   assert.deepEqual(summary, {
     abandonedRoundIds: [],
@@ -370,13 +393,13 @@ test('a second recovery pass on the same store is a clean no-op', async () => {
 });
 
 test('the runtime sweep refunds an UNRESOLVED bet the wallet now accepts', async () => {
-  const { store, wallet, replays } = fixture();
+  const { store, wallets, replays } = fixture();
   const round = await store.createRound({ serverSeed: 's', serverSeedHash: 'h', startedAt: AT });
   const unresolved = await seedBet(store, {
     roundId: round.id, sessionToken: token(1), stake: 600n, status: 'UNRESOLVED', betTxnId: txn(1),
   });
 
-  assert.equal(await reconcileUnresolvedBets({ store, wallet, now }), 1);
+  assert.equal(await reconcileUnresolvedBets({ store, wallets, now }), 1);
 
   // The original txn id is replayed, so bingo dedupes a second sweep.
   assert.equal(replays.length, 1);
@@ -391,7 +414,7 @@ test('the runtime sweep refunds an UNRESOLVED bet the wallet now accepts', async
 });
 
 test('the runtime sweep leaves an UNRESOLVED bet alone while the wallet still fails', async () => {
-  const { store, wallet } = fixture({
+  const { store, wallets } = fixture({
     bet: async () => { throw new WalletError(500, 'WALLET_HTTP_ERROR', 'boom'); },
   });
   const round = await store.createRound({ serverSeed: 's', serverSeedHash: 'h', startedAt: AT });
@@ -399,7 +422,7 @@ test('the runtime sweep leaves an UNRESOLVED bet alone while the wallet still fa
     roundId: round.id, sessionToken: token(1), stake: 600n, status: 'UNRESOLVED', betTxnId: txn(1),
   });
 
-  assert.equal(await reconcileUnresolvedBets({ store, wallet, now }), 0);
+  assert.equal(await reconcileUnresolvedBets({ store, wallets, now }), 0);
 
   const bet = betByTxn(store, unresolved.betTxnId);
   assert.equal(bet.status, 'UNRESOLVED');
@@ -408,14 +431,14 @@ test('the runtime sweep leaves an UNRESOLVED bet alone while the wallet still fa
 });
 
 test('the runtime sweep never touches an ACTIVE bet in a live round', async () => {
-  const { store, wallet, replays } = fixture();
+  const { store, wallets, replays } = fixture();
   const round = await store.createRound({ serverSeed: 's', serverSeedHash: 'h', startedAt: AT });
   await store.startFlight(round.id, { crashPoint: 2.5, clientSeedComposite: 'composite', at: AT });
   const active = await seedBet(store, {
     roundId: round.id, sessionToken: token(1), stake: 900n, status: 'ACTIVE', betTxnId: txn(1),
   });
 
-  assert.equal(await reconcileUnresolvedBets({ store, wallet, now }), 0);
+  assert.equal(await reconcileUnresolvedBets({ store, wallets, now }), 0);
 
   assert.equal(replays.length, 0);
   assert.equal(betByTxn(store, active.betTxnId).status, 'ACTIVE');
@@ -423,14 +446,14 @@ test('the runtime sweep never touches an ACTIVE bet in a live round', async () =
 });
 
 test('running the runtime sweep twice does not roll back twice', async () => {
-  const { store, wallet, replays } = fixture();
+  const { store, wallets, replays } = fixture();
   const round = await store.createRound({ serverSeed: 's', serverSeedHash: 'h', startedAt: AT });
   const unresolved = await seedBet(store, {
     roundId: round.id, sessionToken: token(1), stake: 600n, status: 'UNRESOLVED', betTxnId: txn(1),
   });
 
-  assert.equal(await reconcileUnresolvedBets({ store, wallet, now }), 1);
-  assert.equal(await reconcileUnresolvedBets({ store, wallet, now }), 0);
+  assert.equal(await reconcileUnresolvedBets({ store, wallets, now }), 1);
+  assert.equal(await reconcileUnresolvedBets({ store, wallets, now }), 0);
 
   assert.equal(replays.length, 1);
   assert.equal(outboxFor(store, 'ROLLBACK', unresolved.betTxnId).length, 1);
@@ -438,7 +461,7 @@ test('running the runtime sweep twice does not roll back twice', async () => {
 });
 
 test('an UNRESOLVED bet in a crashed round is refunded while its ACTIVE neighbour is lost', async () => {
-  const { store, wallet } = fixture();
+  const { store, wallets } = fixture();
   const round = await store.createRound({ serverSeed: 's', serverSeedHash: 'h', startedAt: AT });
   await store.startFlight(round.id, { crashPoint: 1.5, clientSeedComposite: 'composite', at: AT });
   await store.finishRound(round.id, { status: 'CRASHED', at: AT });
@@ -449,7 +472,7 @@ test('an UNRESOLVED bet in a crashed round is refunded while its ACTIVE neighbou
     roundId: round.id, sessionToken: token(2), stake: 700n, status: 'ACTIVE', betTxnId: txn(2),
   });
 
-  const summary = await runRecovery({ store, wallet, now });
+  const summary = await runRecovery({ store, wallets, now });
 
   assert.equal(summary.resolvedIndeterminate, 1);
   assert.equal(summary.lostBets, 1);

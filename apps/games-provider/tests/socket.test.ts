@@ -3,7 +3,6 @@ import assert from 'node:assert/strict';
 import WebSocket from 'ws';
 import { createFakeBingo } from '../src/test/fakeBingo';
 import { createMemoryStore } from '../src/test/memoryStore';
-import { HttpWalletClient } from '../src/server/wallet';
 import { OperatorRegistry } from '../src/server/operatorRegistry';
 import { loadConfig } from '../src/config';
 import { handshake } from '../src/server/handshake';
@@ -65,9 +64,8 @@ async function setup() {
   });
   await store.addOperatorSecret(config.operator.code, HMAC_SECRET);
   const registry = new OperatorRegistry({ store });
-  const wallet = new HttpWalletClient({ callbackUrl: config.operator.callbackUrl, hmacSecret: config.operator.hmacSecret });
   await handshake({ token: fake.token, config, store, registry });
-  const server = await startTestServer({ config, store, wallet, registry });
+  const server = await startTestServer({ config, store, registry });
   return { fake, ...server };
 }
 

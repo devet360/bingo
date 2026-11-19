@@ -11,7 +11,6 @@ import { OperatorRegistry } from './src/server/operatorRegistry';
 import { reconcileUnresolvedBets, RECONCILE_INTERVAL_MS, runRecovery } from './src/server/recovery';
 import { RoundEngine } from './src/server/roundEngine';
 import { attachSocket, type SocketHandle } from './src/server/socket';
-import { HttpWalletClient } from './src/server/wallet';
 
 const config = loadConfig();
 const database = createDb(config.databaseUrl);
@@ -43,22 +42,20 @@ async function seedBootstrapOperator(store: ReturnType<typeof createPostgresStor
   }
 }
 await seedBootstrapOperator(store, config);
+// One directory resolves every wallet: bets, outbox rows and recovery replays
+// all settle against the operator that owns the session, never a shared client.
 const registry = new OperatorRegistry({ store });
 
-const wallet = new HttpWalletClient({
-  callbackUrl: config.operator.callbackUrl,
-  hmacSecret: config.operator.hmacSecret,
-});
 let socket: SocketHandle | undefined;
 const outbox = new OutboxWorker({
   store,
-  wallet,
+  wallets: registry,
   onDelivered: ({ sessionToken, balance }) => socket?.notifyBalance(sessionToken, balance),
 });
 
 // Design §5.3: attempt every pending win once before deciding anything else.
 console.log('games-provider: boot drain', await outbox.drainOnce(new Date()));
-console.log('games-provider: boot recovery', await runRecovery({ store, wallet }));
+console.log('games-provider: boot recovery', await runRecovery({ store, wallets: registry }));
 // §5.3.4: every recovery rollback is enqueued now; attempt them before the loop.
 console.log('games-provider: recovery drain', await outbox.drainOnce(new Date()));
 
@@ -72,14 +69,12 @@ if (stranded.dead + stranded.capped > 0) {
 
 const betManager = new BetManager({
   store,
-  wallet,
-  limits: config.limits,
+  wallets: registry,
   newId: () => randomUUID(),
   onSettled: (bet) => socket?.notifyBet(bet),
 });
 const engine = new RoundEngine({
   store,
-  wallet,
   limits: config.limits,
   betManager,
   operatorCode: config.operator.code,
@@ -102,7 +97,7 @@ let reconciling = false;
 const reconcileTimer = setInterval(() => {
   if (reconciling) return;
   reconciling = true;
-  void reconcileUnresolvedBets({ store, wallet })
+  void reconcileUnresolvedBets({ store, wallets: registry })
     .then((resolved) => {
       if (resolved > 0) console.log(`games-provider: reconciled ${resolved} unresolved bets`);
     })

@@ -44,6 +44,8 @@ const wallet = new HttpWalletClient({
   callbackUrl: config.operator.callbackUrl,
   hmacSecret: config.operator.hmacSecret,
 });
+// The smoke seeds exactly one operator; recovery replays would use its wallet.
+const wallets = { walletFor: async () => wallet };
 
 let failure: string | null = null;
 
@@ -108,7 +110,7 @@ try {
     winTxnId: null,
   });
 
-  const first = await runRecovery({ store, wallet });
+  const first = await runRecovery({ store, wallets });
 
   const abandoned = await store.getRound(round.id);
   check(abandoned?.status === 'ABANDONED', `round ${round.id} is ${abandoned?.status}, expected ABANDONED`);
@@ -136,7 +138,7 @@ try {
   // Never call bingo for a fake session: close the row as a labelled tombstone.
   await store.markOutbox(rollback.id, 'SENT', 'SMOKE_TEST');
 
-  const second = await runRecovery({ store, wallet });
+  const second = await runRecovery({ store, wallets });
   check(
     second.abandonedRoundIds.length === 0 && second.refundedBets === 0 && second.repairedSettlements === 0,
     `second recovery was not idempotent: ${JSON.stringify(second)}`,
@@ -157,8 +159,7 @@ try {
   };
   const betManager = new BetManager({
     store,
-    wallet: stubWallet,
-    limits: config.limits,
+    wallets: { walletFor: async () => stubWallet },
     newId: () => randomUUID(),
   });
   const playStake = config.limits.minStake;

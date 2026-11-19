@@ -31,6 +31,12 @@ export interface FakeBingoOptions {
   sessionOpen?: boolean;
   /** Delays the bet response only, before the movement is applied. */
   betDelayMs?: number;
+  /**
+   * The one session id this fake knows. Defaults to `FAKE_BINGO_TOKEN`, which
+   * keeps single-operator tests unchanged; a two-operator test needs a distinct
+   * id per fake to prove the routing. Must be a UUID, like a real session id.
+   */
+  token?: string;
 }
 
 export interface FakeBingoCall {
@@ -175,6 +181,7 @@ function parseAmount(value: unknown): bigint | null {
 export async function createFakeBingo(options: FakeBingoOptions): Promise<FakeBingo> {
   const secret = options.hmacSecret;
   const operatorCode = options.operatorCode;
+  const token = options.token ?? FAKE_BINGO_TOKEN;
   const currency = (options.currency ?? 'ETB').toUpperCase();
   const sessionOpen = options.sessionOpen ?? true;
   const limits: FakeBingoLimits = { ...DEFAULT_LIMITS };
@@ -260,7 +267,7 @@ export async function createFakeBingo(options: FakeBingoOptions): Promise<FakeBi
       sendError(res, 400, 'CALLBACK_MALFORMED', 'sessionId must be a UUID');
       return;
     }
-    if (sessionId !== FAKE_BINGO_TOKEN) {
+    if (sessionId !== token) {
       record({ type, status: 404, signatureValid: true, txnId: null, replayed: false });
       sendError(res, 404, 'NOT_FOUND', 'Game session not found');
       return;
@@ -419,7 +426,7 @@ export async function createFakeBingo(options: FakeBingoOptions): Promise<FakeBi
 
   return {
     url: `http://127.0.0.1:${port}`,
-    token: FAKE_BINGO_TOKEN,
+    token,
     state: () => ({
       balance,
       currency,

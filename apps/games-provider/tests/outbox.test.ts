@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { OutboxWorker } from '../src/server/outbox';
+import { OperatorError } from '../src/server/operatorRegistry';
 import type { Store } from '../src/server/store';
 import { WalletError, type MovementReply, type WalletClient } from '../src/server/wallet';
 import type { OutboxType, SessionRecord } from '../src/domain/types';
@@ -80,7 +81,7 @@ function fixture(options: {
     script: (txnId: string, scripted: Script) => scripts.set(txnId, scripted),
     worker: new OutboxWorker({
       store: options.wrapStore ? options.wrapStore(store) : store,
-      wallet,
+      wallets: { walletFor: async () => wallet },
       onDelivered: options.onDelivered,
     }),
   };
@@ -396,6 +397,53 @@ test('start drains on a timer without overlapping, and stop halts it', async (t)
     worker.stop();
     t.mock.timers.reset();
   }
+});
+
+test('each row is delivered through the wallet of its own operator', async () => {
+  const store = createMemoryStore({ now: () => NOW });
+  const seen: Array<{ operatorCode: string; kind: 'win' | 'rollback'; txnId: string }> = [];
+  const walletFor = (operatorCode: string): WalletClient => ({
+    balance: async () => { throw new Error('unused'); },
+    bet: async () => { throw new Error('unused'); },
+    win: async (input) => {
+      seen.push({ operatorCode, kind: 'win', txnId: input.txnId });
+      return { accepted: true, replayed: false, balance: null } satisfies MovementReply;
+    },
+    rollback: async (input) => {
+      seen.push({ operatorCode, kind: 'rollback', txnId: input.txnId });
+      return { accepted: true, replayed: false, balance: null } satisfies MovementReply;
+    },
+  });
+  await store.enqueueOutbox({
+    operatorCode: 'op-a', type: 'WIN', txnId: 'win-a', sessionToken: TOKEN, amount: 1_000n,
+  });
+  await store.enqueueOutbox({
+    operatorCode: 'op-b', type: 'ROLLBACK', txnId: 'bet-b', sessionToken: TOKEN, amount: 2_000n,
+  });
+
+  const worker = new OutboxWorker({ store, wallets: { walletFor: async (code) => walletFor(code) } });
+
+  assert.deepEqual(await worker.drainOnce(NOW), { sent: 2, retried: 0, capped: 0, dead: 0 });
+  assert.deepEqual(seen, [
+    { operatorCode: 'op-a', kind: 'win', txnId: 'win-a' },
+    { operatorCode: 'op-b', kind: 'rollback', txnId: 'bet-b' },
+  ]);
+});
+
+test('a row whose operator cannot be resolved stays retryable, never DEAD', async () => {
+  const store = createMemoryStore({ now: () => NOW });
+  await store.enqueueOutbox({
+    operatorCode: 'op-gone', type: 'WIN', txnId: 'win-gone', sessionToken: TOKEN, amount: 1_000n,
+  });
+  const worker = new OutboxWorker({
+    store,
+    wallets: { walletFor: async () => { throw new OperatorError(404, 'OPERATOR_NOT_FOUND', 'gone'); } },
+  });
+
+  assert.deepEqual(await worker.drainOnce(NOW), { sent: 0, retried: 1, capped: 0, dead: 0 });
+  const row = rowOf(store, 'win-gone');
+  assert.equal(row.status, 'PENDING');
+  assert.equal(row.lastError, 'UNKNOWN');
 });
 
 test('a rejected drain is logged, never thrown, and the timer keeps running', async (t) => {

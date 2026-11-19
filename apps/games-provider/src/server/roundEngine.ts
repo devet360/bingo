@@ -8,7 +8,6 @@ import {
   sha512Hex,
 } from '../domain/provablyFair';
 import type { Store } from './store';
-import type { WalletClient } from './wallet';
 
 /** Betting window, matching the prototype pacing. */
 export const BETTING_WINDOW_MS = 5_500;
@@ -121,7 +120,6 @@ export interface CashoutInput {
 
 export interface RoundEngineDeps {
   store: Store;
-  wallet: WalletClient;
   limits: EngineLimits;
   operatorCode: string;
   /** Server seed for the next round; injectable for tests. */
@@ -154,8 +152,6 @@ export class RoundEngine {
   private readonly onEvent: (event: RoundEngineEvent) => void;
   private readonly now: () => Date;
   private readonly betManager: RoundBetManager | undefined;
-  // Consumed by the bet manager delegation (Task 10).
-  private readonly wallet: WalletClient;
 
   readonly operatorCode: string;
 
@@ -175,7 +171,6 @@ export class RoundEngine {
 
   constructor(deps: RoundEngineDeps) {
     this.store = deps.store;
-    this.wallet = deps.wallet;
     this.limits = deps.limits;
     this.operatorCode = deps.operatorCode;
     this.randomSeed = deps.randomSeed;

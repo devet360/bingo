@@ -1,14 +1,15 @@
 import { randomUUID } from 'node:crypto';
 import { payoutFor } from '../domain/money';
 import type { BetRecord, RoundRecord, SessionRecord } from '../domain/types';
-import type { EngineLimits, RoundBetManager } from './roundEngine';
+import type { OperatorWallets } from './operatorRegistry';
+import type { RoundBetManager } from './roundEngine';
 import type { Store } from './store';
-import { WalletError, type MovementReply, type WalletClient } from './wallet';
+import { WalletError, type MovementReply } from './wallet';
 
 export interface BetManagerDeps {
   store: Store;
-  wallet: WalletClient;
-  limits: EngineLimits;
+  /** Resolves the wallet of the operator a bet belongs to, never a shared one. */
+  wallets: OperatorWallets;
   /** Timestamp source for persisted rows. Defaults to the real clock. */
   now?: () => Date;
   /** Transaction id source. Defaults to `randomUUID`. */
@@ -37,8 +38,7 @@ export class BetRuleError extends Error {
  */
 export class BetManager implements RoundBetManager {
   private readonly store: Store;
-  private readonly wallet: WalletClient;
-  private readonly limits: EngineLimits;
+  private readonly wallets: OperatorWallets;
   private readonly now: () => Date;
   private readonly newId: () => string;
   private readonly onSettled: ((bet: BetRecord) => void) | null;
@@ -47,8 +47,7 @@ export class BetManager implements RoundBetManager {
 
   constructor(deps: BetManagerDeps) {
     this.store = deps.store;
-    this.wallet = deps.wallet;
-    this.limits = deps.limits;
+    this.wallets = deps.wallets;
     this.now = deps.now ?? (() => new Date());
     this.newId = deps.newId ?? (() => randomUUID());
     this.onSettled = deps.onSettled ?? null;
@@ -76,9 +75,17 @@ export class BetManager implements RoundBetManager {
 
     const existing = await this.store.getBet(round.id, session.token, panel);
     if (existing) return existing; // idempotent frame replay
-    if ((await this.store.countBetsForRound(round.id)) >= this.limits.maxBetsPerRound) {
+    // The cap is per operator: one tenant filling its seats must never block
+    // another tenant's players in the same round.
+    if (
+      (await this.store.countBetsForRoundByOperator(round.id, session.operatorCode))
+      >= session.maxBetsPerRound
+    ) {
       throw new BetRuleError('ROUND_BET_LIMIT', 'Round bet limit reached');
     }
+    // Resolve before the row exists: an unknown operator must not leave a
+    // PLACING bet for boot recovery to chase.
+    const wallet = await this.wallets.walletFor(session.operatorCode);
 
     const bet = await this.store.insertBet({
       roundId: round.id,
@@ -96,7 +103,7 @@ export class BetManager implements RoundBetManager {
 
     let reply: MovementReply;
     try {
-      reply = await this.wallet.bet({
+      reply = await wallet.bet({
         sessionToken: session.token,
         txnId: bet.betTxnId,
         amount: stake,
