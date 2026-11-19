@@ -7,6 +7,7 @@ import {
   closeSession,
   getOpenSessionForUser,
   handleProviderCallback,
+  handleProviderProbe,
   launchGame,
   listPlayableGames,
   serializeSession,
@@ -15,6 +16,24 @@ import {
 const LaunchSchema = z.object({ lang: z.enum(['en', 'am']).default('en') });
 
 export const gamesRouter = Router();
+
+/**
+ * Onboarding probes are signed like wallet callbacks but carry no session or
+ * money. Registered first so it can never fall through to the wallet route.
+ */
+gamesRouter.post(
+  '/callback/:providerCode/probe',
+  asyncHandler(async (req, res) => {
+    const result = await handleProviderProbe({
+      providerCode: req.params.providerCode,
+      rawBody: req.rawBody,
+      signature: req.header('x-provider-signature'),
+      body: req.body,
+      ip: req.ip,
+    });
+    res.status(result.status).json({ data: result.data });
+  }),
+);
 
 /**
  * Providers sign the exact bytes they send; the shared secret is per provider.

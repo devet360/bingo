@@ -427,6 +427,7 @@ the grant converts to `available` at `amount × multiplier` and is forfeited on 
 | POST | `/games/:gameId/launch` | Verified phone | `{ lang? }` → `{ launchUrl, sessionId, expiresAt }` |
 | POST | `/games/sessions/:sessionId/close` | Player | Close the session |
 | POST | `/games/callback/:providerCode` | HMAC signature | Provider callback `{ sessionId, type: bet\|win\|rollback, txnId, amount, currency?, roundId? }`; header `x-provider-signature`, signed over the raw body |
+| POST | `/games/callback/:providerCode/probe` | HMAC signature | Onboarding probe `{ type: "probe", operator?, timestamp? }` → `{ ok, operator }`; same signature header, audited like a callback |
 
 ---
 

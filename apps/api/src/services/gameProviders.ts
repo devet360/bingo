@@ -14,6 +14,7 @@ import { minorToWire } from '../lib/money';
 import {
   CALLBACK_ENUM,
   ProviderCallbackSchema,
+  ProviderProbeSchema,
   type ProviderCallbackPayload,
   legacyProviderLedgerKey,
   providerLedgerKey,
@@ -730,6 +731,51 @@ export async function handleProviderCallback(input: {
   } catch (error) {
     const appError = error instanceof AppError ? error : Errors.internal('Provider callback failed');
     await writeCallbackLog(audit, appError.status, `${appError.code}: ${appError.message}`);
+    throw appError;
+  }
+}
+
+/**
+ * Onboarding probe: proves the operator holds the shared secret and that the
+ * callback URL is reachable, without touching a session or moving money.
+ * Signature first, payload second, and every attempt is audited.
+ */
+export async function handleProviderProbe(input: {
+  providerCode: string;
+  rawBody?: Buffer;
+  signature?: string;
+  body: unknown;
+  ip?: string | null;
+}): Promise<{ status: number; data: Record<string, unknown> }> {
+  const provider = await prisma.gameProvider.findUnique({ where: { code: input.providerCode } });
+  if (!provider) throw Errors.notFound('Provider');
+
+  const signatureValid = verifyCallbackSignature(provider, input.rawBody, input.signature);
+  const audit: ProviderAudit = {
+    providerCode: provider.code,
+    type: null,
+    externalTxnId: null,
+    externalSessionId: null,
+    signatureValid,
+    amount: null,
+    currency: null,
+    payload: (isRecord(input.body) || Array.isArray(input.body) ? input.body : {}) as Prisma.InputJsonValue,
+    ip: input.ip ?? null,
+  };
+
+  try {
+    if (!signatureValid) {
+      throw Errors.forbidden('Invalid provider signature', 'SIGNATURE_INVALID');
+    }
+    const parsed = ProviderProbeSchema.safeParse(input.body ?? {});
+    if (!parsed.success) {
+      throw Errors.badRequest('Probe payload is invalid', 'PROBE_MALFORMED');
+    }
+    await writeCallbackLog(audit, 200);
+    return { status: 200, data: { ok: true, operator: provider.code } };
+  } catch (error) {
+    const appError = error instanceof AppError ? error : Errors.internal('Provider probe failed');
+    await writeCallbackLog(audit, appError.status, appError.code);
     throw appError;
   }
 }
