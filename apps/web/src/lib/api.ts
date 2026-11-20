@@ -1115,7 +1115,7 @@ export function deleteGameProvider(code: string): Promise<{ deleted: true }> {
 
 export function issueGameProviderConsoleToken(
   code: string,
-  role: 'operator_admin' | 'superadmin' = 'superadmin',
+  role: 'provider_viewer' | 'operator_admin' | 'superadmin' = 'provider_viewer',
 ): Promise<{ token: string; expiresAt: string }> {
   return apiRequest(`/admin/game-providers/${encodeURIComponent(code)}/console-token`, {
     method: 'POST',

@@ -81,7 +81,7 @@ function serializeOperator(operator: OperatorRecord, secrets: OperatorSecretReco
 type Handler = (req: Request, res: Response) => Promise<void>;
 
 interface ConsoleScope {
-  role: 'operator_admin' | 'superadmin';
+  role: 'provider_viewer' | 'operator_admin' | 'superadmin';
   actorId: string;
   operatorCode: string;
 }
@@ -106,7 +106,9 @@ function verifyConsoleToken(secret: string | null | undefined, token: string): C
     if (
       payload.type !== 'provider_console'
       || typeof payload.actorId !== 'string'
-      || (payload.role !== 'operator_admin' && payload.role !== 'superadmin')
+      || (payload.role !== 'provider_viewer'
+        && payload.role !== 'operator_admin'
+        && payload.role !== 'superadmin')
       || typeof payload.operatorCode !== 'string'
       || typeof payload.exp !== 'number'
       || payload.exp <= Math.floor(Date.now() / 1000)
@@ -143,6 +145,10 @@ export function adminRouter(deps: {
         return;
       }
       res.locals.consoleScope = scope;
+      if (scope.role === 'provider_viewer' && req.method !== 'GET') {
+        res.status(403).json({ error: { code: 'CONSOLE_READ_ONLY' } });
+        return;
+      }
       next();
       return;
     }
@@ -161,7 +167,7 @@ export function adminRouter(deps: {
 
   router.use('/operators/:code', (req, res, next) => {
     const scope = res.locals.consoleScope as ConsoleScope | undefined;
-    if (scope?.role === 'operator_admin' && scope.operatorCode !== req.params.code) {
+    if (scope && scope.role !== 'superadmin' && scope.operatorCode !== req.params.code) {
       res.status(403).json({ error: { code: 'OPERATOR_SCOPE_DENIED' } });
       return;
     }
@@ -173,7 +179,7 @@ export function adminRouter(deps: {
     route(async (_req, res) => {
       const scope = res.locals.consoleScope as ConsoleScope | undefined;
       let operators = await deps.store.listOperators();
-      if (scope?.role === 'operator_admin') {
+      if (scope && scope.role !== 'superadmin') {
         operators = operators.filter((operator) => operator.code === scope.operatorCode);
       }
       const data = await Promise.all(
@@ -182,6 +188,44 @@ export function adminRouter(deps: {
         ),
       );
       res.json({ data });
+    }),
+  );
+
+  router.get(
+    '/dashboard',
+    route(async (_req, res) => {
+      const scope = res.locals.consoleScope as ConsoleScope | undefined;
+      const scopedOperatorCode = scope && scope.role !== 'superadmin'
+        ? scope.operatorCode
+        : undefined;
+      const operators = (await deps.store.listOperators())
+        .filter((operator) => scopedOperatorCode === undefined || operator.code === scopedOperatorCode)
+        .map((operator) => ({
+          code: operator.code,
+          name: operator.name,
+          status: operator.status,
+          currency: operator.currency,
+          enabledGames: operator.enabledGames,
+          maintenance: operator.maintenance,
+          probeOkAt: operator.probeOkAt,
+          createdAt: operator.createdAt,
+        }));
+      const metrics = await deps.store.getDashboardMetrics(scopedOperatorCode);
+      res.json({
+        data: {
+          operators,
+          metrics: {
+            ...metrics,
+            outbox: {
+              ...metrics.outbox,
+              recent: metrics.outbox.recent.map((entry) => ({
+                ...entry,
+                amount: entry.amount.toString(),
+              })),
+            },
+          },
+        },
+      });
     }),
   );
 

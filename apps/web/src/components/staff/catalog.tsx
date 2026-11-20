@@ -9,7 +9,6 @@ import {
   fetchProviderCallbacks,
   fetchProviderSettings,
   fetchProviderTransactions,
-  issueGameProviderConsoleToken,
   updateProviderSettings,
   upsertGameProvider,
   upsertGameProviderGame,
@@ -77,7 +76,7 @@ function toProviderDraft(provider: GameProvider): ProviderDraft {
   };
 }
 
-export function GameProvidersTab() {
+export function GameProvidersTab({ onOpenDashboard }: { onOpenDashboard: (code: string) => void }) {
   const [providers, setProviders] = useState<GameProvider[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState<GameProvider | null>(null);
@@ -115,24 +114,6 @@ export function GameProvidersTab() {
       await load();
     } catch (caught) {
       setError(caught instanceof ApiError ? caught.message : 'Could not remove the game.');
-    }
-  };
-
-  const openConsole = async (provider: GameProvider) => {
-    try {
-      const issued = await issueGameProviderConsoleToken(provider.code);
-      const callback = provider.apiBaseUrl ? new URL(provider.apiBaseUrl) : null;
-      if (!callback) {
-        setError('Configure a provider callback URL before opening the console.');
-        return;
-      }
-      callback.pathname = '/provider-console';
-      callback.search = '';
-      callback.hash = '';
-      callback.searchParams.set('token', issued.token);
-      window.open(callback.toString(), '_blank', 'noopener,noreferrer');
-    } catch (caught) {
-      setError(caught instanceof ApiError ? caught.message : 'Could not open the provider console.');
     }
   };
 
@@ -197,8 +178,14 @@ export function GameProvidersTab() {
                     </p>
                   </div>
                   <div className="flex shrink-0 flex-wrap gap-1.5">
-                    <Button size="sm" variant="gold" onClick={() => void openConsole(provider)}>
-                      Console
+                    <Button
+                      size="sm"
+                      variant="gold"
+                      disabled={!provider.apiBaseUrl}
+                      title={provider.apiBaseUrl ? undefined : 'Set a provider API base URL first.'}
+                      onClick={() => onOpenDashboard(provider.code)}
+                    >
+                      Dashboard
                     </Button>
                     <Button size="sm" variant="outline" onClick={() => setEditing(provider)}>
                       Configure
@@ -566,6 +553,10 @@ function GameSheet({
       setError('The external id and name are required.');
       return;
     }
+    if (!provider.apiBaseUrl && !draft.launchUrlTemplate.trim()) {
+      setError('Set the provider API base URL to generate this game’s launch URL.');
+      return;
+    }
     const minStake = draft.minStake.trim() ? creditsToMinor(draft.minStake) : null;
     const maxStake = draft.maxStake.trim() ? creditsToMinor(draft.maxStake) : null;
     const maxWin = draft.maxWin.trim() ? creditsToMinor(draft.maxWin) : null;
@@ -638,13 +629,25 @@ function GameSheet({
           value={draft.thumbnailUrl}
           onChange={(event) => patch({ thumbnailUrl: event.target.value })}
         />
-        <Input
-          label="Launch URL template"
-          value={draft.launchUrlTemplate}
-          onChange={(event) => patch({ launchUrlTemplate: event.target.value })}
-          placeholder="https://provider.example/play/{sessionId}?lang={lang}"
-          hint="Placeholders: {sessionId}, {token}, {lang}, {currency}."
-        />
+        <p className="rounded-xl border border-line bg-raised/50 px-3 py-2 text-[11px] leading-relaxed text-muted">
+          The launch URL is generated from the provider API base URL, this provider’s code,
+          the external game ID, and the session details. Configure the base URL in the
+          provider settings.
+        </p>
+        <details className="rounded-xl border border-line px-3 py-2">
+          <summary className="cursor-pointer text-xs font-semibold text-text">
+            Advanced: custom launch URL
+          </summary>
+          <div className="pt-3">
+            <Input
+              label="Launch URL template override"
+              value={draft.launchUrlTemplate}
+              onChange={(event) => patch({ launchUrlTemplate: event.target.value })}
+              placeholder="https://provider.example/play?token={token}&game={game}"
+              hint="Only needed when a provider does not use the standard /play?operator=&game= launch route."
+            />
+          </div>
+        </details>
         <div className="grid grid-cols-2 gap-3">
           <Input
             label="Min stake (ETB)"

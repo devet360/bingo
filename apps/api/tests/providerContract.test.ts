@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
-import { buildBalanceReply, buildLaunchUrl, isPlayableLaunchUrl, movementRequiresOpenSession, publicProviderConfig, withBalance } from '../src/lib/providerContract';
+import { buildBalanceReply, buildDefaultLaunchUrlTemplate, buildLaunchUrl, isPlayableLaunchUrl, movementRequiresOpenSession, publicProviderConfig, withBalance } from '../src/lib/providerContract';
 import { ProviderProbeSchema } from '../src/lib/providerCallback';
 
 // The provider services pull in env/prisma at import time; provide dummy values
@@ -34,6 +34,24 @@ test('launch url substitutes the operator code when the template asks for it', (
     buildLaunchUrl('https://crash.example/play?token={token}', ctx),
     'https://crash.example/play?token=t',
   );
+});
+
+test('default launch url is built from the provider URL and external game config', () => {
+  const template = buildDefaultLaunchUrlTemplate(
+    'https://games.example.com/api',
+    'partner01',
+    'coin flip',
+  );
+  assert.equal(
+    template,
+    'https://games.example.com/play?operator=partner01&game=coin+flip&token={token}&lang={lang}&currency={currency}',
+  );
+  assert.equal(
+    buildLaunchUrl(template, { token: 'session token', lang: 'am', currency: 'ETB' }),
+    'https://games.example.com/play?operator=partner01&game=coin+flip&token=session%20token&lang=am&currency=ETB',
+  );
+  assert.equal(buildDefaultLaunchUrlTemplate(null, 'partner01', 'crash'), null);
+  assert.equal(buildDefaultLaunchUrlTemplate('ftp://games.example.com', 'partner01', 'crash'), null);
 });
 
 test('launch url is null without a template and encodes the token', () => {

@@ -22,7 +22,7 @@ import {
   rollbackLedgerKey,
   verifyCallbackSignature,
 } from '../lib/providerCallback';
-import { buildBalanceReply, buildLaunchUrl, isPlayableLaunchUrl, movementRequiresOpenSession, publicProviderConfig, withBalance } from '../lib/providerContract';
+import { buildBalanceReply, buildDefaultLaunchUrlTemplate, buildLaunchUrl, isPlayableLaunchUrl, movementRequiresOpenSession, publicProviderConfig, withBalance } from '../lib/providerContract';
 import { postLedger } from './ledger';
 import { getConfig } from './config';
 import { runTransaction, withTxRetry } from '../lib/tx';
@@ -180,14 +180,26 @@ export interface GameInput {
 export async function upsertGame(providerCode: string, input: GameInput): Promise<ProviderGame> {
   const provider = await prisma.gameProvider.findUnique({ where: { code: providerCode } });
   if (!provider) throw Errors.notFound('Provider');
-  if (input.launchUrlTemplate !== undefined && input.launchUrlTemplate !== null) {
-    if (!isPlayableLaunchUrl(input.launchUrlTemplate)) {
-      throw Errors.badRequest(
-        'Launch URL template must be an absolute http(s) URL, e.g. https://host/play?token={token}',
-        'LAUNCH_URL_INVALID',
-      );
-    }
+  const existing = await prisma.providerGame.findUnique({
+    where: { providerId_externalId: { providerId: provider.id, externalId: input.externalId } },
+  });
+  const customTemplate = input.launchUrlTemplate?.trim() || null;
+  const generatedTemplate = buildDefaultLaunchUrlTemplate(
+    provider.apiBaseUrl,
+    provider.code,
+    input.externalId,
+  );
+  const launchUrlTemplate = customTemplate
+    ?? (input.launchUrlTemplate === undefined ? existing?.launchUrlTemplate : null)
+    ?? generatedTemplate;
+  if (!launchUrlTemplate || !isPlayableLaunchUrl(launchUrlTemplate)) {
+    throw Errors.badRequest(
+      'Configure a valid provider API base URL or provide an absolute http(s) launch URL template.',
+      'LAUNCH_URL_INVALID',
+    );
   }
+  const storedTemplate = customTemplate
+    ?? (input.launchUrlTemplate === undefined ? existing?.launchUrlTemplate ?? null : null);
   return prisma.providerGame.upsert({
     where: {
       providerId_externalId: { providerId: provider.id, externalId: input.externalId },
@@ -198,7 +210,7 @@ export async function upsertGame(providerCode: string, input: GameInput): Promis
       name: input.name,
       category: input.category ?? null,
       thumbnailUrl: input.thumbnailUrl ?? null,
-      launchUrlTemplate: input.launchUrlTemplate ?? null,
+      launchUrlTemplate: storedTemplate,
       minStake: input.minStake ?? null,
       maxStake: input.maxStake ?? null,
       maxWin: input.maxWin ?? null,
@@ -209,7 +221,7 @@ export async function upsertGame(providerCode: string, input: GameInput): Promis
       name: input.name,
       category: input.category ?? null,
       thumbnailUrl: input.thumbnailUrl ?? null,
-      launchUrlTemplate: input.launchUrlTemplate ?? null,
+      launchUrlTemplate: storedTemplate,
       minStake: input.minStake ?? null,
       maxStake: input.maxStake ?? null,
       maxWin: input.maxWin ?? null,
@@ -252,9 +264,11 @@ export async function launchGame(input: {
   if (!game.enabled || !game.provider.enabled) {
     throw Errors.conflict('This game is not available right now', 'GAME_UNAVAILABLE');
   }
+  const launchUrlTemplate = game.launchUrlTemplate
+    ?? buildDefaultLaunchUrlTemplate(game.provider.apiBaseUrl, game.provider.code, game.externalId);
   // A template without an absolute http(s) URL produces a session the player
   // app cannot embed, so refuse the launch instead of sending a dead link.
-  if (!isPlayableLaunchUrl(game.launchUrlTemplate)) {
+  if (!isPlayableLaunchUrl(launchUrlTemplate)) {
     throw Errors.conflict(
       'This game is not configured with a valid launch URL',
       'LAUNCH_URL_INVALID',
@@ -268,7 +282,7 @@ export async function launchGame(input: {
       providerId: game.providerId,
       gameId: game.id,
       externalSessionId,
-      launchUrl: buildLaunchUrl(game.launchUrlTemplate, {
+      launchUrl: buildLaunchUrl(launchUrlTemplate, {
         token: externalSessionId,
         lang: input.lang,
         currency: game.provider.currency,

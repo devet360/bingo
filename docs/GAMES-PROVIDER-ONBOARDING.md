@@ -3,6 +3,11 @@
 This runbook adds an operator to `apps/games-provider` and links it to one
 `apps/api`/`apps/web` deployment.
 
+For the full operator administration workflow, see
+[Games Provider Operator Administration](./GAMES-PROVIDER-OPERATOR-GUIDE.md). For
+the wallet callback and launch contract required to connect another operator,
+see the [Games Provider Integration Guide](./GAMES-PROVIDER-INTEGRATION.md).
+
 ## Prerequisites
 
 - Provider Postgres is migrated and reachable.
@@ -32,12 +37,11 @@ to source control or documentation.
 
 ## 2. Register games in bingo
 
-In the staff game-provider catalogue, create the games that should be visible
-for this operator. Crash must use the launch template:
-
-```text
-https://games.example.com/play?operator={operator}&game={game}&token={token}&lang={lang}&currency={currency}
-```
+In **Super Admin → Games**, create the games that should be visible for this
+operator. Set the provider API base URL, then add each external game ID (such
+as `crash`). Bingo generates the launch URL from the provider base URL,
+operator code, external game ID, and session details. Use the advanced custom
+URL override only when the provider uses a non-standard launch route.
 
 ## 3. Probe and activate
 
@@ -65,10 +69,12 @@ before touching a wallet.
 
 ## 5. Rotate a secret
 
+For a coordinated rotation and overlap, follow the
+[operator administration guide](./GAMES-PROVIDER-OPERATOR-GUIDE.md).
+
 ```bash
 npm run operator -w @bingo/games-provider -- rotate-secret --code operator-code
 ```
 
-Install the new secret in bingo during the overlap window, probe again, then
-close the old secret through the provider administrative workflow after no
-deliveries remain on the old version.
+The new secret is printed once. Update both sides, probe again, and keep the
+old secret available until in-flight wallet deliveries have drained.

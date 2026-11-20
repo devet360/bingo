@@ -368,7 +368,7 @@ dokku config:set bingo-crash \
   NODE_ENV=production \
   OPERATOR_CODE=bingo251 \
   OPERATOR_NAME="Bingo 251" \
-  OPERATOR_CALLBACK_URL="https://api.example.com/games/callback/stratos" \
+  OPERATOR_CALLBACK_URL="https://api.example.com/games/callback/bingo251" \
   OPERATOR_HMAC_SECRET="<provider secret from Admin → Providers>" \
   OPERATOR_CURRENCY=ETB \
   ALLOWED_PARENT_ORIGINS="https://app.example.com" \
@@ -376,7 +376,7 @@ dokku config:set bingo-crash \
   GAME_MAX_STAKE=100000 \
   GAME_MAX_WIN=3000000 \
   GAME_MAX_BETS_PER_ROUND=200 \
-  CLIENT_SEEDS="stratos_slot_1_00000001,stratos_slot_2_00000002,stratos_slot_3_00000003" \
+  CLIENT_SEEDS="bingo251_slot_1_00000001,bingo251_slot_2_00000002,bingo251_slot_3_00000003" \
   BOT_COUNT=0 \
   BOT_STAKE_MIN=100 \
   BOT_STAKE_MAX=10000 \
@@ -393,9 +393,9 @@ dokku config:set bingo-crash \
   CONSOLE_TOKEN_SECRET="<the exact same value set on bingo-api>"
 ```
 
-`OPERATOR_HMAC_SECRET` must equal the webhook secret of the provider record in the bingo
+`OPERATOR_HMAC_SECRET` must equal the webhook secret of the provider record in the Bingo
 admin; it is never committed and never printed. `ALLOWED_PARENT_ORIGINS` is the
-comma-separated list of origins allowed to iframe `/play`.
+comma-separated list of origins allowed to iframe `/play` and `/provider-console`.
 
 The new shared secret variables are:
 
@@ -445,16 +445,27 @@ to finish before considering the provider healthy. A `wallet rows need operator
 attention` line means `DEAD`/`CAP_REJECTED` outbox rows exist: a payout or rollback was
 refused terminally and needs a human (`dokku logs bingo-crash`).
 
-Register the provider in the bingo admin (**Admin → Providers**):
+To embed the Games Provider dashboard in Bingo's super-admin console, set the same
+`CONSOLE_TOKEN_SECRET` on the API and Games Provider, and include the Bingo web origin in
+the provider's `ALLOWED_PARENT_ORIGINS`. The dashboard is available at
+**Super Admin → Provider dashboard**; use **Provider guides** for the operator and
+wallet-integration walkthroughs.
 
-1. Add provider: code `stratos`, kind `AGGREGATOR`, currency `ETB`, the win cap, and the
-   same webhook secret as `OPERATOR_HMAC_SECRET`. Bingo shows the callback it signs:
-   `POST https://api.example.com/games/callback/stratos` — that URL is what
+Register the provider in the Bingo admin (**Super Admin → Games**):
+
+1. Add provider: code `bingo251` (the default `OPERATOR_CODE`), kind `AGGREGATOR`,
+   currency `ETB`, the win cap, and the same webhook secret as
+   `OPERATOR_HMAC_SECRET`. The callback path code and provider code must match
+   `OPERATOR_CODE`; Bingo shows the callback it signs:
+   `POST https://api.example.com/games/callback/bingo251` — that URL is what
    `OPERATOR_CALLBACK_URL` points at, and it must be reachable from `bingo-crash`.
-2. Add game: external id `crash`, category `crash`, launch URL template
-   `https://<crash-host>/play?token={token}&lang={lang}&currency={currency}`.
-   To publish coin flip later, add external id `coinflip` and launch
-   `https://<crash-host>/play?operator={operator}&game={game}&token={token}&lang={lang}&currency={currency}`.
+   If you use another `OPERATOR_CODE`, use that same code for the Bingo provider
+   entry and callback path.
+2. Add game: external id `crash`, category `crash`. Bingo generates its launch
+   URL from the provider API base URL, provider code, external game ID, and
+   session details. To publish coin flip, add external id `coinflip`. Use the
+   advanced custom URL override only if the provider uses a non-standard
+   `/play` route.
 3. Enable both. Players then get enabled games in the Mini App lobby.
 
 Smoke test (writes rows, so it demands confirmation; recovery is global, so run it
@@ -474,16 +485,20 @@ reconciliation have been run in staging.
 
 ## Provider dashboard
 
-The games provider has its own `/provider-console` page and protected
-`/api/admin/operators*` API. Bingo staff does not share the provider’s bootstrap admin
-token. From **Admin → Providers**, a SUPER_ADMIN can issue a short-lived, HMAC-signed
-provider-console token for the selected provider. The token is scoped to either that
-operator or all operators and expires after 10 minutes.
+From **Super Admin → Provider dashboard**, a Bingo SUPER_ADMIN can open the selected
+Games Provider's live operations page inside Bingo web. It reports operator status,
+active sessions, rounds, unsettled bets, and wallet-outbox delivery state. Bingo issues
+a short-lived, read-only token scoped to that provider and renews it while the page is
+open; `CONSOLE_TOKEN_SECRET` must match on Bingo API and Games Provider.
+`ALLOWED_PARENT_ORIGINS` on the provider must include the Bingo web origin.
 
-Until provider-owned staff accounts are introduced, provider operator staff should use
-this Bingo-issued console-token path. `PROVIDER_ADMIN_TOKEN` remains only a
-bootstrapping/on-call CLI mechanism and should not be shared with staff. Secrets are
-never rendered in the console.
+The dashboard is currently a read-only operations view. Configure games in
+**Super Admin → Games** and use the operator CLI for provider-side operator changes.
+`PROVIDER_ADMIN_TOKEN` is a bootstrap/on-call CLI credential and must never be exposed
+to the browser or shared with staff. The separate **Super Admin → Provider guides** page
+contains the operator setup and wallet-integration walkthroughs; their Markdown sources
+are [GAMES-PROVIDER-OPERATOR-GUIDE.md](./GAMES-PROVIDER-OPERATOR-GUIDE.md) and
+[GAMES-PROVIDER-INTEGRATION.md](./GAMES-PROVIDER-INTEGRATION.md).
 
 A public marketing/promotions website is not required for gameplay and is not deployed
 with the provider yet. It should be a later separate app that consumes the public

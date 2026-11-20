@@ -1325,7 +1325,7 @@ adminRouter.post(
   '/game-providers/:code/console-token',
   asyncHandler(async (req, res) => {
     const body = parse(z.object({
-      role: z.enum(['operator_admin', 'superadmin']).default('superadmin'),
+      role: z.enum(['provider_viewer', 'operator_admin', 'superadmin']).default('provider_viewer'),
       ttlSeconds: z.coerce.number().int().min(60).max(900).default(600),
     }), req.body ?? {});
     const provider = await prisma.gameProvider.findUnique({ where: { code: req.params.code } });

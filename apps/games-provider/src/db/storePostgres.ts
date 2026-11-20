@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { and, asc, count, desc, eq, inArray, isNotNull, lte, notExists, or, sql } from 'drizzle-orm';
+import { and, asc, count, desc, eq, gte, inArray, isNotNull, lte, notExists, or, sql } from 'drizzle-orm';
 import type {
   BetRecord,
   OperatorRecord,
@@ -9,7 +9,7 @@ import type {
   RoundRecord,
   SessionRecord,
 } from '../domain/types';
-import type { NewBet, NewOutbox, NewRound, Store } from '../server/store';
+import type { DashboardMetrics, NewBet, NewOutbox, NewRound, Store } from '../server/store';
 import type { Database } from './index';
 import { bets, operatorSecrets, operators, rounds, sessions, walletOutbox } from './schema';
 
@@ -535,6 +535,99 @@ export function createPostgresStore(db: Database): Store {
         .from(walletOutbox)
         .where(eq(walletOutbox.status, status));
       return rows[0]?.total ?? 0;
+    },
+    async getDashboardMetrics(operatorCode?: string): Promise<DashboardMetrics> {
+      const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
+      const sessionScope = operatorCode === undefined
+        ? undefined
+        : eq(sessions.operatorCode, operatorCode);
+      const roundScope = operatorCode === undefined
+        ? undefined
+        : eq(rounds.operatorCode, operatorCode);
+      const betScope = operatorCode === undefined
+        ? undefined
+        : eq(bets.operatorCode, operatorCode);
+      const outboxScope = operatorCode === undefined
+        ? undefined
+        : eq(walletOutbox.operatorCode, operatorCode);
+      const [sessionTotal, activeSessionTotal, roundTotal, recentRoundRows, recentRoundTotal,
+        betTotal, unsettledBetTotal, pendingOutboxTotal, deadOutboxTotal, cappedOutboxTotal,
+        recentOutboxRows] = await Promise.all([
+        db.select({ total: count() }).from(sessions).where(sessionScope),
+        db.select({ total: count() }).from(sessions).where(
+          and(sessionScope, eq(sessions.status, 'OPEN')),
+        ),
+        db.select({ total: count() }).from(rounds).where(roundScope),
+        db.select({
+          id: rounds.id,
+          gameId: rounds.gameId,
+          status: rounds.status,
+          crashPoint: rounds.crashPoint,
+          coinOutcome: rounds.coinOutcome,
+          startedAt: rounds.startedAt,
+          crashedAt: rounds.crashedAt,
+        }).from(rounds)
+          .where(roundScope)
+          .orderBy(desc(rounds.id))
+          .limit(10),
+        db.select({ total: count() }).from(rounds).where(
+          and(roundScope, gte(rounds.startedAt, since)),
+        ),
+        db.select({ total: count() }).from(bets).where(betScope),
+        db.select({ total: count() }).from(bets).where(
+          and(betScope, inArray(bets.status, [...UNSETTLED])),
+        ),
+        db.select({ total: count() }).from(walletOutbox).where(
+          and(outboxScope, eq(walletOutbox.status, 'PENDING')),
+        ),
+        db.select({ total: count() }).from(walletOutbox).where(
+          and(outboxScope, eq(walletOutbox.status, 'DEAD')),
+        ),
+        db.select({ total: count() }).from(walletOutbox).where(
+          and(outboxScope, eq(walletOutbox.status, 'CAP_REJECTED')),
+        ),
+        db.select({
+          type: walletOutbox.type,
+          status: walletOutbox.status,
+          amount: walletOutbox.amount,
+          attempts: walletOutbox.attempts,
+          updatedAt: walletOutbox.updatedAt,
+        }).from(walletOutbox)
+          .where(outboxScope)
+          .orderBy(desc(walletOutbox.updatedAt))
+          .limit(10),
+      ]);
+      return {
+        sessions: {
+          total: sessionTotal[0]?.total ?? 0,
+          active: activeSessionTotal[0]?.total ?? 0,
+        },
+        rounds: {
+          total: roundTotal[0]?.total ?? 0,
+          last24Hours: recentRoundTotal[0]?.total ?? 0,
+          recent: recentRoundRows.map((row) => ({
+            id: row.id,
+            gameId: row.gameId,
+            status: row.status,
+            crashPoint: numericToNumber(row.crashPoint),
+            ...(row.coinOutcome === 'HEADS' || row.coinOutcome === 'TAILS'
+              ? { coinOutcome: row.coinOutcome }
+              : {}),
+            startedAt: row.startedAt,
+            crashedAt: row.crashedAt,
+          })),
+        },
+        bets: {
+          total: betTotal[0]?.total ?? 0,
+          unsettled: unsettledBetTotal[0]?.total ?? 0,
+        },
+        outbox: {
+          pending: pendingOutboxTotal[0]?.total ?? 0,
+          dead: deadOutboxTotal[0]?.total ?? 0,
+          capRejected: cappedOutboxTotal[0]?.total ?? 0,
+          recent: recentOutboxRows,
+        },
+      };
     },
   };
 }

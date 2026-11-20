@@ -1051,7 +1051,12 @@ export const openApiDocument = {
           name: { type: 'string', maxLength: 96 },
           category: { type: 'string', maxLength: 48, nullable: true },
           thumbnailUrl: { type: 'string', format: 'uri', nullable: true },
-          launchUrlTemplate: { type: 'string', maxLength: 2048, nullable: true },
+          launchUrlTemplate: {
+            type: 'string',
+            maxLength: 2048,
+            nullable: true,
+            description: 'Optional custom launch URL template. When absent, the launch URL is generated dynamically from provider apiBaseUrl, provider code, and externalId using the standard /play route.',
+          },
           minStake: { type: 'integer', minimum: 1, nullable: true },
           maxStake: { type: 'integer', minimum: 1, nullable: true },
           maxWin: { type: 'integer', minimum: 1, nullable: true, description: 'Minor units; null inherits the provider/platform ceiling' },

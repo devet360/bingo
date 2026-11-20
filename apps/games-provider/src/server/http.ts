@@ -10,6 +10,7 @@ import { OperatorError, type OperatorRegistry } from './operatorRegistry';
 import type { Store } from './store';
 import { WalletError } from './wallet';
 import { ChatRainError, ChatRainManager } from './chatRain';
+import { renderProviderConsole } from './providerConsole';
 
 export interface AppDeps {
   config: AppConfig;
@@ -286,10 +287,8 @@ export function createApp(deps: AppDeps): express.Express {
 
   app.get('/provider-console', (req, res) => {
     const token = typeof req.query.token === 'string' ? req.query.token : '';
-    res.type('html').send(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Provider Console</title></head><body style="font-family:system-ui;margin:24px"><h1>Provider Console</h1><p id="scope">Loading scoped operators…</p><div id="operators"></div><script>
-const token=${JSON.stringify(token)};
-async function load(){const r=await fetch('/api/admin/operators',{headers:{authorization:'Bearer '+token}});const p=await r.json();const scope=document.getElementById('scope');const el=document.getElementById('operators');if(!r.ok){scope.textContent=p.error?.code||'Unauthorized';return}scope.textContent='Scoped operator view';for(const o of p.data||[]){const article=document.createElement('article');article.style.border='1px solid #ccc';article.style.padding='12px';article.style.margin='8px 0';article.textContent=o.name+' ('+o.code+') — '+o.status+' — games: '+(o.enabledGames||[]).join(', ');el.appendChild(article)}}load();
-</script></body></html>`);
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    res.type('html').send(renderProviderConsole(token));
   });
 
   // Runs after the global frame-ancestors middleware so a per-operator policy

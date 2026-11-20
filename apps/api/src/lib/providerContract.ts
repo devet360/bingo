@@ -7,6 +7,29 @@ export interface LaunchContext {
   operator?: string;
 }
 
+export function buildDefaultLaunchUrlTemplate(
+  apiBaseUrl: string | null,
+  operator: string,
+  game: string,
+): string | null {
+  if (!apiBaseUrl) return null;
+  let base: URL;
+  try {
+    base = new URL(apiBaseUrl);
+  } catch {
+    return null;
+  }
+  if (
+    (base.protocol !== 'http:' && base.protocol !== 'https:')
+    || base.username
+    || base.password
+  ) return null;
+
+  const playUrl = new URL('/play', base);
+  const params = new URLSearchParams({ operator, game });
+  return `${playUrl.origin}${playUrl.pathname}?${params.toString()}&token={token}&lang={lang}&currency={currency}`;
+}
+
 export function buildLaunchUrl(template: string | null, ctx: LaunchContext): string | null {
   if (!template) return null;
   return template

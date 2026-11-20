@@ -392,7 +392,7 @@ then relay, then a direct fetch.
 | PUT | `/admin/settings/bonuses` | `{ defaultWageringMultiplier: 1..100, defaultExpiryDays: 1..365 }` | Defaults for admin grants |
 | GET | `/admin/game-providers` | — | Providers with their game catalogs |
 | PUT/DELETE | `/admin/game-providers/:code` | `{ name, kind, apiBaseUrl?, webhookSecret?, enabled?, sortOrder?, config? }` | Secret is write-only; omit it to keep the current one |
-| POST | `/admin/game-providers/:code/games` | `{ externalId, name, category?, thumbnailUrl?, launchUrlTemplate?, minStake?, maxStake?, enabled?, sortOrder? }` | |
+| POST | `/admin/game-providers/:code/games` | `{ externalId, name, category?, thumbnailUrl?, launchUrlTemplate?, minStake?, maxStake?, enabled?, sortOrder? }` | With no custom `launchUrlTemplate`, launch URLs are generated dynamically from the provider API base URL, provider code, and external game ID |
 | DELETE | `/admin/game-providers/:code/games/:externalId` | — | |
 
 ---

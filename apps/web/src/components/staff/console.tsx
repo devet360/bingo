@@ -11,6 +11,8 @@ import { AuditTab, OverviewTab, StaffTab } from './admin';
 import { BingoRoomsTab } from './bingo';
 import { BonusesTab } from './bonuses';
 import { GameProvidersTab } from './catalog';
+import { ProviderDashboardTab } from './providerDashboard';
+import { ProviderGuidesTab } from './providerGuides';
 import { MarketingTab } from './marketing';
 import { ProvidersTab } from './providers';
 import { AgentsTab, DepositsTab, TransactionsTab, WithdrawalsTab } from './queues';
@@ -38,7 +40,9 @@ type AdminTab =
   | 'bingo'
   | 'marketing'
   | 'bonuses'
-  | 'games';
+  | 'games'
+  | 'provider-dashboard'
+  | 'provider-guides';
 
 type QueueKey = keyof AdminOverview['queues'];
 
@@ -207,6 +211,16 @@ const ADMIN_GROUPS: Array<{ labelKey: string; items: AdminNavItem[] }> = [
           </>
         ),
       },
+      {
+        value: 'provider-dashboard',
+        labelKey: 'staff.tab.providerDashboard',
+        icon: (
+          <>
+            <path d="M4 19V5M4 19h16" />
+            <path d="m7 15 3-4 3 2 5-7" />
+          </>
+        ),
+      },
     ],
   },
   {
@@ -269,6 +283,16 @@ const ADMIN_GROUPS: Array<{ labelKey: string; items: AdminNavItem[] }> = [
           <>
             <circle cx="12" cy="12" r="8" />
             <path d="M12 8v4l3 2" />
+          </>
+        ),
+      },
+      {
+        value: 'provider-guides',
+        labelKey: 'staff.tab.providerGuides',
+        icon: (
+          <>
+            <path d="M5 4.5A2.5 2.5 0 0 1 7.5 2H20v17H7.5A2.5 2.5 0 0 0 5 21.5z" />
+            <path d="M5 4.5v17M9 7h7M9 11h7" />
           </>
         ),
       },
@@ -367,6 +391,7 @@ export function StaffConsole({ mode }: { mode: 'support' | 'admin' }) {
   const { t } = useI18n();
   const [supportTab, setSupportTab] = useState<SupportTab>('tickets');
   const [adminTab, setAdminTab] = useState<AdminTab>('overview');
+  const [providerDashboardCode, setProviderDashboardCode] = useState<string | undefined>();
   const [overview, setOverview] = useState<AdminOverview | null>(null);
   const [overviewError, setOverviewError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
@@ -460,6 +485,10 @@ export function StaffConsole({ mode }: { mode: 'support' | 'admin' }) {
     setAdminTab(tab);
     setDrawerOpen(false);
   };
+  const openProviderDashboard = (code: string) => {
+    setProviderDashboardCode(code);
+    select('provider-dashboard');
+  };
 
   const sidebar = (
     <Sidebar
@@ -533,7 +562,11 @@ export function StaffConsole({ mode }: { mode: 'support' | 'admin' }) {
             {adminTab === 'bingo' ? <BingoRoomsTab /> : null}
             {adminTab === 'marketing' ? <MarketingTab /> : null}
             {adminTab === 'bonuses' ? <BonusesTab /> : null}
-            {adminTab === 'games' ? <GameProvidersTab /> : null}
+            {adminTab === 'games' ? <GameProvidersTab onOpenDashboard={openProviderDashboard} /> : null}
+            {adminTab === 'provider-dashboard' ? (
+              <ProviderDashboardTab preferredProviderCode={providerDashboardCode} />
+            ) : null}
+            {adminTab === 'provider-guides' ? <ProviderGuidesTab /> : null}
             {adminTab === 'staff' ? <StaffTab /> : null}
             {adminTab === 'audit' ? <AuditTab /> : null}
           </div>

@@ -8,7 +8,7 @@ import type {
   RoundRecord,
   SessionRecord,
 } from '../domain/types';
-import type { NewBet, NewOutbox, NewRound, Store } from '../server/store';
+import type { DashboardMetrics, NewBet, NewOutbox, NewRound, Store } from '../server/store';
 
 export interface MemoryStoreOptions {
   /** Clock used for generated timestamps. Defaults to the real clock. */
@@ -272,6 +272,61 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): MemoryStore
     },
     async countOutboxByStatus(status: OutboxStatus) {
       return [...outbox.values()].filter((row) => row.status === status).length;
+    },
+    async getDashboardMetrics(operatorCode?: string): Promise<DashboardMetrics> {
+      const cutoff = now().getTime() - 24 * 60 * 60 * 1000;
+      const byOperator = (code: string) => operatorCode === undefined || code === operatorCode;
+      const sessionRows = [...sessions.values()].filter((row) => byOperator(row.operatorCode));
+      const roundRows = [...rounds.values()].filter((row) =>
+        row.operatorCode === undefined
+          ? operatorCode === undefined
+          : byOperator(row.operatorCode),
+      );
+      const betRows = [...bets.values()].filter((row) => byOperator(row.operatorCode));
+      const outboxRows = [...outbox.values()].filter((row) => byOperator(row.operatorCode));
+      return {
+        sessions: {
+          total: sessionRows.length,
+          active: sessionRows.filter((row) => row.status === 'OPEN').length,
+        },
+        rounds: {
+          total: roundRows.length,
+          last24Hours: roundRows.filter((row) => row.startedAt.getTime() >= cutoff).length,
+          recent: [...roundRows]
+            .sort((a, b) => b.id - a.id)
+            .slice(0, 10)
+            .map((row) => ({
+              id: row.id,
+              gameId: row.gameId ?? 'crash',
+              status: row.status,
+              crashPoint: row.crashPoint,
+              ...(row.coinOutcome ? { coinOutcome: row.coinOutcome } : {}),
+              startedAt: row.startedAt,
+              crashedAt: row.crashedAt,
+            })),
+        },
+        bets: {
+          total: betRows.length,
+          unsettled: betRows.filter((row) =>
+            row.status === 'PLACING' || row.status === 'ACTIVE' || row.status === 'UNRESOLVED',
+          ).length,
+        },
+        outbox: {
+          pending: outboxRows.filter((row) => row.status === 'PENDING').length,
+          dead: outboxRows.filter((row) => row.status === 'DEAD').length,
+          capRejected: outboxRows.filter((row) => row.status === 'CAP_REJECTED').length,
+          recent: [...outboxRows]
+            .sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime())
+            .slice(0, 10)
+            .map((row) => ({
+              type: row.type,
+              status: row.status,
+              amount: row.amount,
+              attempts: row.attempts,
+              updatedAt: row.updatedAt,
+            })),
+        },
+      };
     },
 
     dump() {

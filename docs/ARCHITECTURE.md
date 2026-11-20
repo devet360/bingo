@@ -570,8 +570,10 @@ one `AFFILIATE_COMMISSION` journal per referrer per round with idempotency key
 
 Providers authenticate callbacks with a per-provider HMAC-SHA256 over the raw request
 body (`x-provider-signature`). Launching a game creates a `ProviderSession` (2h TTL) and
-expands the game's `launchUrlTemplate` with `{token}`, `{sessionId}`, `{lang}` and
-`{currency}=CREDIT`. Callbacks are typed `bet`, `win` or `rollback` and post ledger
+expands its launch URL template with `{token}`, `{sessionId}`, `{operator}`, `{game}`,
+`{lang}` and `{currency}`. When no custom template is stored, Bingo generates the
+standard `/play` URL from the provider API base URL, provider code, and external game ID.
+Callbacks are typed `bet`, `win` or `rollback` and post ledger
 journals keyed `provider:<code>:<txnId>` and `provider:<code>:rollback:<txnId>`, so a
 replayed callback is a no-op. The webhook secret is write-only: `GET` responses expose
 only `hasSecret`. Admin edits can add providers and games but cannot reach the deposit

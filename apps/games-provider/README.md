@@ -72,7 +72,10 @@ opened to players.
 `.env.example` lists every key with placeholder values. Never commit real secrets.
 
 See [the operator onboarding runbook](../../docs/GAMES-PROVIDER-ONBOARDING.md)
-for create, probe, activation and secret-rotation steps.
+for create, probe, activation and secret-rotation steps. The
+[operator administration guide](../../docs/GAMES-PROVIDER-OPERATOR-GUIDE.md) and
+[integration guide](../../docs/GAMES-PROVIDER-INTEGRATION.md) provide the complete
+deployment and wallet callback procedures.
 
 ## Endpoints
 

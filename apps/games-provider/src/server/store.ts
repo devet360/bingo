@@ -3,8 +3,10 @@ import type {
   OperatorRecord,
   OperatorSecretRecord,
   OutboxRecord,
+  OutboxType,
   OutboxStatus,
   RoundRecord,
+  RoundStatus,
   SessionRecord,
 } from '../domain/types';
 
@@ -15,6 +17,36 @@ export type NewOutbox = Pick<
   OutboxRecord,
   'operatorCode' | 'type' | 'txnId' | 'sessionToken' | 'amount'
 >;
+
+export interface DashboardRound {
+  id: number;
+  gameId: string;
+  status: RoundStatus;
+  crashPoint: number | null;
+  coinOutcome?: 'HEADS' | 'TAILS';
+  startedAt: Date;
+  crashedAt: Date | null;
+}
+
+export interface DashboardOutboxEntry {
+  type: OutboxType;
+  status: OutboxStatus;
+  amount: bigint;
+  attempts: number;
+  updatedAt: Date;
+}
+
+export interface DashboardMetrics {
+  sessions: { total: number; active: number };
+  rounds: { total: number; last24Hours: number; recent: DashboardRound[] };
+  bets: { total: number; unsettled: number };
+  outbox: {
+    pending: number;
+    dead: number;
+    capRejected: number;
+    recent: DashboardOutboxEntry[];
+  };
+}
 
 export interface Store {
   getOperator(code: string): Promise<OperatorRecord | null>;
@@ -59,4 +91,5 @@ export interface Store {
   rescheduleOutbox(id: string, nextAttemptAt: Date, error: string): Promise<void>;
   pendingOutboxCount(): Promise<number>;
   countOutboxByStatus(status: OutboxStatus): Promise<number>;
+  getDashboardMetrics(operatorCode?: string): Promise<DashboardMetrics>;
 }
