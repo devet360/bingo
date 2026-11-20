@@ -1388,7 +1388,7 @@ model ProviderGame {
   name              String
   category          String?
   thumbnailUrl      String?
-  launchUrlTemplate String? // {token}, {lang}, {currency} placeholders
+  launchUrlTemplate String? // {token}, {sessionId}, {operator}, {game}, {lang}, {currency}
   minStake          BigInt?
   maxStake          BigInt?
   // Per-game single-win ceiling in minor units. Null falls back to the

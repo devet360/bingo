@@ -287,6 +287,7 @@ export async function launchGame(input: {
         lang: input.lang,
         currency: game.provider.currency,
         operator: game.provider.code,
+        game: game.externalId,
       }),
       expiresAt: new Date(Date.now() + SESSION_TTL_MS),
     },

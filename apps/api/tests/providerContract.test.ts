@@ -24,11 +24,11 @@ test('launch url substitutes the real currency, not the legacy CREDIT literal', 
   );
 });
 
-test('launch url substitutes the operator code when the template asks for it', () => {
-  const ctx = { token: 't', lang: 'en', currency: 'ETB', operator: 'op-a' };
+test('launch url substitutes operator and external game identifiers', () => {
+  const ctx = { token: 't', lang: 'en', currency: 'ETB', operator: 'op-a', game: 'crash' };
   assert.equal(
-    buildLaunchUrl('https://crash.example/play?token={token}&operator={operator}', ctx),
-    'https://crash.example/play?token=t&operator=op-a',
+    buildLaunchUrl('https://crash.example/play?token={token}&operator={operator}&game={game}', ctx),
+    'https://crash.example/play?token=t&operator=op-a&game=crash',
   );
   assert.equal(
     buildLaunchUrl('https://crash.example/play?token={token}', ctx),

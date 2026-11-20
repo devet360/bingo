@@ -5,6 +5,7 @@ export interface LaunchContext {
   lang: string;
   currency: string;
   operator?: string;
+  game?: string;
 }
 
 export function buildDefaultLaunchUrlTemplate(
@@ -37,7 +38,8 @@ export function buildLaunchUrl(template: string | null, ctx: LaunchContext): str
     .replaceAll('{sessionId}', encodeURIComponent(ctx.token))
     .replaceAll('{lang}', encodeURIComponent(ctx.lang))
     .replaceAll('{currency}', encodeURIComponent(ctx.currency))
-    .replaceAll('{operator}', encodeURIComponent(ctx.operator ?? ''));
+    .replaceAll('{operator}', encodeURIComponent(ctx.operator ?? ''))
+    .replaceAll('{game}', encodeURIComponent(ctx.game ?? ''));
 }
 
 /**

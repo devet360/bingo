@@ -1031,7 +1031,7 @@ export const openApiDocument = {
           name: { type: 'string' },
           category: { type: 'string', nullable: true },
           thumbnailUrl: { type: 'string', nullable: true },
-          launchUrlTemplate: { type: 'string', nullable: true, description: 'Supports {token}, {sessionId}, {lang} and {currency}' },
+          launchUrlTemplate: { type: 'string', nullable: true, description: 'Supports {token}, {sessionId}, {operator}, {game}, {lang} and {currency}' },
           minStake: { type: 'string', nullable: true },
           maxStake: { type: 'string', nullable: true },
           maxWin: {
