@@ -557,10 +557,13 @@ function GameSheet({
       .then((games) => {
         if (!cancelled) setCatalogue(games);
       })
-      .catch(() => {
+      .catch((caught: unknown) => {
         if (!cancelled) {
           setCatalogue([]);
-          setCatalogueError('Could not load provider games. You can still enter the game details manually.');
+          const reason = caught instanceof ApiError
+            ? caught.message
+            : caught instanceof Error ? caught.message : 'Could not load provider games.';
+          setCatalogueError(reason);
         }
       })
       .finally(() => {
@@ -666,7 +669,13 @@ function GameSheet({
             disabled={loadingCatalogue || catalogue.length === 0}
           >
             <option value="">
-              {loadingCatalogue ? 'Loading provider games…' : catalogue.length ? 'Select a provider game' : 'No provider games found'}
+              {loadingCatalogue
+                ? 'Loading provider games…'
+                : catalogueError
+                  ? 'Provider catalogue unavailable'
+                  : catalogue.length
+                    ? 'Select a provider game'
+                    : `No supported games enabled for ${provider.code}`}
             </option>
             {catalogue.map((game) => (
               <option key={game.id} value={game.id}>{game.name} ({game.id})</option>
@@ -674,6 +683,11 @@ function GameSheet({
           </Select>
         ) : null}
         {catalogueError ? <ErrorNote>{catalogueError}</ErrorNote> : null}
+        {!loadingCatalogue && !catalogueError && provider.apiBaseUrl && catalogue.length === 0 ? (
+          <ErrorNote>
+            Enable Crash or Coin Flip for this operator in the Games Provider owner dashboard, then try again.
+          </ErrorNote>
+        ) : null}
         <div className="grid grid-cols-2 gap-3">
           <Input
             label="External id"

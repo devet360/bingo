@@ -159,6 +159,7 @@ npm run operator -w @bingo/games-provider -- suspend --code bingo251
 | Symptom | Check |
 | --- | --- |
 | `OPERATOR_NOT_FOUND` | The `operator` query value, `OPERATOR_CODE`, and operator CLI `--code` must identify the same record. |
+| Games selector is empty in Bingo | Match the Bingo provider code to the Games Provider operator code, enable Crash or Coin Flip for that operator, and deploy the current Games Provider and Bingo API versions. |
 | Probe fails or callbacks return 401 | Compare the callback path code and HMAC secret on both sides; signatures use the exact raw request bytes. |
 | `GAME_UNAVAILABLE` | Confirm the external game ID is listed in `enabledGames` and is enabled in Bingo. |
 | Dashboard iframe is blank | Check the Games Provider `ALLOWED_PARENT_ORIGINS`, API base URL, and shared `CONSOLE_TOKEN_SECRET`. |

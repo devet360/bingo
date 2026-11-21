@@ -32,10 +32,45 @@ export async function fetchProviderGameCatalogue(code: string) {
   try {
     response = await fetch(url, { signal: AbortSignal.timeout(6_000) });
   } catch {
-    throw new AppError(502, 'PROVIDER_CATALOGUE_UNAVAILABLE', 'Could not reach the games provider catalogue');
+    throw new AppError(
+      502,
+      'PROVIDER_CATALOGUE_UNAVAILABLE',
+      'Could not reach the configured Games Provider API URL.',
+    );
   }
   if (!response.ok) {
-    throw new AppError(502, 'PROVIDER_CATALOGUE_UNAVAILABLE', `Games provider returned HTTP ${response.status}`);
+    let remoteCode: string | undefined;
+    try {
+      const body: unknown = await response.json();
+      if (typeof body === 'object' && body !== null && 'error' in body) {
+        const remoteError = body.error;
+        if (typeof remoteError === 'object' && remoteError !== null
+          && 'code' in remoteError && typeof remoteError.code === 'string') {
+          remoteCode = remoteError.code;
+        }
+      }
+    } catch {
+      remoteCode = undefined;
+    }
+    if (response.status === 404 && remoteCode === 'OPERATOR_NOT_FOUND') {
+      throw new AppError(
+        409,
+        'PROVIDER_OPERATOR_NOT_CONFIGURED',
+        `Games Provider has no operator named "${provider.code}". Create that operator and enable its games; the Bingo provider code must match the Games Provider operator code.`,
+      );
+    }
+    if (response.status === 404) {
+      throw new AppError(
+        502,
+        'PROVIDER_CATALOGUE_ENDPOINT_MISSING',
+        'Games Provider catalogue endpoint was not found. Deploy the current Games Provider version and verify its public API base URL.',
+      );
+    }
+    throw new AppError(
+      502,
+      'PROVIDER_CATALOGUE_UNAVAILABLE',
+      `Games Provider returned HTTP ${response.status}`,
+    );
   }
 
   let payload: unknown;
@@ -46,7 +81,11 @@ export async function fetchProviderGameCatalogue(code: string) {
   }
   const parsed = CatalogueResponseSchema.safeParse(payload);
   if (!parsed.success) {
-    throw new AppError(502, 'PROVIDER_CATALOGUE_INVALID', 'Games provider returned an unsupported catalogue shape');
+    throw new AppError(
+      502,
+      'PROVIDER_CATALOGUE_VERSION_UNSUPPORTED',
+      'Games Provider does not expose game metadata yet. Deploy the current Games Provider version.',
+    );
   }
 
   return parsed.data.data.availableGames.map((game) => ({
