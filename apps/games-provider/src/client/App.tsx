@@ -30,7 +30,7 @@ const ERROR_KEYS: Record<string, keyof typeof en> = {
 };
 
 const EndedScreen: React.FC<{ lang: Lang; body?: string }> = ({ lang, body }) => (
-  <div className="min-h-dvh bg-[var(--g-bg)] text-[var(--g-text)] flex flex-col items-center justify-center gap-3 px-6 text-center">
+  <div className="min-h-dvh bg-(--g-bg) text-(--g-text) flex flex-col items-center justify-center gap-3 px-6 text-center">
     <p className="font-display text-lg font-bold">
       {body ?? t(lang, 'sessionEnded')}
     </p>
