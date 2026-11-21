@@ -173,6 +173,27 @@ const GameScreen: React.FC<{ token: string; session: HandshakeData; lang: Lang }
           }}
         />
 
+        {socket.bots.length > 0 ? (
+          <section className="rounded-xl border border-white/10 bg-white/[0.03] p-3">
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <h2 className="text-xs font-semibold">Simulated bots</h2>
+              <span className="text-[10px] text-[var(--g-hint)]">Not real players or wallet funds</span>
+            </div>
+            <div className="grid gap-1.5 sm:grid-cols-2">
+              {socket.bots.map((bot) => (
+                <div key={bot.id} className="flex items-center justify-between gap-3 rounded-lg bg-black/20 px-2.5 py-2 text-[11px]">
+                  <span><span className="mr-1 rounded bg-white/10 px-1 py-0.5 text-[9px]">BOT</span>Stake {money(BigInt(bot.stake), session.currency)}</span>
+                  <span className="font-mono text-[var(--g-hint)]">
+                    {socket.phase === 'CRASHED'
+                      ? bot.won ? `Won ${money(BigInt(bot.payout), session.currency)}` : 'No payout'
+                      : `Target ${bot.cashout.toFixed(2)}×`}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </section>
+        ) : null}
+
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           {([0, 1] as const).map((panel) => (
             <BetPanel key={panel} panel={panel} phase={socket.phase} multiplier={socket.multiplier}

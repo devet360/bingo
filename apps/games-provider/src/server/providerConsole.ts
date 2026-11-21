@@ -22,6 +22,11 @@ export function renderProviderConsole(token: string): string {
     .value{font-size:27px;font-weight:800;margin-top:8px;letter-spacing:-.04em}
     .hint{font-size:11px;color:#9ba89d;margin-top:4px}
     .panel{padding:16px;margin-top:14px;overflow:hidden}
+    .settings{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px}
+    .settings label{display:grid;gap:6px;color:#9ba89d;font-size:11px}
+    .settings input{width:100%;border:1px solid #3b4c3e;border-radius:8px;background:#101411;color:#edf2ed;padding:9px}
+    .check{display:flex!important;align-items:center;gap:8px!important}.check input{width:auto}
+    #settings-message{font-size:12px;color:#ffb5a5}
     .panel-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px}
     .table-wrap{overflow-x:auto}table{width:100%;border-collapse:collapse;font-size:12px}
     th{text-align:left;color:#9ba89d;font-size:10px;text-transform:uppercase;letter-spacing:.08em}
@@ -41,6 +46,22 @@ export function renderProviderConsole(token: string): string {
   </header>
   <div id="message" role="status"></div>
   <section id="cards" aria-label="Provider metrics"></section>
+  <section id="runtime-settings" class="panel" hidden>
+    <div class="panel-head"><div><h2>Provider runtime settings</h2><p>Owner-managed bot configuration. Stake and cap values are minor currency units.</p></div></div>
+    <form id="settings-form" class="settings">
+      <label class="check"><input id="bot-enabled" type="checkbox"> Enable display-bot settings</label>
+      <label>Bot count<input id="bot-count" type="number" min="0" max="100" step="1" required></label>
+      <label>Minimum stake (minor units)<input id="bot-stake-min" type="number" min="1" step="1" required></label>
+      <label>Maximum stake (minor units)<input id="bot-stake-max" type="number" min="1" step="1" required></label>
+      <label>Round payout cap (minor units)<input id="bot-round-cap" type="number" min="0" step="1" required></label>
+      <label>Daily payout cap (minor units)<input id="bot-day-cap" type="number" min="0" step="1" required></label>
+      <label class="check"><input id="bot-disclose" type="checkbox" checked disabled> Bots are always labelled</label>
+      <label class="check"><input class="enabled-game" type="checkbox" value="crash"> Enable Crash</label>
+      <label class="check"><input class="enabled-game" type="checkbox" value="coinflip"> Enable Coin Flip</label>
+      <div><button id="save-settings" type="submit">Save settings</button></div>
+      <div id="settings-message" role="status"></div>
+    </form>
+  </section>
   <section class="panel">
     <div class="panel-head"><h2>Operators</h2><span class="muted">Scoped access</span></div>
     <div class="table-wrap"><table><thead><tr><th>Operator</th><th>Status</th><th>Games</th><th>Mode</th><th>Last probe</th></tr></thead><tbody id="operators"></tbody></table></div>
@@ -58,12 +79,56 @@ export function renderProviderConsole(token: string): string {
     const message=document.getElementById('message');
     const refreshButton=document.getElementById('refresh');
     const cards=document.getElementById('cards');
+    const settingsPanel=document.getElementById('runtime-settings');
+    const settingsForm=document.getElementById('settings-form');
+    const settingsMessage=document.getElementById('settings-message');
+    const settingsButton=document.getElementById('save-settings');
     const number=value=>Number(value||0).toLocaleString();
     const date=value=>value?new Date(value).toLocaleString():'—';
     const amount=value=>{try{const n=BigInt(value||'0');return (n/100n).toLocaleString()+'.'+String(n%100n).padStart(2,'0')}catch{return '—'}};
     function cell(row,value,className){const el=document.createElement('td');el.textContent=String(value??'—');if(className)el.className=className;row.appendChild(el);return el}
     function renderRows(id,rows,empty,render){const target=document.getElementById(id);target.replaceChildren();if(!rows.length){const row=document.createElement('tr');const td=document.createElement('td');td.className='empty';td.colSpan=8;td.textContent=empty;row.appendChild(td);target.appendChild(row);return}for(const item of rows){const row=document.createElement('tr');render(row,item);target.appendChild(row)}}
     function metric(label,value,hint,tone){const card=document.createElement('article');card.className='card';const title=document.createElement('div');title.className='label';title.textContent=label;const numberEl=document.createElement('div');numberEl.className='value'+(tone?' '+tone:'');numberEl.textContent=number(value);const detail=document.createElement('div');detail.className='hint';detail.textContent=hint;card.append(title,numberEl,detail);cards.appendChild(card)}
+    function showSettings(config,games){
+      document.getElementById('bot-enabled').checked=config.enabled;
+      document.getElementById('bot-count').value=String(config.count);
+      document.getElementById('bot-stake-min').value=String(config.stakeMin);
+      document.getElementById('bot-stake-max').value=String(config.stakeMax);
+      document.getElementById('bot-round-cap').value=String(config.roundPayoutCap);
+      document.getElementById('bot-day-cap').value=String(config.dayPayoutCap);
+      document.getElementById('bot-disclose').checked=true;
+      document.querySelectorAll('.enabled-game').forEach(input=>{input.checked=games.includes(input.value)});
+      settingsPanel.hidden=false;
+    }
+    async function loadSettings(){
+      const response=await fetch('/api/admin/runtime-settings',{headers:{authorization:'Bearer '+token},cache:'no-store'});
+      if(response.status===403){settingsPanel.hidden=true;return}
+      const payload=await response.json();
+      if(!response.ok)throw new Error(payload.error?.message||payload.error?.code||'Could not load runtime settings.');
+      showSettings(payload.data.botConfig,payload.data.enabledGames||[]);
+    }
+    settingsForm.addEventListener('submit',async event=>{
+      event.preventDefault();settingsButton.disabled=true;settingsMessage.textContent='';
+      try{
+        const body={
+          botConfig:{
+            enabled:document.getElementById('bot-enabled').checked,
+            count:Number(document.getElementById('bot-count').value),
+            stakeMin:document.getElementById('bot-stake-min').value,
+            stakeMax:document.getElementById('bot-stake-max').value,
+            roundPayoutCap:document.getElementById('bot-round-cap').value,
+            dayPayoutCap:document.getElementById('bot-day-cap').value,
+            disclose:true
+          },
+          enabledGames:Array.from(document.querySelectorAll('.enabled-game')).filter(input=>input.checked).map(input=>input.value)
+        };
+        const response=await fetch('/api/admin/runtime-settings',{method:'PUT',headers:{authorization:'Bearer '+token,'content-type':'application/json'},body:JSON.stringify(body)});
+        const payload=await response.json();
+        if(!response.ok)throw new Error(payload.error?.message||payload.error?.code||'Could not save runtime settings.');
+        showSettings(payload.data.botConfig,payload.data.enabledGames||[]);settingsMessage.style.color='#91e2ae';settingsMessage.textContent='Settings saved.';
+      }catch(error){settingsMessage.style.color='#ffb5a5';settingsMessage.textContent=error instanceof Error?error.message:String(error)}
+      finally{settingsButton.disabled=false}
+    });
     async function load(){
       refreshButton.disabled=true;message.style.display='none';
       try{
@@ -96,6 +161,7 @@ export function renderProviderConsole(token: string): string {
         document.getElementById('updated').textContent='Updated '+new Date().toLocaleTimeString();
       }catch(error){message.textContent=error instanceof Error?error.message:String(error);message.style.display='block'}
       finally{refreshButton.disabled=false}
+      try{await loadSettings()}catch(error){settingsPanel.hidden=true;message.textContent=error instanceof Error?error.message:String(error);message.style.display='block'}
     }
     refreshButton.addEventListener('click',()=>void load());
     void load();

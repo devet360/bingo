@@ -39,6 +39,7 @@ import {
   setStaffTelegram,
   STAFF_ROLES,
 } from '../services/staff';
+import { createTestPlayer } from '../services/users';
 import { scopedIdempotencyKey } from '../services/wallet';
 import {
   createCampaign,
@@ -73,6 +74,8 @@ import {
   upsertGame,
   upsertProvider,
 } from '../services/gameProviders';
+import { fetchProviderGameCatalogue } from '../services/providerCatalogue';
+import { storeMedia } from '../services/media';
 
 const AgentAccountSchema = z.object({
   method: z.nativeEnum(PaymentMethod),
@@ -327,6 +330,41 @@ const ProviderTransactionsQuery = z.object({
 export const adminRouter = Router();
 
 adminRouter.use(authenticate, requireRole(UserRole.SUPER_ADMIN));
+
+adminRouter.post(
+  '/test-players',
+  asyncHandler(async (req, res) => {
+    if (!env.testPlayerLoginEnabled) {
+      throw Errors.forbidden('Enable TEST_PLAYER_LOGIN_ENABLED to create test players', 'TEST_PLAYER_DISABLED');
+    }
+    const body = parse(
+      z.object({ displayName: z.string().trim().min(1).max(120).default('Games Provider Test Player') }).strict(),
+      req.body ?? {},
+    );
+    const created = await createTestPlayer({
+      displayName: body.displayName,
+      startingBalance: env.testPlayerStartingBalanceMinor,
+    });
+    await writeAudit({
+      actorId: req.auth!.userId,
+      actorRole: req.auth!.role,
+      action: 'test_player.create',
+      entityType: 'User',
+      entityId: created.user.id,
+      after: { email: created.email, startingBalanceMinor: env.testPlayerStartingBalanceMinor.toString() },
+      ip: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
+    res.status(201).json({
+      data: {
+        user: serializeUser(created.user),
+        email: created.email,
+        password: created.password,
+        startingBalanceMinor: env.testPlayerStartingBalanceMinor.toString(),
+      },
+    });
+  }),
+);
 
 adminRouter.get(
   '/overview',
@@ -1573,6 +1611,33 @@ adminRouter.delete(
       userAgent: req.headers['user-agent'],
     });
     res.json({ data: { deleted: true } });
+  }),
+);
+
+adminRouter.get(
+  '/game-providers/:code/catalogue',
+  asyncHandler(async (req, res) => {
+    res.json({ data: await fetchProviderGameCatalogue(req.params.code) });
+  }),
+);
+
+adminRouter.post(
+  '/game-provider-thumbnails',
+  asyncHandler(async (req, res) => {
+    const body = parse(
+      z.object({
+        base64: z.string().min(1).max(7_500_000),
+        originalName: z.string().max(255).optional(),
+      }).strict(),
+      req.body,
+    );
+    const asset = await storeMedia({
+      base64: body.base64,
+      originalName: body.originalName,
+      uploadedById: req.auth!.userId,
+      purpose: 'provider-game-thumbnail',
+    });
+    res.status(201).json({ data: { assetId: asset.id, url: `/media/public/${asset.id}` } });
   }),
 );
 

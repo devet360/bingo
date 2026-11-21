@@ -207,6 +207,11 @@ test('catalogue exposes only the requested operator', async (t) => {
   assert.equal(body.data.operator.code, 'other');
   assert.equal(body.data.localeDefault, 'am');
   assert.equal(body.data.limits.minStake, '100');
+  assert.deepEqual(body.data.availableGames.map((game: { id: string }) => game.id), ['crash']);
+  const thumbnail = await fetch(`${base}/api/catalogue/games/crash/thumbnail.svg`);
+  assert.equal(thumbnail.status, 200);
+  assert.match(thumbnail.headers.get('content-type') ?? '', /image\/svg\+xml/);
+  assert.match(await thumbnail.text(), /CRASH/);
   const missing = await fetch(`${base}/api/catalogue?operator=nope`);
   assert.equal(missing.status, 404);
 });

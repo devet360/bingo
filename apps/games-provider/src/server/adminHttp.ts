@@ -22,6 +22,27 @@ const LimitsSchema = z
   })
   .strict();
 
+const BotConfigSchema = z
+  .object({
+    enabled: z.boolean(),
+    count: z.number().int().min(0).max(100),
+    stakeMin: z.coerce.bigint().min(1n),
+    stakeMax: z.coerce.bigint().min(1n),
+    roundPayoutCap: z.coerce.bigint().min(0n),
+    dayPayoutCap: z.coerce.bigint().min(0n),
+    disclose: z.literal(true),
+  })
+  .strict()
+  .refine((value) => value.stakeMin <= value.stakeMax, {
+    message: 'stakeMin must not exceed stakeMax',
+  });
+const RuntimeSettingsSchema = z
+  .object({
+    botConfig: BotConfigSchema,
+    enabledGames: z.array(z.enum(['crash', 'coinflip'])).min(1),
+  })
+  .strict();
+
 const CreateOperatorSchema = z
   .object({
     code: z.string().min(1).max(64),
@@ -33,6 +54,7 @@ const CreateOperatorSchema = z
     limits: LimitsSchema.optional(),
     enabledGames: z.array(z.string().min(1)).min(1).optional(),
     theme: z.record(z.unknown()).nullable().optional(),
+    botConfig: BotConfigSchema.optional(),
   })
   .strict();
 
@@ -46,6 +68,7 @@ const UpdateOperatorSchema = z
     enabledGames: z.array(z.string().min(1)).min(1).optional(),
     theme: z.record(z.unknown()).nullable().optional(),
     maintenance: z.boolean().optional(),
+    botConfig: BotConfigSchema.optional(),
   })
   .strict();
 
@@ -70,6 +93,15 @@ function serializeOperator(operator: OperatorRecord, secrets: OperatorSecretReco
     },
     enabledGames: operator.enabledGames,
     theme: operator.theme,
+    botConfig: operator.botConfig
+      ? {
+          ...operator.botConfig,
+          stakeMin: operator.botConfig.stakeMin.toString(),
+          stakeMax: operator.botConfig.stakeMax.toString(),
+          roundPayoutCap: operator.botConfig.roundPayoutCap.toString(),
+          dayPayoutCap: operator.botConfig.dayPayoutCap.toString(),
+        }
+      : null,
     maintenance: operator.maintenance,
     probeOkAt: operator.probeOkAt,
     createdAt: operator.createdAt,
@@ -129,6 +161,7 @@ export function adminRouter(deps: {
   registry: OperatorRegistry;
   adminToken: string | null;
   consoleTokenSecret?: string | null;
+  defaultOperatorCode?: string;
 }): Router {
   const router = Router();
 
@@ -224,6 +257,62 @@ export function adminRouter(deps: {
               })),
             },
           },
+        },
+      });
+    }),
+  );
+
+  router.get(
+    '/runtime-settings',
+    route(async (_req, res) => {
+      const scope = res.locals.consoleScope as ConsoleScope | undefined;
+      const ownerCode = deps.defaultOperatorCode ?? '';
+      if (
+        scope
+        && scope.role !== 'superadmin'
+        && !(scope.role === 'operator_admin' && scope.operatorCode === ownerCode)
+      ) {
+        res.status(403).json({ error: { code: 'PROVIDER_OWNER_REQUIRED' } });
+        return;
+      }
+      const operator = await deps.store.getOperator(ownerCode);
+      if (operator === null) {
+        throw new OperatorError(404, 'OPERATOR_NOT_FOUND', 'Provider owner operator is not configured');
+      }
+      res.json({
+        data: {
+          operatorCode: operator.code,
+          botConfig: serializeOperator(operator, []).botConfig,
+          enabledGames: operator.enabledGames,
+        },
+      });
+    }),
+  );
+
+  router.put(
+    '/runtime-settings',
+    route(async (req, res) => {
+      const scope = res.locals.consoleScope as ConsoleScope | undefined;
+      const ownerCode = deps.defaultOperatorCode ?? '';
+      if (
+        scope
+        && scope.role !== 'superadmin'
+        && !(scope.role === 'operator_admin' && scope.operatorCode === ownerCode)
+      ) {
+        res.status(403).json({ error: { code: 'PROVIDER_OWNER_REQUIRED' } });
+        return;
+      }
+      const settings = RuntimeSettingsSchema.parse(req.body);
+      const operator = await deps.store.getOperator(ownerCode);
+      if (operator === null) {
+        throw new OperatorError(404, 'OPERATOR_NOT_FOUND', 'Provider owner operator is not configured');
+      }
+      const updated = await updateOperator(deps.store, ownerCode, settings);
+      res.json({
+        data: {
+          operatorCode: updated.code,
+          botConfig: serializeOperator(updated, []).botConfig,
+          enabledGames: updated.enabledGames,
         },
       });
     }),

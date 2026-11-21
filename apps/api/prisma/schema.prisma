@@ -323,6 +323,7 @@ model User {
   email                 String?    @unique
   passwordHash          String?
   mustChangePassword    Boolean    @default(false)
+  isTestPlayer          Boolean    @default(false)
   displayName           String
   avatarUrl             String?
   locale                String     @default("en")

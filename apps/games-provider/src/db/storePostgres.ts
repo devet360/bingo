@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { and, asc, count, desc, eq, gte, inArray, isNotNull, lte, notExists, or, sql } from 'drizzle-orm';
 import type {
   BetRecord,
+  BotConfig,
   OperatorRecord,
   OperatorSecretRecord,
   OutboxRecord,
@@ -47,6 +48,18 @@ function toSessionStatus(value: string): SessionRecord['status'] {
 }
 
 function toOperatorRecord(row: OperatorRow): OperatorRecord {
+  const botConfig = row.botConfig;
+  const decodedBotConfig = botConfig && typeof botConfig === 'object'
+    ? {
+        enabled: Boolean(botConfig.enabled),
+        count: Number(botConfig.count),
+        stakeMin: BigInt(String(botConfig.stakeMin)),
+        stakeMax: BigInt(String(botConfig.stakeMax)),
+        roundPayoutCap: BigInt(String(botConfig.roundPayoutCap)),
+        dayPayoutCap: BigInt(String(botConfig.dayPayoutCap)),
+        disclose: Boolean(botConfig.disclose),
+      } satisfies BotConfig
+    : undefined;
   return {
     code: row.code,
     name: row.name,
@@ -63,6 +76,7 @@ function toOperatorRecord(row: OperatorRow): OperatorRecord {
     },
     enabledGames: [...row.enabledGames],
     theme: row.theme ?? null,
+    botConfig: decodedBotConfig,
     maintenance: row.maintenance,
     probeOkAt: row.probeOkAt,
     createdAt: row.createdAt,
@@ -178,6 +192,17 @@ export function createPostgresStore(db: Database): Store {
         maxBetsPerRound: operator.limits.maxBetsPerRound,
         enabledGames: operator.enabledGames,
         theme: operator.theme,
+        botConfig: operator.botConfig
+          ? {
+              enabled: operator.botConfig.enabled,
+              count: operator.botConfig.count,
+              stakeMin: operator.botConfig.stakeMin.toString(),
+              stakeMax: operator.botConfig.stakeMax.toString(),
+              roundPayoutCap: operator.botConfig.roundPayoutCap.toString(),
+              dayPayoutCap: operator.botConfig.dayPayoutCap.toString(),
+              disclose: operator.botConfig.disclose,
+            }
+          : null,
         maintenance: operator.maintenance,
         probeOkAt: operator.probeOkAt,
         createdAt: operator.createdAt,
@@ -200,6 +225,7 @@ export function createPostgresStore(db: Database): Store {
             maxBetsPerRound: values.maxBetsPerRound,
             enabledGames: values.enabledGames,
             theme: values.theme,
+            botConfig: values.botConfig,
             maintenance: values.maintenance,
             probeOkAt: values.probeOkAt,
             createdAt: values.createdAt,

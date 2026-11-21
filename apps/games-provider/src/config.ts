@@ -18,12 +18,12 @@ const EnvSchema = z.object({
   CLIENT_SEEDS: z.string().default(
     'stratos_slot_1_00000001,stratos_slot_2_00000002,stratos_slot_3_00000003',
   ),
-  BOT_COUNT: z.coerce.number().int().min(0).default(0),
+  BOT_COUNT: z.coerce.number().int().min(0).max(100).default(0),
   BOT_STAKE_MIN: z.coerce.bigint().min(1n).default(100n),
   BOT_STAKE_MAX: z.coerce.bigint().min(1n).default(10_000n),
   BOT_ROUND_PAYOUT_CAP: z.coerce.bigint().min(0n).default(0n),
   BOT_DAY_PAYOUT_CAP: z.coerce.bigint().min(0n).default(0n),
-  BOT_DISCLOSE: z.enum(['true', 'false']).default('false'),
+  BOT_DISCLOSE: z.enum(['true', 'false']).default('true'),
   CHAT_ENABLED: z.enum(['true', 'false']).default('false'),
   CHAT_MAX_MESSAGE_LENGTH: z.coerce.number().int().positive().default(500),
   CHAT_RATE_LIMIT_PER_MINUTE: z.coerce.number().int().positive().default(10),
@@ -34,6 +34,9 @@ const EnvSchema = z.object({
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
   const parsed = EnvSchema.parse(env);
+  if (parsed.BOT_STAKE_MIN > parsed.BOT_STAKE_MAX) {
+    throw new Error('BOT_STAKE_MIN must not exceed BOT_STAKE_MAX');
+  }
   const clientSeeds = parsed.CLIENT_SEEDS.split(',').map((seed) => seed.trim()).filter(Boolean);
   if (clientSeeds.length !== 3) throw new Error('CLIENT_SEEDS must list exactly 3 comma-separated seeds');
   return {

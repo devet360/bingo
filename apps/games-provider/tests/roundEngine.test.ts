@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { RoundEngine, type RoundBetManager } from '../src/server/roundEngine';
 import { createMemoryStore } from '../src/test/memoryStore';
+import { BotManager } from '../src/server/botManager';
 
 function engine(store = createMemoryStore(), betManager?: RoundBetManager) {
   const events: string[] = [];
@@ -81,6 +82,40 @@ test('snapshot never exposes the crash point while flying', async (t) => {
   await instance.tickOnce(5_500);
   assert.equal(instance.snapshot().crashPoint, null);
   assert.ok(instance.snapshot().multiplier >= 1);
+  instance.stop();
+});
+
+test('round events expose explicitly labelled simulation bots and their settled outcomes', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'], now: 0 });
+  const store = createMemoryStore();
+  const events: import('../src/server/roundEngine').RoundEngineEvent[] = [];
+  const instance = new RoundEngine({
+    store,
+    limits: { minStake: 100n, maxStake: 100_000n, maxWin: 3_000_000n, maxBetsPerRound: 500 },
+    operatorCode: 'bingo251',
+    randomSeed: () => 'server-seed-fixed',
+    clientSeeds: () => ['a', 'b', 'c'],
+    onEvent: (event) => events.push(event),
+    botManager: new BotManager({
+      enabled: true, count: 2, stakeMin: 100n, stakeMax: 200n,
+      roundPayoutCap: 10_000n, dayPayoutCap: 100_000n, disclose: false,
+    }),
+  });
+  await instance.start();
+  await instance.tickOnce();
+  const betting = events[0];
+  assert.equal(betting?.type, 'round:betting');
+  if (betting?.type !== 'round:betting') throw new Error('Expected betting event');
+  assert.equal(betting.payload.bots.length, 2);
+  assert.equal(betting.payload.bots[0]?.disclosed, true);
+  await instance.tickOnce(5_500);
+  await instance.tickOnce(instance.currentFlightMs());
+  const crashed = events.find((event) => event.type === 'round:crashed');
+  assert.equal(crashed?.type, 'round:crashed');
+  if (crashed?.type === 'round:crashed') {
+    assert.equal(crashed.payload.bots.length, 2);
+    assert.equal(crashed.payload.bots[0]?.disclosed, true);
+  }
   instance.stop();
 });
 

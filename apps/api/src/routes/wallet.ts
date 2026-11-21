@@ -11,7 +11,7 @@ import {
   serializeProof,
   serializeWallet,
 } from '../lib/serializers';
-import { authenticate, requireVerifiedPhone } from '../middleware/auth';
+import { authenticate, requireNonTestPlayer, requireVerifiedPhone } from '../middleware/auth';
 import { moneyLimiter, receiptLimiter } from '../middleware/rateLimit';
 import { findAgentByCode } from '../services/agents';
 import {
@@ -206,6 +206,7 @@ walletRouter.get(
 
 walletRouter.post(
   '/deposits',
+  requireNonTestPlayer,
   moneyLimiter,
   asyncHandler(async (req, res) => {
     const body = parse(CreateDepositSchema, req.body);
@@ -348,6 +349,7 @@ walletRouter.delete(
 walletRouter.post(
   '/withdrawals',
   requireVerifiedPhone,
+  requireNonTestPlayer,
   moneyLimiter,
   asyncHandler(async (req, res) => {
     const body = parse(CreateWithdrawalSchema, req.body);

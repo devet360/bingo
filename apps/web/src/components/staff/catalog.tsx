@@ -7,11 +7,13 @@ import {
   deleteGameProviderGame,
   fetchGameProviders,
   fetchProviderCallbacks,
+  fetchProviderGameCatalogue,
   fetchProviderSettings,
   fetchProviderTransactions,
   updateProviderSettings,
   upsertGameProvider,
   upsertGameProviderGame,
+  uploadGameProviderThumbnail,
 } from '@/lib/api';
 import { creditsToMinor, formatCredits, formatDateTime, formatStake, minorToCreditsInput } from '@/lib/format';
 import { getRuntimeConfig } from '@/lib/runtime-config';
@@ -31,6 +33,7 @@ import type {
   GameProviderGame,
   PageMeta,
   ProviderCallbackLog,
+  ProviderCatalogueGame,
   ProviderKind,
   ProviderTransaction,
 } from '@/lib/types';
@@ -535,6 +538,9 @@ function GameSheet({
   onSaved: () => void;
 }) {
   const [draft, setDraft] = useState<GameDraft>(emptyGame());
+  const [catalogue, setCatalogue] = useState<ProviderCatalogueGame[]>([]);
+  const [loadingCatalogue, setLoadingCatalogue] = useState(false);
+  const [catalogueError, setCatalogueError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -542,10 +548,60 @@ function GameSheet({
     if (!provider) return;
     setDraft(emptyGame());
     setError(null);
+    setCatalogue([]);
+    setCatalogueError(null);
+    if (!provider.apiBaseUrl) return;
+    let cancelled = false;
+    setLoadingCatalogue(true);
+    void fetchProviderGameCatalogue(provider.code)
+      .then((games) => {
+        if (!cancelled) setCatalogue(games);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setCatalogue([]);
+          setCatalogueError('Could not load provider games. You can still enter the game details manually.');
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingCatalogue(false);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [provider]);
 
   if (!provider) return null;
-  const patch = (next: Partial<GameDraft>) => setDraft({ ...draft, ...next });
+  const patch = (next: Partial<GameDraft>) => setDraft((current) => ({ ...current, ...next }));
+  const selectProviderGame = (id: string) => {
+    const game = catalogue.find((entry) => entry.id === id);
+    if (!game) {
+      patch({ externalId: '' });
+      return;
+    }
+    patch({
+      externalId: game.id,
+      name: game.name,
+      category: game.category,
+      thumbnailUrl: game.thumbnailUrl,
+    });
+  };
+
+  const uploadThumbnail = async (file: File | undefined) => {
+    if (!file) return;
+    setError(null);
+    setBusy(true);
+    try {
+      const uploaded = await uploadGameProviderThumbnail(file);
+      patch({ thumbnailUrl: uploaded.url });
+    } catch (caught) {
+      setError(caught instanceof ApiError ? caught.message : caught instanceof Error
+        ? caught.message
+        : 'Could not upload the thumbnail.');
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const save = async () => {
     setError(null);
@@ -602,6 +658,22 @@ function GameSheet({
   return (
     <Sheet open title={`Add a game to ${provider.name}`} onClose={onClose}>
       <div className="max-h-[70vh] space-y-3 overflow-y-auto pr-1">
+        {provider.apiBaseUrl ? (
+          <Select
+            label="Available provider game"
+            value={catalogue.some((game) => game.id === draft.externalId) ? draft.externalId : ''}
+            onChange={(event) => selectProviderGame(event.target.value)}
+            disabled={loadingCatalogue || catalogue.length === 0}
+          >
+            <option value="">
+              {loadingCatalogue ? 'Loading provider games…' : catalogue.length ? 'Select a provider game' : 'No provider games found'}
+            </option>
+            {catalogue.map((game) => (
+              <option key={game.id} value={game.id}>{game.name} ({game.id})</option>
+            ))}
+          </Select>
+        ) : null}
+        {catalogueError ? <ErrorNote>{catalogueError}</ErrorNote> : null}
         <div className="grid grid-cols-2 gap-3">
           <Input
             label="External id"
@@ -629,6 +701,19 @@ function GameSheet({
           value={draft.thumbnailUrl}
           onChange={(event) => patch({ thumbnailUrl: event.target.value })}
         />
+        <label className="block space-y-1.5">
+          <span className="text-xs font-medium text-muted">Or upload a thumbnail</span>
+          <input
+            type="file"
+            accept="image/png,image/jpeg,image/webp"
+            disabled={busy}
+            onChange={(event) => {
+              void uploadThumbnail(event.target.files?.[0]);
+              event.currentTarget.value = '';
+            }}
+            className="block w-full text-xs text-muted file:mr-3 file:rounded-lg file:border-0 file:bg-raised file:px-3 file:py-2 file:text-xs file:font-semibold file:text-text"
+          />
+        </label>
         <p className="rounded-xl border border-line bg-raised/50 px-3 py-2 text-[11px] leading-relaxed text-muted">
           The launch URL is generated from the provider API base URL, this provider’s code,
           the external game ID, and the session details. Configure the base URL in the

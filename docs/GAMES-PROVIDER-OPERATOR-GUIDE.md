@@ -67,8 +67,11 @@ In the Bingo web **Super Admin → Games** page:
 1. Add a provider with code `bingo251` (the same value as `--code` above),
    the Games Provider public base URL, currency `ETB`, and the same webhook
    secret returned by the CLI.
-2. Add each external game, using the provider's external game ID (for example,
-   `crash`). Bingo generates the launch URL from the provider API base URL,
+2. Select each enabled provider game from the **Available provider game**
+   selector. Bingo fills in the provider's default game ID, name, category and
+   thumbnail. The name and thumbnail URL remain editable; upload a PNG, JPEG or
+   WebP thumbnail when you want a custom image. Bingo generates the launch URL
+   from the provider API base URL,
    provider code, external game ID, and session details at launch. The standard route is
    `/play?operator=<provider-code>&game=<external-id>&token=<session-token>&lang=<language>&currency=<currency>`.
    Use the **Advanced: custom launch URL** override only if a provider uses a
@@ -108,10 +111,19 @@ exists. In staging, verify all of the following before enabling public games:
 
 In Bingo web, open **Super Admin → Provider dashboard**, choose the registered
 Games Provider, and refresh as needed. The dashboard is embedded from the
-provider deployment and uses a short-lived, read-only token scoped to that
-provider. It shows
-operator status, active sessions, recent rounds, unsettled bets, and pending or
-terminal wallet outbox deliveries.
+provider deployment and uses a short-lived token scoped to the provider owner.
+It shows operator status, active sessions, recent rounds, unsettled bets, and
+pending or terminal wallet outbox deliveries.
+
+The owner dashboard also controls the bootstrap operator's enabled game IDs and
+simulation bot settings. Changes are persisted and apply to the next crash round.
+Bots are explicitly labelled as simulations and never place real bets or call
+the wallet; they appear in Crash rounds only. Bootstrap `BOT_*` environment values are defaults only until an
+owner-managed configuration is saved.
+
+The provider catalogue shows only games enabled for the operator. Enable or
+disable Crash and Coin Flip in the owner dashboard; game metadata and thumbnail
+defaults are served by the Games Provider itself.
 
 If the embedded page is blocked, verify that `ALLOWED_PARENT_ORIGINS` contains
 the exact web origin (scheme and host, without a path), that the provider

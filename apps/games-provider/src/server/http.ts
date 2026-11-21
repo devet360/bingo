@@ -11,6 +11,7 @@ import type { Store } from './store';
 import { WalletError } from './wallet';
 import { ChatRainError, ChatRainManager } from './chatRain';
 import { renderProviderConsole } from './providerConsole';
+import { getProviderGameThumbnail, PROVIDER_GAMES } from '../domain/gameCatalogue';
 
 export interface AppDeps {
   config: AppConfig;
@@ -55,6 +56,7 @@ export function createApp(deps: AppDeps): express.Express {
       registry: deps.registry,
       adminToken: deps.config.adminToken,
       consoleTokenSecret: deps.config.consoleTokenSecret,
+      defaultOperatorCode: deps.config.defaultOperatorCode,
     }),
   );
 
@@ -189,6 +191,14 @@ export function createApp(deps: AppDeps): express.Express {
           currency: operator.currency,
           localeDefault: operator.localeDefault,
           games: operator.enabledGames,
+          availableGames: PROVIDER_GAMES
+            .filter((game) => operator.enabledGames.includes(game.id))
+            .map((game) => ({
+              id: game.id,
+              name: game.name,
+              category: game.category,
+              thumbnailPath: game.thumbnailPath,
+            })),
           limits: {
             minStake: operator.limits.minStake.toString(),
             maxStake: operator.limits.maxStake.toString(),
@@ -201,6 +211,17 @@ export function createApp(deps: AppDeps): express.Express {
     } catch (error) {
       next(error);
     }
+  });
+
+  app.get('/api/catalogue/games/:gameId/thumbnail.svg', (req, res) => {
+    const thumbnail = getProviderGameThumbnail(req.params.gameId);
+    if (thumbnail === null) {
+      res.status(404).json({ error: { code: 'GAME_NOT_FOUND' } });
+      return;
+    }
+    res.type('image/svg+xml');
+    res.setHeader('Cache-Control', 'public, max-age=86400');
+    res.send(thumbnail);
   });
 
   app.get('/api/chat/:roomId', async (req, res, next) => {

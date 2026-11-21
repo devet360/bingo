@@ -35,6 +35,7 @@ export type VerificationSource = 'SERVER' | 'CLIENT' | 'RELAY';
 
 export interface User {
   id: string;
+  isTestPlayer?: boolean;
   telegramId: string | null;
   telegramUsername: string | null;
   phone: string | null;
@@ -777,6 +778,13 @@ export interface GameProviderGame {
   maxWin: string | null;
   enabled: boolean;
   sortOrder: number;
+}
+
+export interface ProviderCatalogueGame {
+  id: string;
+  name: string;
+  category: string;
+  thumbnailUrl: string;
 }
 
 export interface GameProvider {

@@ -62,7 +62,10 @@ opened to players.
 | `GAME_MAX_WIN` | `3000000` | Minor units, per-bet payout ceiling. |
 | `GAME_MAX_BETS_PER_ROUND` | `200` | Bets accepted per round. |
 | `CLIENT_SEEDS` | three prototype seeds | Exactly three comma-separated public client seeds. |
-| `BOT_COUNT` | `0` | Display-only bots; `0` disables them. |
+| `BOT_COUNT` | `0` | Initial number of visibly labelled simulation bots; `0` disables them. Editable in the owner dashboard after first boot. |
+| `BOT_STAKE_MIN` / `BOT_STAKE_MAX` | `100` / `10000` | Simulation stake range in minor units. |
+| `BOT_ROUND_PAYOUT_CAP` / `BOT_DAY_PAYOUT_CAP` | `0` / `0` | Simulation payout caps in minor units; `0` means no simulated payouts. |
+| `BOT_DISCLOSE` | `true` | Bots are always visibly labelled as simulations in the game client. |
 | `PROVIDER_ADMIN_TOKEN` | — | Bootstrap token for `/api/admin/operators`; replace with a scoped staff-console token in V2 Area E. |
 | `DEFAULT_OPERATOR_CODE` | `OPERATOR_CODE` | Operator used when `/play` or catalogue requests omit `operator`. |
 | `CONSOLE_TOKEN_SECRET` | — | Shared HMAC key used to verify short-lived Bingo-issued provider console tokens. |
@@ -70,6 +73,11 @@ opened to players.
 | `CHAT_RETENTION_DAYS` | `30` | Retention window for room message playback. |
 
 `.env.example` lists every key with placeholder values. Never commit real secrets.
+
+The bootstrap `BOT_*` values seed settings only when the owner operator has no saved
+configuration. The Bingo251 owner can change supported games and simulation settings in
+the embedded **Provider dashboard**. Simulated bots are clearly labelled in the client,
+appear in Crash rounds only, do not place real bets, and never call the wallet.
 
 See [the operator onboarding runbook](../../docs/GAMES-PROVIDER-ONBOARDING.md)
 for create, probe, activation and secret-rotation steps. The
@@ -81,11 +89,13 @@ deployment and wallet callback procedures.
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `GET` | `/api/catalogue?operator=<code>` | Operator identity, currency, locale, enabled games, limits and theme. Unknown codes answer `404`. |
+| `GET` | `/api/catalogue?operator=<code>` | Operator identity, currency, locale, enabled game IDs and their default names/categories/thumbnails, limits and theme. Unknown codes answer `404`. |
+| `GET` | `/api/catalogue/games/:gameId/thumbnail.svg` | Provider-owned game thumbnail asset. |
 | `POST` | `/api/sessions/handshake` | Exchange the launch token for a signed balance and limits. |
 | `POST` | `/api/sessions/close` | Close a session. |
 | `GET` | `/api/rounds/:id/proof` | Server seed, hash, client seed composite and crash point of a finished round. |
 | `GET` | `/api/health` | Liveness probe. |
+| `GET`, `PUT` | `/api/admin/runtime-settings` | Owner-scoped game enablement and bot settings, persisted to the operator row. |
 | `WS` | `/ws` | Authenticated game socket (`auth`, `bet:place`, `bet:cancel`, `bet:cashout`). |
 | `GET` | `/play?operator=<code>` | Embedded game client (`dist/client`). `frame-ancestors` uses the operator's `allowedOrigins`, falling back to `ALLOWED_PARENT_ORIGINS`. |
 

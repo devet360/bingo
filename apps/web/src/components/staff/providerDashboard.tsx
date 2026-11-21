@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { ApiError, fetchGameProviders, issueGameProviderConsoleToken } from '@/lib/api';
+import { ApiError, createTestPlayer, fetchGameProviders, issueGameProviderConsoleToken } from '@/lib/api';
 import type { GameProvider } from '@/lib/types';
 import { Button, EmptyState, ErrorNote, Panel, Select } from '@/components/ui';
 import { LoadingBlock } from './shared';
@@ -13,6 +13,9 @@ export function ProviderDashboardTab({ preferredProviderCode }: { preferredProvi
   const [error, setError] = useState<string | null>(null);
   const [loadingConsole, setLoadingConsole] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
+  const [creatingTestPlayer, setCreatingTestPlayer] = useState(false);
+  const [testPlayer, setTestPlayer] = useState<{ email: string; password: string; startingBalanceMinor: string } | null>(null);
+  const [testPlayerError, setTestPlayerError] = useState<string | null>(null);
   useEffect(() => {
     let cancelled = false;
     void fetchGameProviders()
@@ -34,6 +37,20 @@ export function ProviderDashboardTab({ preferredProviderCode }: { preferredProvi
   }, [preferredProviderCode]);
 
   const selectedProvider = providers?.find((provider) => provider.code === selectedCode) ?? null;
+
+  const provisionTestPlayer = async () => {
+    setCreatingTestPlayer(true);
+    setTestPlayerError(null);
+    try {
+      setTestPlayer(await createTestPlayer());
+    } catch (caught) {
+      setTestPlayerError(caught instanceof ApiError
+        ? caught.message
+        : caught instanceof Error ? caught.message : 'Could not create a test player.');
+    } finally {
+      setCreatingTestPlayer(false);
+    }
+  };
 
   useEffect(() => {
     if (!selectedProvider) {
@@ -61,7 +78,7 @@ export function ProviderDashboardTab({ preferredProviderCode }: { preferredProvi
         if (url.username || url.password) {
           throw new Error('Remove credentials from the provider API base URL.');
         }
-        const issued = await issueGameProviderConsoleToken(selectedProvider.code, 'provider_viewer');
+        const issued = await issueGameProviderConsoleToken(selectedProvider.code, 'operator_admin');
         if (cancelled) return;
         url.pathname = '/provider-console';
         url.search = '';
@@ -139,9 +156,35 @@ export function ProviderDashboardTab({ preferredProviderCode }: { preferredProvi
           </div>
         </div>
         <p className="text-xs text-muted">
-          Provider-owned live operations view. Access uses a short-lived, read-only token scoped
-          to this provider and renewed automatically while this page is open.
+          Provider-owned live operations view and owner runtime settings. Access uses a short-lived,
+          operator-scoped token renewed automatically while this page is open.
         </p>
+      </Panel>
+
+      <Panel className="space-y-3 p-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2 className="text-sm font-semibold">Client test player</h2>
+            <p className="mt-1 text-xs text-muted">
+              Creates a clearly marked player account with a one-time password for testing client game launches.
+              Test accounts cannot deposit or withdraw.
+            </p>
+          </div>
+          <Button size="sm" loading={creatingTestPlayer} onClick={() => void provisionTestPlayer()}>
+            Create test player
+          </Button>
+        </div>
+        {testPlayerError ? <ErrorNote>{testPlayerError}</ErrorNote> : null}
+        {testPlayer ? (
+          <div className="grid gap-2 rounded-xl border border-mint/25 bg-mint/5 p-3 text-xs sm:grid-cols-2">
+            <p><span className="text-muted">Email:</span> <code>{testPlayer.email}</code></p>
+            <p><span className="text-muted">Password:</span> <code>{testPlayer.password}</code></p>
+            <p className="sm:col-span-2 text-muted">
+              Starting test balance: {testPlayer.startingBalanceMinor} minor units. Copy these credentials now;
+              the password is not shown again. Log out of the admin account, then use the client login form.
+            </p>
+          </div>
+        ) : null}
       </Panel>
 
       {consoleUrl ? (

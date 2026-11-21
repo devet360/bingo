@@ -1,4 +1,5 @@
-import { UserRole, UserStatus, type User } from '@prisma/client';
+import { randomBytes, randomUUID } from 'node:crypto';
+import { AccountCode, AccountOwnerKind, LedgerKind, UserRole, UserStatus, type User } from '@prisma/client';
 import { prisma } from '../lib/prisma';
 import { provisionUserAccounts } from './accounts';
 import { referralCode as newReferralCode } from '../lib/ids';
@@ -6,6 +7,7 @@ import { normalizePhone } from '../lib/phone';
 import { assertPasswordPolicy, hashPassword, verifyPassword } from '../lib/crypto';
 import { Errors } from '../lib/errors';
 import { isUniqueViolation, runTransaction, withTxRetry } from '../lib/tx';
+import { postLedger } from './ledger';
 import type { TelegramInitUser } from './telegram';
 
 export function telegramDisplayName(profile: TelegramInitUser): string {
@@ -215,6 +217,66 @@ export async function registerWithPassword(input: PasswordRegistration): Promise
   }
 
   throw Errors.internal('Could not allocate a unique referral code');
+}
+
+export async function createTestPlayer(input: {
+  displayName: string;
+  startingBalance: bigint;
+}): Promise<{ user: User; email: string; password: string }> {
+  const password = randomBytes(24).toString('base64url');
+  const email = `test-player+${randomUUID()}@test.invalid`;
+  const passwordHash = await hashPassword(password);
+  const displayName = input.displayName.trim() || 'Games Provider Test Player';
+  if (input.startingBalance < 0n) {
+    throw Errors.badRequest('Test player starting balance cannot be negative', 'TEST_PLAYER_BALANCE_INVALID');
+  }
+
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    try {
+      const user = await runTransaction(async (tx) => {
+        const created = await tx.user.create({
+          data: {
+            email,
+            passwordHash,
+            displayName,
+            referralCode: newReferralCode(),
+            isTestPlayer: true,
+            lastLoginAt: new Date(),
+          },
+        });
+        await provisionUserAccounts(tx, created.id);
+        if (input.startingBalance > 0n) {
+          await postLedger(tx, {
+            idempotencyKey: `test-player-initial:${created.id}`,
+            kind: LedgerKind.MANUAL_ADJUSTMENT,
+            refType: 'TEST_PLAYER',
+            refId: created.id,
+            memo: 'Test player starting balance',
+            instructions: [
+              {
+                ownerKind: AccountOwnerKind.USER,
+                ownerId: created.id,
+                code: AccountCode.AVAILABLE,
+                delta: input.startingBalance,
+              },
+              {
+                ownerKind: AccountOwnerKind.PLATFORM,
+                ownerId: 'platform',
+                code: AccountCode.TREASURY,
+                delta: -input.startingBalance,
+              },
+            ],
+          });
+        }
+        return created;
+      });
+      return { user, email, password };
+    } catch (error) {
+      if (isUniqueViolation(error, 'referralCode') && attempt < 3) continue;
+      throw error;
+    }
+  }
+  throw Errors.internal('Could not allocate a unique test player referral code');
 }
 
 export async function findUserByIdentifier(identifier: string): Promise<User | null> {

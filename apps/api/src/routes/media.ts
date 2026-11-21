@@ -11,6 +11,22 @@ const AssetParams = z.object({ assetId: z.string().uuid() });
 
 export const mediaRouter = Router();
 
+mediaRouter.get(
+  '/public/:assetId',
+  asyncHandler(async (req, res) => {
+    const params = parse(AssetParams, req.params);
+    const asset = await prisma.mediaAsset.findUnique({ where: { id: params.assetId } });
+    if (!asset || asset.purpose !== 'provider-game-thumbnail') throw Errors.notFound('Media');
+    const buffer = await readMedia(asset);
+    res.setHeader('Content-Type', asset.mimeType);
+    res.setHeader('Content-Length', String(buffer.length));
+    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+    res.setHeader('Content-Disposition', 'inline');
+    res.send(buffer);
+  }),
+);
+
 mediaRouter.use(authenticate);
 
 /**

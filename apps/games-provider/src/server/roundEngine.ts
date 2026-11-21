@@ -8,6 +8,7 @@ import {
   sha512Hex,
 } from '../domain/provablyFair';
 import type { Store } from './store';
+import { BotManager, type BotParticipant } from './botManager';
 
 /** Betting window, matching the prototype pacing. */
 export const BETTING_WINDOW_MS = 5_500;
@@ -23,6 +24,28 @@ export interface EngineLimits {
   maxStake: bigint;
   maxWin: bigint;
   maxBetsPerRound: number;
+}
+
+export interface BotDisplayParticipant {
+  id: string;
+  isBot: true;
+  stake: string;
+  cashout: number;
+  payout: string;
+  won: boolean;
+  disclosed: true;
+}
+
+function botDisplay(participants: readonly BotParticipant[]): BotDisplayParticipant[] {
+  return participants.map((participant) => ({
+    id: participant.id,
+    isBot: true,
+    stake: participant.stake.toString(),
+    cashout: participant.cashout,
+    payout: participant.payout.toString(),
+    won: participant.won,
+    disclosed: true,
+  }));
 }
 
 /**
@@ -65,6 +88,7 @@ export type RoundEngineEvent =
         serverSeedHash: string;
         clientSeeds: readonly string[];
         bettingEndsInMs: number;
+        bots: readonly BotDisplayParticipant[];
       };
     }
   | {
@@ -81,6 +105,7 @@ export type RoundEngineEvent =
         serverSeedHash: string;
         clientSeedComposite: string | null;
         crashedAt: Date;
+        bots: readonly BotDisplayParticipant[];
       };
     };
 
@@ -94,7 +119,7 @@ export interface RoundSnapshot {
   multiplier: number;
   elapsedMs: number;
   bettingEndsInMs: number;
-  players: readonly unknown[];
+  players: readonly BotDisplayParticipant[];
   crashPoint: number | null;
   serverSeed: string | null;
   serverSeedHash: string | null;
@@ -130,6 +155,7 @@ export interface RoundEngineDeps {
   /** Timestamp source for persisted rows. Defaults to the real clock. */
   now?: () => Date;
   betManager?: RoundBetManager;
+  botManager?: BotManager;
 }
 
 /**
@@ -152,11 +178,14 @@ export class RoundEngine {
   private readonly onEvent: (event: RoundEngineEvent) => void;
   private readonly now: () => Date;
   private readonly betManager: RoundBetManager | undefined;
+  private readonly botManager: BotManager | undefined;
 
   readonly operatorCode: string;
 
   private phase: RoundPhase = 'BETTING';
   private round: RoundRecord | null = null;
+  private bots: BotDisplayParticipant[] = [];
+  private settledBots: BotDisplayParticipant[] | null = null;
   private roundClientSeeds: readonly string[] = [];
   private multiplier = 1;
   /** Engine-monotonic elapsed time in ms, advanced only by ticks. */
@@ -178,6 +207,7 @@ export class RoundEngine {
     this.onEvent = deps.onEvent;
     this.now = deps.now ?? (() => new Date());
     this.betManager = deps.betManager;
+    this.botManager = deps.botManager;
   }
 
   /** Schedules the loop. Idempotent; the first round opens on the first tick. */
@@ -239,7 +269,7 @@ export class RoundEngine {
       multiplier: this.multiplier,
       elapsedMs: isFlying ? this.phaseElapsedMs() : 0,
       bettingEndsInMs,
-      players: [],
+      players: this.settledBots ?? this.bots,
       crashPoint: isCrashed ? (this.round?.crashPoint ?? null) : null,
       serverSeed: isCrashed ? (this.round?.serverSeed ?? null) : null,
       serverSeedHash: isCrashed ? (this.round?.serverSeedHash ?? null) : null,
@@ -345,6 +375,10 @@ export class RoundEngine {
   }
 
   private async beginRound(): Promise<void> {
+    if (this.botManager) {
+      const operator = await this.store.getOperator(this.operatorCode);
+      if (operator?.botConfig) this.botManager.updateConfig(operator.botConfig);
+    }
     const serverSeed = this.randomSeed();
     const serverSeedHash = sha256Hex(serverSeed);
     const startedAt = this.now();
@@ -358,6 +392,10 @@ export class RoundEngine {
     });
 
     this.round = round;
+    this.bots = this.botManager
+      ? botDisplay(this.botManager.participants(round.id, round.serverSeed))
+      : [];
+    this.settledBots = null;
     this.roundClientSeeds = [...this.clientSeedsProvider()];
     this.phase = 'BETTING';
     this.phaseStartedAtMs = this.clockMs;
@@ -370,6 +408,7 @@ export class RoundEngine {
         serverSeedHash,
         clientSeeds: this.roundClientSeeds,
         bettingEndsInMs: BETTING_WINDOW_MS,
+        bots: this.bots,
       },
     });
   }
@@ -421,6 +460,9 @@ export class RoundEngine {
     this.phase = 'CRASHED';
     this.phaseStartedAtMs = this.clockMs;
     this.multiplier = crashPoint;
+    this.settledBots = this.botManager
+      ? botDisplay(this.botManager.settle(round.id, round.serverSeed, crashPoint, crashedAt))
+      : [];
 
     this.onEvent({
       type: 'round:crashed',
@@ -431,6 +473,7 @@ export class RoundEngine {
         serverSeedHash: round.serverSeedHash,
         clientSeedComposite: round.clientSeedComposite,
         crashedAt,
+        bots: this.settledBots,
       },
     });
 

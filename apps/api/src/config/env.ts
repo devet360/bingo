@@ -55,6 +55,8 @@ const EnvSchema = z.object({
   // Payment screenshots live on the mounted media volume, never in Postgres.
   MEDIA_DIR: z.string().default('.data/media'),
   MEDIA_MAX_BYTES: z.coerce.number().int().min(64_000).max(20_000_000).default(5_000_000),
+  TEST_PLAYER_LOGIN_ENABLED: z.enum(['true', 'false']).default('false').transform((value) => value === 'true'),
+  TEST_PLAYER_STARTING_BALANCE_MINOR: z.coerce.bigint().min(0n).default(10_000n),
 });
 
 const parsed = EnvSchema.safeParse(process.env);
@@ -73,4 +75,6 @@ export const env = {
     .map((origin) => origin.trim())
     .filter(Boolean),
   mediaDir: resolve(process.cwd(), parsed.data.MEDIA_DIR),
+  testPlayerLoginEnabled: parsed.data.TEST_PLAYER_LOGIN_ENABLED,
+  testPlayerStartingBalanceMinor: parsed.data.TEST_PLAYER_STARTING_BALANCE_MINOR,
 };

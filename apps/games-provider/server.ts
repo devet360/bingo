@@ -13,6 +13,7 @@ import { RoundEngine } from './src/server/roundEngine';
 import { attachSocket, type SocketHandle } from './src/server/socket';
 import { CoinFlipEngine } from './src/server/coinFlipEngine';
 import { LeaderLock } from './src/server/leaderLock';
+import { BotManager } from './src/server/botManager';
 
 const config = loadConfig();
 const database = createDb(config.databaseUrl);
@@ -35,6 +36,7 @@ async function seedBootstrapOperator(store: ReturnType<typeof createPostgresStor
     limits: config.limits,
     enabledGames: existing?.enabledGames ?? ['crash'],
     theme: existing?.theme ?? null,
+    botConfig: existing?.botConfig ?? config.botConfig,
     maintenance: existing?.maintenance ?? false,
     probeOkAt: existing?.probeOkAt ?? now,
     createdAt: existing?.createdAt ?? now,
@@ -91,6 +93,7 @@ const engine = new RoundEngine({
   randomSeed: () => randomUUID(),
   clientSeeds: () => config.clientSeeds,
   onEvent: (event) => socket?.broadcast(event),
+  botManager: new BotManager(config.botConfig),
 });
 const server = createServer(createApp({ config, store, registry }));
 socket = attachSocket({ server, store, engine, coinEngine, registry });

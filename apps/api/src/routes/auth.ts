@@ -114,9 +114,9 @@ authRouter.post(
   asyncHandler(async (req, res) => {
     const body = parse(LoginSchema, req.body);
     const user = await loginWithPassword(body.identifier, body.password);
-    if (!isStaffRole(user.role)) {
+    if (!isStaffRole(user.role) && !(env.testPlayerLoginEnabled && user.isTestPlayer)) {
       throw Errors.forbidden(
-        'Players sign in through the Telegram Mini App. This login is for staff only.',
+        'Players sign in through the Telegram Mini App. This login is for staff and enabled test players.',
         'PLAYER_WEB_LOGIN_DISABLED',
       );
     }

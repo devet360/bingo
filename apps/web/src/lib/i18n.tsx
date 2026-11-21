@@ -191,13 +191,13 @@ const DICT: Record<Lang, Record<string, string>> = {
     'shell.nav.admin': 'Admin',
     'shell.opening': 'Opening the hall…',
 
-    'login.staffTitle': 'Staff sign in',
+    'login.staffTitle': 'Staff or test player sign in',
     'login.staffBlurb':
-      'Agents, support and administrators sign in with the credentials issued by the super admin.',
+      'Agents, support and administrators use issued credentials. Test-player credentials work only when the owner enables them.',
     'login.required': 'Enter your phone or email and password.',
     'login.identifier': 'Phone or email',
     'login.password': 'Password',
-    'login.submit': 'Enter back office',
+    'login.submit': 'Sign in',
     'login.playersTitle': 'Players sign in with Telegram',
     'login.playersBlurb':
       'Open Bingo 251 inside Telegram. The bot verifies your phone number and signs you in automatically — there is no web signup.',
@@ -851,13 +851,13 @@ const DICT: Record<Lang, Record<string, string>> = {
     'shell.nav.admin': 'አስተዳዳሪ',
     'shell.opening': 'አዳራሹ በመከፈት ላይ…',
 
-    'login.staffTitle': 'የሰራተኞች መግቢያ',
+    'login.staffTitle': 'የሰራተኞች ወይም የሙከራ ተጫዋች መግቢያ',
     'login.staffBlurb':
-      'ወኪሎች፣ የድጋፍ ሰራተኞችና አስተዳዳሪዎች በዋና አስተዳዳሪው በተሰጡ መረጃዎች እዚህ ይገባሉ።',
+      'ወኪሎች፣ የድጋፍ ሰራተኞችና አስተዳዳሪዎች የተሰጣቸውን መረጃ ይጠቀማሉ። የሙከራ ተጫዋች መለያ የሚሰራው ባለቤቱ ሲያነቃው ብቻ ነው።',
     'login.required': 'ስልክ ወይም ኢሜይልዎንና የይለፍ ቃልዎን ያስገቡ።',
     'login.identifier': 'ስልክ ወይም ኢሜይል',
     'login.password': 'የይለፍ ቃል',
-    'login.submit': 'ወደ ቢሮ ግባ',
+    'login.submit': 'ግባ',
     'login.playersTitle': 'ተጫዋቾች በቴሌግራም ይገባሉ',
     'login.playersBlurb':
       'Bingo 251 ን በቴሌግራም ውስጥ ይክፈቱ። ቦቱ ስልክ ቁጥርዎን ያረጋግጥና በራስ-ሰር ያስገባዎታል — በድረ-ገጽ ምዝገባ የለም።',

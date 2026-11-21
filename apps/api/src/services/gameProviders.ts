@@ -27,6 +27,7 @@ import { postLedger } from './ledger';
 import { getConfig } from './config';
 import { runTransaction, withTxRetry } from '../lib/tx';
 import { z } from 'zod';
+import { env } from '../config/env';
 
 const SESSION_TTL_MS = 2 * 60 * 60 * 1_000;
 
@@ -649,7 +650,7 @@ export async function handleProviderCallback(input: {
       where: { externalSessionId: payload.sessionId },
       include: {
         game: true,
-        user: { select: { id: true, phoneVerifiedAt: true, status: true } },
+        user: { select: { id: true, phoneVerifiedAt: true, isTestPlayer: true, status: true } },
       },
     });
     if (!session || session.providerId !== provider.id) throw Errors.notFound('Game session');
@@ -660,7 +661,7 @@ export async function handleProviderCallback(input: {
     if (session.user.status !== 'ACTIVE') {
       throw Errors.forbidden('Account is not active', 'ACCOUNT_INACTIVE');
     }
-    if (!session.user.phoneVerifiedAt) {
+    if (!session.user.phoneVerifiedAt && !(env.testPlayerLoginEnabled && session.user.isTestPlayer)) {
       throw Errors.forbidden('Phone verification required', 'PHONE_VERIFICATION_REQUIRED');
     }
 

@@ -28,7 +28,7 @@ async function boot(adminToken: string | null, consoleTokenSecret?: string) {
 const headers = (token = 'admin-token-for-tests') => ({ 'content-type': 'application/json', 'x-provider-admin-token': token });
 const CONSOLE_TOKEN_SECRET = 'provider-console-secret-for-tests-32';
 
-function consoleToken(role: 'provider_viewer', operatorCode: string): string {
+function consoleToken(role: 'provider_viewer' | 'operator_admin', operatorCode: string): string {
   const encoded = Buffer.from(JSON.stringify({
     type: 'provider_console',
     actorId: 'super-admin-test',
@@ -39,6 +39,49 @@ function consoleToken(role: 'provider_viewer', operatorCode: string): string {
   const signature = createHmac('sha256', CONSOLE_TOKEN_SECRET).update(encoded).digest('base64url');
   return `${encoded}.${signature}`;
 }
+
+test('owner console can persist runtime settings while a viewer cannot access them', async () => {
+  const ctx = await boot(null, CONSOLE_TOKEN_SECRET);
+  await ctx.store.upsertOperator({
+    code: 'bingo251', name: 'Owner', callbackUrl: 'https://owner.example/cb', currency: 'ETB',
+    status: 'ACTIVE', allowedOrigins: ['https://owner.example'], localeDefault: 'en',
+    limits: { minStake: 100n, maxStake: 100_000n, maxWin: 3_000_000n, maxBetsPerRound: 200 },
+    enabledGames: ['crash'], theme: null,
+    botConfig: {
+      enabled: false, count: 0, stakeMin: 100n, stakeMax: 10_000n,
+      roundPayoutCap: 0n, dayPayoutCap: 0n, disclose: false,
+    },
+    maintenance: false, probeOkAt: null, createdAt: new Date(),
+  });
+  const ownerHeaders = {
+    authorization: `Bearer ${consoleToken('operator_admin', 'bingo251')}`,
+    'content-type': 'application/json',
+  };
+  const saved = await fetch(`${ctx.base}/api/admin/runtime-settings`, {
+    method: 'PUT',
+    headers: ownerHeaders,
+    body: JSON.stringify({
+      botConfig: {
+        enabled: true, count: 3, stakeMin: '100', stakeMax: '1000',
+        roundPayoutCap: '5000', dayPayoutCap: '25000', disclose: true,
+      },
+      enabledGames: ['crash', 'coinflip'],
+    }),
+  });
+  assert.equal(saved.status, 200);
+  const payload = await saved.json();
+  assert.equal(payload.data.botConfig.count, 3);
+  assert.deepEqual(payload.data.enabledGames, ['crash', 'coinflip']);
+  const operator = await ctx.store.getOperator('bingo251');
+  assert.equal(operator?.botConfig?.stakeMax, 1000n);
+  assert.deepEqual(operator?.enabledGames, ['crash', 'coinflip']);
+
+  const viewerResponse = await fetch(`${ctx.base}/api/admin/runtime-settings`, {
+    headers: { authorization: `Bearer ${consoleToken('provider_viewer', 'bingo251')}` },
+  });
+  assert.equal(viewerResponse.status, 403);
+  await ctx.close();
+});
 
 test('admin routes are disabled without a token and reject a wrong one', async () => {
   const disabled = await boot(null);

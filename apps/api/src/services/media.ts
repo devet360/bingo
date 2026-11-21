@@ -69,6 +69,9 @@ export async function storeMedia(input: StoreMediaInput): Promise<MediaAsset> {
   const sha256 = createHash('sha256').update(buffer).digest('hex');
   const existing = await prisma.mediaAsset.findUnique({ where: { sha256 } });
   if (existing) {
+    if (existing.purpose !== (input.purpose ?? 'proof')) {
+      throw Errors.conflict('This image is already stored for a different purpose', 'MEDIA_PURPOSE_MISMATCH');
+    }
     if (existing.uploadedById && existing.uploadedById !== input.uploadedById) {
       throw Errors.conflict('This file was already uploaded', 'MEDIA_DUPLICATE');
     }

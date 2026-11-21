@@ -15,7 +15,11 @@ export class BotManager {
   private roundPayout = new Map<number, bigint>();
   private dayPayout = new Map<string, bigint>();
 
-  constructor(private readonly config: BotConfig) {}
+  constructor(private config: BotConfig) {}
+
+  updateConfig(config: BotConfig): void {
+    this.config = config;
+  }
 
   participants(roundId: number, seed: string): BotParticipant[] {
     if (!this.config.enabled || this.config.count <= 0) return [];
@@ -23,7 +27,7 @@ export class BotManager {
     for (let i = 0; i < this.config.count; i++) {
       const digest = createHash('sha256').update(`${roundId}:${seed}:${i}`).digest();
       const stakeSpan = this.config.stakeMax - this.config.stakeMin + 1n;
-      const stake = this.config.stakeMin + BigInt(digest.readUInt32BE(0) % Number(stakeSpan));
+      const stake = this.config.stakeMin + BigInt(digest.readUInt32BE(0)) % stakeSpan;
       const cashout = 100 + (digest.readUInt32BE(4) % 900);
       participants.push({
         id: `bot-${roundId}-${i}`,

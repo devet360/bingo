@@ -31,6 +31,7 @@ import type {
   PaymentMethod,
   PayoutAccount,
   ProviderCallbackLog,
+  ProviderCatalogueGame,
   ProviderKind,
   ProviderSession,
   ProviderTransaction,
@@ -1123,6 +1124,20 @@ export function issueGameProviderConsoleToken(
   });
 }
 
+export interface TestPlayerCredentials {
+  user: User;
+  email: string;
+  password: string;
+  startingBalanceMinor: string;
+}
+
+export function createTestPlayer(displayName?: string): Promise<TestPlayerCredentials> {
+  return apiRequest('/admin/test-players', {
+    method: 'POST',
+    body: displayName ? { displayName } : {},
+  });
+}
+
 export function fetchProviderSettings(): Promise<{ maxWin: string; defaultMaxWin: string }> {
   return apiRequest('/admin/game-providers/settings');
 }
@@ -1171,6 +1186,30 @@ export function upsertGameProviderGame(
     method: 'POST',
     body: input,
   });
+}
+
+export function fetchProviderGameCatalogue(code: string): Promise<ProviderCatalogueGame[]> {
+  return apiRequest(`/admin/game-providers/${encodeURIComponent(code)}/catalogue`);
+}
+
+export async function uploadGameProviderThumbnail(file: File): Promise<{ assetId: string; url: string }> {
+  const base64 = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result !== 'string') {
+        reject(new Error('Could not read the selected image.'));
+        return;
+      }
+      resolve(reader.result);
+    };
+    reader.onerror = () => reject(new Error('Could not read the selected image.'));
+    reader.readAsDataURL(file);
+  });
+  const uploaded = await apiRequest<{ assetId: string; url: string }>('/admin/game-provider-thumbnails', {
+    method: 'POST',
+    body: { base64, originalName: file.name },
+  });
+  return { ...uploaded, url: `${getRuntimeConfig().apiUrl}${uploaded.url}` };
 }
 
 export function deleteGameProviderGame(

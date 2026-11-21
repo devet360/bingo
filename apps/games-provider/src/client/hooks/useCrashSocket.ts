@@ -3,6 +3,7 @@ import { haptic } from '../bridge';
 import { soundEngine } from '../sound';
 import type {
   BetFrame, GamePhase, RoundHistoryItem, ServerFrame,
+  BotDisplayParticipant,
 } from '../types';
 
 const BETTING_WINDOW_MS = 5_500;
@@ -23,6 +24,7 @@ export function useCrashSocket(input: {
   const [serverSeedHash, setServerSeedHash] = useState<string | null>(null);
   const [history, setHistory] = useState<RoundHistoryItem[]>([]);
   const [bets, setBets] = useState<[BetFrame | null, BetFrame | null]>([null, null]);
+  const [bots, setBots] = useState<BotDisplayParticipant[]>([]);
   const [balance, setBalance] = useState(initialBalance);
   const [lastError, setLastError] = useState<{ code: string; message: string } | null>(null);
   const [ended, setEnded] = useState<string | null>(null);
@@ -69,6 +71,7 @@ export function useCrashSocket(input: {
           setServerSeedHash(frame.serverSeedHash);
           setBalance(frame.balance);
           setBets(frame.bets);
+          setBots(frame.players ?? []);
           setCoinOutcome(frame.coinOutcome ?? null);
           break;
         case 'round:betting':
@@ -81,6 +84,7 @@ export function useCrashSocket(input: {
           setBettingEndsAt(Date.now() + frame.bettingEndsInMs);
           setServerSeedHash(frame.serverSeedHash);
           setBets([null, null]);
+          setBots(frame.bots ?? []);
           break;
         case 'round:tick':
           // The gateway delivers takeoff as the elapsed-0 tick, and emits ticks
@@ -100,6 +104,7 @@ export function useCrashSocket(input: {
             { roundId: frame.roundId, crashPoint: frame.crashPoint },
             ...prev.filter((item) => item.roundId !== frame.roundId),
           ].slice(0, 24));
+          setBots(frame.bots ?? []);
           soundEngine.playCrash();
           break;
         case 'coinflip:betting':
@@ -206,7 +211,7 @@ export function useCrashSocket(input: {
 
   return {
     connected, phase, roundId, multiplier, elapsedMs, bettingEndsAt, bettingWindowMs,
-    serverSeedHash, history, bets, balance, lastError, ended, coinOutcome,
+    serverSeedHash, history, bets, bots, balance, lastError, ended, coinOutcome,
     placeBet, cancelBet, cashout,
   };
 }

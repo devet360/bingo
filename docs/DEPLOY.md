@@ -118,6 +118,8 @@ dokku config:set bingo-api \
   CORS_ORIGINS="https://app.example.com" \
   BINGO_ENGINE_ENABLED=true \
   WORKER_CONCURRENCY=2 \
+  TEST_PLAYER_LOGIN_ENABLED=false \
+  TEST_PLAYER_STARTING_BALANCE_MINOR=10000 \
   RECEIPT_RELAY_URL="https://YOUR-RELAY-HOST"
 
 dokku config:set bingo-web \
@@ -137,6 +139,13 @@ the theme/locale bridge — from that URL at runtime.
 
 `CORS_ORIGINS` is a comma-separated allow-list and must contain every browser origin
 that calls the API (the Mini App origin and any staff dashboard preview origin).
+
+Keep `TEST_PLAYER_LOGIN_ENABLED=false` in production by default. In an isolated
+staging environment, setting it to `true` lets a super admin create a marked test
+player from **Super Admin → Provider dashboard**. The generated password is shown
+once, test players can play using the web client login, and deposit/withdrawal
+payment flows are blocked. `TEST_PLAYER_STARTING_BALANCE_MINOR` controls the
+ledger-recorded starting balance (100 minor units = 1 credit).
 
 `RECEIPT_RELAY_URL` points at the PHP relay (`apps/receipt-relay`) on Ethio Telecom
 hosting. With it set, Telebirr and M-Pesa deposits **and** the staff/agent receipt
@@ -382,7 +391,7 @@ dokku config:set bingo-crash \
   BOT_STAKE_MAX=10000 \
   BOT_ROUND_PAYOUT_CAP=0 \
   BOT_DAY_PAYOUT_CAP=0 \
-  BOT_DISCLOSE=false \
+  BOT_DISCLOSE=true \
   CHAT_ENABLED=false \
   CHAT_MAX_MESSAGE_LENGTH=500 \
   CHAT_RATE_LIMIT_PER_MINUTE=10 \
@@ -405,7 +414,10 @@ The new shared secret variables are:
 | `OPERATOR_HMAC_SECRET` | `bingo-crash` | Signs all wallet/rain callbacks for the bootstrap operator. Store the matching secret in Bingo’s provider record. |
 | `PROVIDER_ADMIN_TOKEN` | `bingo-crash` | Bootstrap-only operator CLI/admin API token. Keep set on managed deployments and rotate it through Dokku config. |
 
-Bot variables are display-only and never call the wallet:
+The `BOT_*` variables seed the provider owner's initial display-bot settings.
+After boot, manage bot count, supported games, stakes and payout caps in the
+embedded **Provider dashboard**. Bots are explicitly labelled as simulations and
+never place real bets or call the wallet:
 `BOT_COUNT`, `BOT_STAKE_MIN`, `BOT_STAKE_MAX`, `BOT_ROUND_PAYOUT_CAP`,
 `BOT_DAY_PAYOUT_CAP`, and `BOT_DISCLOSE`.
 
@@ -488,14 +500,15 @@ reconciliation have been run in staging.
 From **Super Admin → Provider dashboard**, a Bingo SUPER_ADMIN can open the selected
 Games Provider's live operations page inside Bingo web. It reports operator status,
 active sessions, rounds, unsettled bets, and wallet-outbox delivery state. Bingo issues
-a short-lived, read-only token scoped to that provider and renews it while the page is
-open; `CONSOLE_TOKEN_SECRET` must match on Bingo API and Games Provider.
+a short-lived, operator-scoped token and renews it while the page is open;
+`CONSOLE_TOKEN_SECRET` must match on Bingo API and Games Provider.
 `ALLOWED_PARENT_ORIGINS` on the provider must include the Bingo web origin.
 
-The dashboard is currently a read-only operations view. Configure games in
-**Super Admin → Games** and use the operator CLI for provider-side operator changes.
-`PROVIDER_ADMIN_TOKEN` is a bootstrap/on-call CLI credential and must never be exposed
-to the browser or shared with staff. The separate **Super Admin → Provider guides** page
+The dashboard also lets the provider owner manage enabled games and visibly labelled
+simulation bot settings. Configure Bingo-facing game names and thumbnail overrides in
+**Super Admin → Games** and use the operator CLI for full provider-side operator
+lifecycle changes. `PROVIDER_ADMIN_TOKEN` is a bootstrap/on-call CLI credential and
+must never be exposed to the browser or shared with staff. The separate **Super Admin → Provider guides** page
 contains the operator setup and wallet-integration walkthroughs; their Markdown sources
 are [GAMES-PROVIDER-OPERATOR-GUIDE.md](./GAMES-PROVIDER-OPERATOR-GUIDE.md) and
 [GAMES-PROVIDER-INTEGRATION.md](./GAMES-PROVIDER-INTEGRATION.md).

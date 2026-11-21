@@ -45,7 +45,7 @@ export const openApiDocument = {
       'REST + Socket.io API for the Bingo 251 Telegram Mini App, agent network and staff dashboards. ' +
       'Money is always an integer number of minor units rendered as a decimal string. ' +
       'Player signup happens only through the Telegram bot (`/start` → share contact). ' +
-      'Staff (agent, support, super admin) sign in with email/phone + password, or open their dashboard in the ' +
+      'Staff (agent, support, super admin) and explicitly enabled test players sign in with email/phone + password, or open their dashboard in the ' +
       'Telegram Mini App once a super admin links their Telegram id.',
   },
   servers: [{ url: '/', description: 'Current host' }],
@@ -103,6 +103,7 @@ export const openApiDocument = {
           avatarUrl: { type: 'string', nullable: true },
           locale: { type: 'string', enum: ['en', 'am'] },
           role: { type: 'string', enum: ['PLAYER', 'AGENT', 'SUPPORT', 'SUPER_ADMIN'] },
+          isTestPlayer: { type: 'boolean', description: 'Marked non-production test account; payment flows are blocked.' },
           status: { type: 'string', enum: ['ACTIVE', 'SUSPENDED', 'BANNED', 'DELETED'] },
           kycStatus: { type: 'string' },
           referralCode: { type: 'string' },
@@ -1608,6 +1609,25 @@ export const openApiDocument = {
               'image/webp': { schema: { type: 'string', format: 'binary' } },
             },
           },
+          '/media/public/{assetId}': {
+            get: {
+              tags: ['Ops'],
+              summary: 'Fetch a public game-provider thumbnail',
+              description: 'Only assets stored with purpose provider-game-thumbnail are available without authentication.',
+              parameters: [idParam('assetId')],
+              responses: {
+                '200': {
+                  description: 'Raw image bytes',
+                  content: {
+                    'image/png': { schema: { type: 'string', format: 'binary' } },
+                    'image/jpeg': { schema: { type: 'string', format: 'binary' } },
+                    'image/webp': { schema: { type: 'string', format: 'binary' } },
+                  },
+                },
+                '404': errorResponse('Media not found'),
+              },
+            },
+          },
           '403': errorResponse('MEDIA_FORBIDDEN'),
           '404': errorResponse('Media not found'),
         },
@@ -2676,6 +2696,83 @@ export const openApiDocument = {
         tags: ['Admin'],
         summary: 'Provider catalog with games',
         responses: { '200': ok(dataArrayRef('GameProvider')) },
+      },
+    },
+    '/admin/test-players': {
+      post: {
+        tags: ['Admin'],
+        summary: 'Create a test-only player account',
+        description: 'Requires TEST_PLAYER_LOGIN_ENABLED=true. The generated password is returned once; test players cannot deposit or withdraw.',
+        requestBody: {
+          required: false,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                properties: { displayName: { type: 'string', maxLength: 120 } },
+              },
+            },
+          },
+        },
+        responses: {
+          '201': ok({
+            type: 'object',
+            properties: {
+              data: {
+                type: 'object',
+                properties: {
+                  user: { $ref: '#/components/schemas/User' },
+                  email: { type: 'string' },
+                  password: { type: 'string' },
+                  startingBalanceMinor: money,
+                },
+              },
+            },
+          }),
+          '403': errorResponse('TEST_PLAYER_DISABLED'),
+        },
+      },
+    },
+    '/admin/game-providers/{code}/catalogue': {
+      get: {
+        tags: ['Admin'],
+        summary: 'Fetch provider-sourced game metadata',
+        parameters: [idParam('code')],
+        responses: {
+          '200': ok({
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                id: { type: 'string' }, name: { type: 'string' }, category: { type: 'string' },
+                thumbnailUrl: { type: 'string', format: 'uri' },
+              },
+            },
+          }),
+          '502': errorResponse('PROVIDER_CATALOGUE_UNAVAILABLE'),
+        },
+      },
+    },
+    '/admin/game-provider-thumbnails': {
+      post: {
+        tags: ['Admin'],
+        summary: 'Upload a public game thumbnail',
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                required: ['base64'],
+                properties: {
+                  base64: { type: 'string', description: 'Data URL or base64-encoded PNG, JPEG or WebP (5 MB max).' },
+                  originalName: { type: 'string' },
+                },
+              },
+            },
+          },
+        },
+        responses: { '201': ok({ type: 'object', properties: { data: { type: 'object' } } }) },
       },
     },
     '/admin/game-providers/{code}': {

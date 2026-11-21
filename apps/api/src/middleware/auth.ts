@@ -4,6 +4,7 @@ import { verifyAccessToken } from '../services/jwt';
 import { getActiveAgentByUserId } from '../services/agents';
 import { prisma } from '../lib/prisma';
 import { Errors } from '../lib/errors';
+import { env } from '../config/env';
 
 export const authenticate: RequestHandler = (req, _res, next) => {
   const header = req.headers.authorization;
@@ -44,13 +45,33 @@ export async function requireVerifiedPhone(
     if (!req.auth) throw Errors.unauthorized();
     const user = await prisma.user.findUnique({
       where: { id: req.auth.userId },
-      select: { phoneVerifiedAt: true },
+      select: { phoneVerifiedAt: true, isTestPlayer: true },
     });
-    if (!user?.phoneVerifiedAt) {
+    if (!user?.phoneVerifiedAt && !(env.testPlayerLoginEnabled && user?.isTestPlayer)) {
       throw Errors.forbidden(
         'Verify your phone number in the Telegram bot before playing',
         'PHONE_VERIFICATION_REQUIRED',
       );
+    }
+    next();
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function requireNonTestPlayer(
+  req: Request,
+  _res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    if (!req.auth) throw Errors.unauthorized();
+    const user = await prisma.user.findUnique({
+      where: { id: req.auth.userId },
+      select: { isTestPlayer: true },
+    });
+    if (user?.isTestPlayer) {
+      throw Errors.forbidden('Test player accounts cannot use real-money payment flows', 'TEST_PLAYER_RESTRICTED');
     }
     next();
   } catch (error) {

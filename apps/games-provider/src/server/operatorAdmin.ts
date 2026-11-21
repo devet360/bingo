@@ -1,10 +1,19 @@
-import type { OperatorLimits, OperatorRecord, OperatorStatus } from '../domain/types';
+import type { BotConfig, OperatorLimits, OperatorRecord, OperatorStatus } from '../domain/types';
 import { OperatorError, type OperatorRegistry } from './operatorRegistry';
 import type { Store } from './store';
 
 const CODE_RE = /^[a-z0-9_-]{2,32}$/;
 const OPERATOR_STATUSES: readonly OperatorStatus[] = ['PENDING', 'ACTIVE', 'SUSPENDED'];
 const DEFAULT_LIMITS: OperatorLimits = { minStake: 100n, maxStake: 100_000n, maxWin: 3_000_000n, maxBetsPerRound: 200 };
+const DEFAULT_BOT_CONFIG: BotConfig = {
+  enabled: false,
+  count: 0,
+  stakeMin: 100n,
+  stakeMax: 10_000n,
+  roundPayoutCap: 0n,
+  dayPayoutCap: 0n,
+  disclose: false,
+};
 
 export interface NewOperatorInput {
   code: string;
@@ -16,6 +25,7 @@ export interface NewOperatorInput {
   limits?: OperatorLimits;
   enabledGames?: string[];
   theme?: Record<string, unknown> | null;
+  botConfig?: BotConfig;
 }
 
 export interface UpdateOperatorInput {
@@ -27,6 +37,7 @@ export interface UpdateOperatorInput {
   enabledGames?: string[];
   theme?: Record<string, unknown> | null;
   maintenance?: boolean;
+  botConfig?: BotConfig;
 }
 
 /**
@@ -52,6 +63,7 @@ export async function createOperator(store: Store, registry: OperatorRegistry, i
     limits: validateLimits(input.limits ?? DEFAULT_LIMITS),
     enabledGames: requireGames(input.enabledGames ?? ['crash']),
     theme: input.theme ?? null,
+    botConfig: input.botConfig ?? DEFAULT_BOT_CONFIG,
     maintenance: false,
     probeOkAt: null,
     createdAt: new Date(),
@@ -83,6 +95,7 @@ export async function updateOperator(store: Store, code: string, patch: UpdateOp
     enabledGames: patch.enabledGames !== undefined ? requireGames(patch.enabledGames) : existing.enabledGames,
     theme: patch.theme !== undefined ? patch.theme : existing.theme,
     maintenance: patch.maintenance !== undefined ? patch.maintenance : existing.maintenance,
+    botConfig: patch.botConfig !== undefined ? patch.botConfig : existing.botConfig,
   };
   await store.upsertOperator(next);
   return next;

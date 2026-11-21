@@ -21,6 +21,15 @@ export interface BetFrame {
 }
 
 export interface RoundHistoryItem { roundId: number; crashPoint: number }
+export interface BotDisplayParticipant {
+  id: string;
+  isBot: true;
+  stake: string;
+  cashout: number;
+  payout: string;
+  won: boolean;
+  disclosed: true;
+}
 export interface BetLimits { minStake: bigint; maxStake: bigint; maxWin: bigint }
 
 export interface HandshakeData {
@@ -42,6 +51,7 @@ export interface SnapshotFrame {
   serverSeedHash: string | null;
   balance: string;
   bets: [BetFrame | null, BetFrame | null];
+  players?: BotDisplayParticipant[];
   coinOutcome?: 'HEADS' | 'TAILS';
 }
 export interface BettingFrame {
@@ -50,6 +60,7 @@ export interface BettingFrame {
   serverSeedHash: string;
   clientSeeds: string[];
   bettingEndsInMs: number;
+  bots?: BotDisplayParticipant[];
 }
 export interface TickFrame { type: 'round:tick'; roundId: number; multiplier: number; elapsedMs: number }
 export interface CrashedFrame {
@@ -60,6 +71,7 @@ export interface CrashedFrame {
   serverSeedHash: string;
   clientSeedComposite: string | null;
   crashedAt: string;
+  bots?: BotDisplayParticipant[];
 }
 export interface BetUpdateFrame extends BetFrame { type: 'bet:update' }
 export interface BalanceFrame { type: 'balance:update'; balance: string }

@@ -37,6 +37,7 @@ export function serializeUser(user: User) {
     avatarUrl: user.avatarUrl,
     locale: user.locale,
     role: user.role,
+    isTestPlayer: user.isTestPlayer,
     status: user.status,
     kycStatus: user.kycStatus,
     referralCode: user.referralCode,

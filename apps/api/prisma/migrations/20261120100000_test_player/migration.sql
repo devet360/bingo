@@ -1,0 +1,2 @@
+ALTER TABLE "User"
+ADD COLUMN "isTestPlayer" BOOLEAN NOT NULL DEFAULT false;
