@@ -77,8 +77,16 @@ In the Bingo web **Super Admin → Games** page:
    Use the **Advanced: custom launch URL** override only if a provider uses a
    non-standard route.
 
-3. Keep the provider and each intended game disabled until the probe and
-   staging checks below pass. Enable them from this page when ready to launch.
+3. Keep each intended game disabled until the probe and staging checks below
+   pass. The provider must be enabled to test a launch; enable individual games
+   from this page only when they are ready to appear in the player lobby.
+
+4. Use **Play** beside a game to open its generated launch URL in a new tab.
+   This admin-only action launches a session for an active test player (not the
+   signed-in admin), and can test a hidden game while its provider is enabled.
+   Set `TEST_PLAYER_LOGIN_ENABLED=true` and create a test player from the
+   Provider dashboard first. Test rounds use that account's configured
+   starting balance and cannot deposit or withdraw.
 
 If the provider was created with code `stratos`, use `stratos` consistently for
 the Games Provider operator code, callback path, and Bingo provider code. Do

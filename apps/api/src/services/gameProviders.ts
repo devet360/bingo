@@ -248,6 +248,7 @@ export async function launchGame(input: {
   providerCode?: string;
   externalId?: string;
   lang: string;
+  allowDisabledGame?: boolean;
 }): Promise<ProviderSession> {
   const game = input.gameId
     ? await prisma.providerGame.findUnique({
@@ -262,7 +263,7 @@ export async function launchGame(input: {
         include: { provider: true },
       });
   if (!game) throw Errors.notFound('Game');
-  if (!game.enabled || !game.provider.enabled) {
+  if ((!game.enabled && !input.allowDisabledGame) || !game.provider.enabled) {
     throw Errors.conflict('This game is not available right now', 'GAME_UNAVAILABLE');
   }
   const launchUrlTemplate = game.launchUrlTemplate

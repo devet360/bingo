@@ -1091,6 +1091,12 @@ export function fetchGameProviders(): Promise<GameProvider[]> {
   return apiRequest('/admin/game-providers');
 }
 
+export function testLaunchGameProviderGame(gameId: string): Promise<{ launchUrl: string | null }> {
+  return apiRequest(`/admin/game-providers/games/${encodeURIComponent(gameId)}/test-launch`, {
+    method: 'POST',
+  });
+}
+
 export interface GameProviderInput {
   name: string;
   kind: ProviderKind;

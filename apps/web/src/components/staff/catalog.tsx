@@ -10,6 +10,7 @@ import {
   fetchProviderGameCatalogue,
   fetchProviderSettings,
   fetchProviderTransactions,
+  testLaunchGameProviderGame,
   updateProviderSettings,
   upsertGameProvider,
   upsertGameProviderGame,
@@ -86,6 +87,7 @@ export function GameProvidersTab({ onOpenDashboard }: { onOpenDashboard: (code: 
   const [creating, setCreating] = useState(false);
   const [gameTarget, setGameTarget] = useState<GameProvider | null>(null);
   const [logsTarget, setLogsTarget] = useState<GameProvider | null>(null);
+  const [testingGameId, setTestingGameId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -120,6 +122,33 @@ export function GameProvidersTab({ onOpenDashboard }: { onOpenDashboard: (code: 
     }
   };
 
+  const testGame = async (game: GameProviderGame) => {
+    const popup = window.open('about:blank', '_blank');
+    if (!popup) {
+      setError('Allow pop-ups for this dashboard to test a provider game.');
+      return;
+    }
+    setTestingGameId(game.id);
+    setError(null);
+    try {
+      const { launchUrl } = await testLaunchGameProviderGame(game.id);
+      if (!launchUrl) throw new Error('The provider did not return a game URL.');
+      const url = new URL(launchUrl);
+      if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+        throw new Error('The provider returned an unsupported game URL.');
+      }
+      popup.opener = null;
+      popup.location.replace(url.toString());
+    } catch (caught) {
+      popup.close();
+      setError(caught instanceof ApiError
+        ? caught.message
+        : caught instanceof Error ? caught.message : 'Could not test this provider game.');
+    } finally {
+      setTestingGameId(null);
+    }
+  };
+
   const apiBase = getRuntimeConfig().apiUrl;
 
   return (
@@ -132,7 +161,8 @@ export function GameProvidersTab({ onOpenDashboard }: { onOpenDashboard: (code: 
             <p className="mt-1 max-w-2xl text-[11px] text-muted">
               Aggregate third-party games into the same wallet. Players receive a signed session;
               the provider reports bets, wins and rollbacks to the callback below, authenticated
-              with an HMAC of the raw body.
+              with an HMAC of the raw body. Play opens a test session in a new tab using a test
+              player&apos;s balance, not the admin&apos;s wallet.
             </p>
           </div>
           <Button size="sm" variant="gold" onClick={() => setCreating(true)}>
@@ -225,13 +255,25 @@ export function GameProvidersTab({ onOpenDashboard }: { onOpenDashboard: (code: 
                             {game.enabled ? '' : ' · hidden'}
                           </p>
                         </div>
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          onClick={() => void removeGame(provider, game)}
-                        >
-                          ✕
-                        </Button>
+                        <div className="flex shrink-0 items-center gap-1">
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            loading={testingGameId === game.id}
+                            disabled={!provider.enabled || testingGameId !== null}
+                            title={!provider.enabled ? 'Enable the provider before testing games.' : 'Open a test session in a new tab.'}
+                            onClick={() => void testGame(game)}
+                          >
+                            Play
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            onClick={() => void removeGame(provider, game)}
+                          >
+                            ✕
+                          </Button>
+                        </div>
                       </li>
                     ))}
                   </ul>

@@ -2698,6 +2698,23 @@ export const openApiDocument = {
         responses: { '200': ok(dataArrayRef('GameProvider')) },
       },
     },
+    '/admin/game-providers/games/{gameId}/test-launch': {
+      post: {
+        tags: ['Admin'],
+        summary: 'Launch a provider game in a test-player session',
+        description: 'Super-admin only. Requires TEST_PLAYER_LOGIN_ENABLED=true and an active test-player account. A hidden game may be tested, but its provider must be enabled.',
+        parameters: [idParam('gameId')],
+        responses: {
+          '201': ok({
+            type: 'object',
+            properties: { data: { type: 'object', properties: { launchUrl: { type: 'string', nullable: true } } } },
+          }),
+          '403': errorResponse('TEST_PLAYER_DISABLED'),
+          '404': errorResponse('Game not found'),
+          '409': errorResponse('TEST_PLAYER_NOT_FOUND / GAME_UNAVAILABLE'),
+        },
+      },
+    },
     '/admin/test-players': {
       post: {
         tags: ['Admin'],

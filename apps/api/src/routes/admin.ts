@@ -69,6 +69,7 @@ import {
   PROVIDER_MAX_WIN_CONFIG_KEY,
   deleteGame,
   deleteProvider,
+  launchGame,
   listProviderCatalog,
   serializeProvider as serializeGameProvider,
   upsertGame,
@@ -1524,6 +1525,47 @@ adminRouter.get(
         })),
       })),
     });
+  }),
+);
+
+adminRouter.post(
+  '/game-providers/games/:gameId/test-launch',
+  asyncHandler(async (req, res) => {
+    if (!env.testPlayerLoginEnabled) {
+      throw Errors.forbidden(
+        'Enable TEST_PLAYER_LOGIN_ENABLED to test provider games',
+        'TEST_PLAYER_DISABLED',
+      );
+    }
+    const testPlayer = await prisma.user.findFirst({
+      where: { isTestPlayer: true, status: UserStatus.ACTIVE },
+      orderBy: { createdAt: 'desc' },
+      select: { id: true },
+    });
+    if (!testPlayer) {
+      throw Errors.conflict(
+        'Create a test player in the Provider dashboard before testing games.',
+        'TEST_PLAYER_NOT_FOUND',
+      );
+    }
+
+    const session = await launchGame({
+      userId: testPlayer.id,
+      gameId: req.params.gameId,
+      lang: 'en',
+      allowDisabledGame: true,
+    });
+    await writeAudit({
+      actorId: req.auth!.userId,
+      actorRole: req.auth!.role,
+      action: 'provider.game_test_launch',
+      entityType: 'ProviderGame',
+      entityId: req.params.gameId,
+      after: { testPlayerId: testPlayer.id, sessionId: session.id },
+      ip: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
+    res.status(201).json({ data: { launchUrl: session.launchUrl } });
   }),
 );
 
