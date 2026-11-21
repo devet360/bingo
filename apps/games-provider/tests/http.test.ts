@@ -164,7 +164,9 @@ test('a 5xx wallet answers 502 instead of declaring the session dead', async (t)
     body: JSON.stringify({ token: fake.token }),
   });
   assert.equal(response.status, 502);
-  assert.equal((await response.json()).error.code, 'WALLET_UNAVAILABLE');
+  const body = await response.json();
+  assert.equal(body.error.code, 'WALLET_UNAVAILABLE');
+  assert.equal(body.error.reason, 'INTERNAL_ERROR');
 });
 
 test('a 2xx wallet reply without a signature answers 502 rather than declaring the session dead', async (t) => {
@@ -180,7 +182,9 @@ test('a 2xx wallet reply without a signature answers 502 rather than declaring t
     body: JSON.stringify({ token: fake.token }),
   });
   assert.equal(response.status, 502);
-  assert.equal((await response.json()).error.code, 'WALLET_UNAVAILABLE');
+  const body = await response.json();
+  assert.equal(body.error.code, 'WALLET_UNAVAILABLE');
+  assert.equal(body.error.reason, 'BALANCE_SIGNATURE_INVALID');
 });
 
 test('catalogue exposes only the requested operator', async (t) => {

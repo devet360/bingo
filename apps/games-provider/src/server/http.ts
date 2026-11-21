@@ -99,7 +99,13 @@ export function createApp(deps: AppDeps): express.Express {
       }
       // A parse or signature failure is a broken wallet call, not a dead session.
       if (error instanceof WalletError) {
-        res.status(502).json({ error: { code: 'WALLET_UNAVAILABLE' } });
+        console.error('session handshake wallet failure', {
+          code: error.code,
+          status: error.status,
+        });
+        res.status(502).json({
+          error: { code: 'WALLET_UNAVAILABLE', reason: error.code },
+        });
         return;
       }
       next(error);

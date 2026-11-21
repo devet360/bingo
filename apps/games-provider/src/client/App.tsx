@@ -12,7 +12,7 @@ type Boot =
   | { state: 'loading' }
   | { state: 'ready'; session: HandshakeData }
   | { state: 'ended' }
-  | { state: 'error' };
+  | { state: 'error'; code: string };
 
 function readLang(): Lang {
   const value = new URLSearchParams(window.location.search).get('lang');
@@ -298,14 +298,35 @@ export default function App() {
           return;
         }
         if (!response.ok) {
-          setBoot({ state: 'error' });
+          let payload: unknown;
+          try {
+            payload = await response.json();
+          } catch {
+            payload = null;
+          }
+          const error = typeof payload === 'object' && payload !== null
+            && 'error' in payload && typeof payload.error === 'object' && payload.error !== null
+            ? payload.error
+            : null;
+          const code = error && 'code' in error && typeof error.code === 'string'
+            ? error.code
+            : `HTTP_${response.status}`;
+          const reason = error && 'reason' in error && typeof error.reason === 'string'
+            ? error.reason
+            : null;
+          const diagnostic = reason ? `${code}:${reason}` : code;
+          console.error('Game handshake failed', { status: response.status, code: diagnostic });
+          setBoot({ state: 'error', code: diagnostic });
           return;
         }
         const body = (await response.json()) as { data: HandshakeData };
         setBoot({ state: 'ready', session: body.data });
       })
-      .catch(() => {
-        if (!cancelled) setBoot({ state: 'error' });
+      .catch((error: unknown) => {
+        if (!cancelled) {
+          console.error('Game handshake request failed', error);
+          setBoot({ state: 'error', code: 'REQUEST_FAILED' });
+        }
       });
     return () => {
       cancelled = true;
@@ -320,7 +341,9 @@ export default function App() {
     );
   }
   if (boot.state === 'ended') return <EndedScreen lang={lang} />;
-  if (boot.state === 'error') return <EndedScreen lang={lang} body={t(lang, 'loadFailed')} />;
+  if (boot.state === 'error') {
+    return <EndedScreen lang={lang} body={`${t(lang, 'loadFailed')} (${boot.code})`} />;
+  }
   if (boot.session.gameId === 'coinflip') {
     return <CoinFlipScreen token={token as string} session={boot.session} lang={lang} />;
   }
