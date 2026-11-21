@@ -120,7 +120,9 @@ dokku config:set bingo-api \
   WORKER_CONCURRENCY=2 \
   TEST_PLAYER_LOGIN_ENABLED=false \
   TEST_PLAYER_STARTING_BALANCE_MINOR=10000 \
-  RECEIPT_RELAY_URL="https://YOUR-RELAY-HOST"
+  RECEIPT_RELAY_URL="https://YOUR-RELAY-HOST" \
+  RECEIPT_RELAY_API_KEY="<key-created-in-relay-dashboard>" \
+  RECEIPT_RELAY_API_SECRET="<secret-shown-once-in-relay-dashboard>"
 
 dokku config:set bingo-web \
   NODE_ENV=production \

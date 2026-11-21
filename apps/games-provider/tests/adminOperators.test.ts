@@ -186,6 +186,52 @@ test('updating round-trips lifecycle fields and rotation returns a new secret on
   await ctx.close();
 });
 
+test('operator deletion requires suspension and refuses records with history', async () => {
+  const ctx = await boot('admin-token-for-tests');
+  await ctx.store.upsertOperator({
+    code: 'delete-op', name: 'Delete', callbackUrl: 'https://delete.example/cb', currency: 'ETB',
+    status: 'PENDING', allowedOrigins: ['https://delete.example'], localeDefault: 'en',
+    limits: { minStake: 100n, maxStake: 100_000n, maxWin: 3_000_000n, maxBetsPerRound: 200 },
+    enabledGames: ['crash'], theme: null, maintenance: false, probeOkAt: null, createdAt: new Date(),
+  });
+  const activeDelete = await fetch(`${ctx.base}/api/admin/operators/delete-op`, {
+    method: 'DELETE', headers: headers(),
+  });
+  assert.equal(activeDelete.status, 409);
+  assert.equal((await activeDelete.json()).error.code, 'SUSPEND_REQUIRED');
+
+  await ctx.store.upsertOperator({
+    ...(await ctx.store.getOperator('delete-op'))!,
+    status: 'SUSPENDED',
+  });
+  const deleted = await fetch(`${ctx.base}/api/admin/operators/delete-op`, {
+    method: 'DELETE', headers: headers(),
+  });
+  assert.equal(deleted.status, 200);
+  assert.equal(await ctx.store.getOperator('delete-op'), null);
+
+  await ctx.store.upsertOperator({
+    code: 'history-op', name: 'History', callbackUrl: 'https://history.example/cb', currency: 'ETB',
+    status: 'SUSPENDED', allowedOrigins: ['https://history.example'], localeDefault: 'en',
+    limits: { minStake: 100n, maxStake: 100_000n, maxWin: 3_000_000n, maxBetsPerRound: 200 },
+    enabledGames: ['crash'], theme: null, maintenance: false, probeOkAt: null, createdAt: new Date(),
+  });
+  await ctx.store.createRound({
+    operatorCode: 'history-op',
+    gameId: 'crash',
+    serverSeed: 'private',
+    serverSeedHash: 'public',
+    startedAt: new Date(),
+  });
+  const refused = await fetch(`${ctx.base}/api/admin/operators/history-op`, {
+    method: 'DELETE', headers: headers(),
+  });
+  assert.equal(refused.status, 409);
+  assert.equal((await refused.json()).error.code, 'OPERATOR_HAS_HISTORY');
+  assert.equal((await ctx.store.getOperator('history-op'))?.status, 'SUSPENDED');
+  await ctx.close();
+});
+
 test('provider dashboard reports live operational metrics without exposing game seeds', async () => {
   const ctx = await boot('admin-token-for-tests', CONSOLE_TOKEN_SECRET);
   const now = new Date();
@@ -289,5 +335,20 @@ test('provider dashboard reports live operational metrics without exposing game 
     body: JSON.stringify({ code: 'nope' }),
   });
   assert.equal(forbidden.status, 403);
+  const scopedAdminHeaders = {
+    authorization: `Bearer ${consoleToken('operator_admin', 'bingo251')}`,
+    'content-type': 'application/json',
+  };
+  const cannotCreate = await fetch(`${ctx.base}/api/admin/operators`, {
+    method: 'POST',
+    headers: scopedAdminHeaders,
+    body: JSON.stringify({ code: 'nope', name: 'Nope', callbackUrl: 'https://nope.example/cb', allowedOrigins: ['https://nope.example'] }),
+  });
+  assert.equal(cannotCreate.status, 403);
+  const cannotDelete = await fetch(`${ctx.base}/api/admin/operators/bingo251`, {
+    method: 'DELETE',
+    headers: scopedAdminHeaders,
+  });
+  assert.equal(cannotDelete.status, 403);
   await ctx.close();
 });

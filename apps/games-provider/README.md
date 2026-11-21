@@ -66,7 +66,7 @@ opened to players.
 | `BOT_STAKE_MIN` / `BOT_STAKE_MAX` | `100` / `10000` | Simulation stake range in minor units. |
 | `BOT_ROUND_PAYOUT_CAP` / `BOT_DAY_PAYOUT_CAP` | `0` / `0` | Simulation payout caps in minor units; `0` means no simulated payouts. |
 | `BOT_DISCLOSE` | `true` | Bots are always visibly labelled as simulations in the game client. |
-| `PROVIDER_ADMIN_TOKEN` | — | Bootstrap token for `/api/admin/operators`; replace with a scoped staff-console token in V2 Area E. |
+| `PROVIDER_ADMIN_TOKEN` | — | Optional bootstrap token for CLI/admin API access. Keep it server-side; never expose it in browser code. |
 | `DEFAULT_OPERATOR_CODE` | `OPERATOR_CODE` | Operator used when `/play` or catalogue requests omit `operator`. |
 | `CONSOLE_TOKEN_SECRET` | — | Shared HMAC key used to verify short-lived Bingo-issued provider console tokens. |
 | `CHAT_ENABLED` | `false` | Opt-in per-process chat feature. |
@@ -95,9 +95,24 @@ deployment and wallet callback procedures.
 | `POST` | `/api/sessions/close` | Close a session. |
 | `GET` | `/api/rounds/:id/proof` | Server seed, hash, client seed composite and crash point of a finished round. |
 | `GET` | `/api/health` | Liveness probe. |
+| `GET` | `/api/docs` | Interactive Swagger UI for the Games Provider API. |
+| `GET` | `/api/docs/openapi.json` | OpenAPI 3.0 specification. |
+| `GET`, `POST` | `/api/admin/operators` | List or create operators; creation returns a one-time secret. |
+| `GET`, `PATCH`, `DELETE` | `/api/admin/operators/:code` | Read, update, or guarded-delete an operator. Deletion requires suspension and no session or financial history. |
+| `POST` | `/api/admin/operators/:code/status` | Change operator status. |
+| `POST` | `/api/admin/operators/:code/probe` | Probe the operator wallet callback. |
+| `POST` | `/api/admin/operators/:code/secrets` | Rotate the operator secret; the new value is returned once. |
+| `POST` | `/api/admin/operators/:code/secrets/:version/retire` | Retire an older secret while retaining the newest active version. |
 | `GET`, `PUT` | `/api/admin/runtime-settings` | Owner-scoped game enablement and bot settings, persisted to the operator row. |
 | `WS` | `/ws` | Authenticated game socket (`auth`, `bet:place`, `bet:cancel`, `bet:cashout`). |
 | `GET` | `/play?operator=<code>` | Embedded game client (`dist/client`). `frame-ancestors` uses the operator's `allowedOrigins`, falling back to `ALLOWED_PARENT_ORIGINS`. |
+
+The Bingo Super Admin has native, direct-linkable provider management pages at
+`/admin/provider/overview`, `/admin/provider/operators`,
+`/admin/provider/settings`, and `/admin/provider/test-player`. The API requests
+are proxied server-side with short-lived console tokens; the bootstrap
+`PROVIDER_ADMIN_TOKEN` is not sent to the browser. The CLI remains available for
+recovery and automation.
 
 ## HA
 

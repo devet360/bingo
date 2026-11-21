@@ -13,7 +13,7 @@ import { z } from 'zod';
 import { env } from '../config/env';
 import { parse } from '../lib/validate';
 import { asyncHandler } from '../lib/async';
-import { Errors } from '../lib/errors';
+import { AppError, Errors } from '../lib/errors';
 import { prisma } from '../lib/prisma';
 import { PHONE_RE } from '../lib/phone';
 import { serializeAgent, serializeRoom, serializeRound, serializeUser } from '../lib/serializers';
@@ -75,6 +75,12 @@ import {
   upsertGame,
   upsertProvider,
 } from '../services/gameProviders';
+import {
+  getProviderHost,
+  providerAdminRequest,
+  syncProviderOperatorToBingo,
+  type ProviderOperatorSummary,
+} from '../services/providerAdminProxy';
 import { fetchProviderGameCatalogue } from '../services/providerCatalogue';
 import { storeMedia } from '../services/media';
 
@@ -215,6 +221,71 @@ const ProviderPatchSchema = z.object({
   minAmount: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).nullable().optional(),
   maxAmount: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).nullable().optional(),
 });
+
+const ProviderMinorUnitsSchema = z.string().regex(/^\d+$/).max(30);
+const GamesProviderLimitsSchema = z.object({
+  minStake: ProviderMinorUnitsSchema,
+  maxStake: ProviderMinorUnitsSchema,
+  maxWin: ProviderMinorUnitsSchema,
+  maxBetsPerRound: z.number().int().positive().max(100_000),
+}).strict().refine(
+  (limits) => BigInt(limits.minStake) <= BigInt(limits.maxStake),
+  { message: 'minStake must not exceed maxStake' },
+);
+const GamesProviderBotConfigSchema = z.object({
+  enabled: z.boolean(),
+  count: z.number().int().min(0).max(100),
+  stakeMin: ProviderMinorUnitsSchema,
+  stakeMax: ProviderMinorUnitsSchema,
+  roundPayoutCap: ProviderMinorUnitsSchema,
+  dayPayoutCap: ProviderMinorUnitsSchema,
+  disclose: z.literal(true),
+}).strict().refine(
+  (config) => BigInt(config.stakeMin) <= BigInt(config.stakeMax),
+  { message: 'stakeMin must not exceed stakeMax' },
+);
+const GamesProviderOperatorCreateSchema = z.object({
+  code: z.string().regex(/^[a-z0-9_-]{2,32}$/),
+  name: z.string().trim().min(1).max(120),
+  callbackUrl: z.string().url().max(2048),
+  allowedOrigins: z.array(z.string().url().max(2048)).min(1).max(32),
+  currency: z.string().regex(/^[A-Za-z]{3}$/).optional(),
+  localeDefault: z.enum(['en', 'am']).optional(),
+  limits: GamesProviderLimitsSchema.optional(),
+  enabledGames: z.array(z.string().trim().min(1).max(32)).min(1).optional(),
+  theme: z.record(z.unknown()).nullable().optional(),
+  botConfig: GamesProviderBotConfigSchema.optional(),
+}).strict();
+const GamesProviderOperatorUpdateSchema = z.object({
+  name: z.string().trim().min(1).max(120).optional(),
+  callbackUrl: z.string().url().max(2048).optional(),
+  allowedOrigins: z.array(z.string().url().max(2048)).min(1).max(32).optional(),
+  localeDefault: z.enum(['en', 'am']).optional(),
+  limits: GamesProviderLimitsSchema.optional(),
+  enabledGames: z.array(z.string().trim().min(1).max(32)).min(1).optional(),
+  theme: z.record(z.unknown()).nullable().optional(),
+  maintenance: z.boolean().optional(),
+  botConfig: GamesProviderBotConfigSchema.optional(),
+}).strict();
+const GamesProviderStatusSchema = z.object({
+  status: z.enum(['PENDING', 'ACTIVE', 'SUSPENDED']),
+}).strict();
+const GamesProviderRuntimeSettingsSchema = z.object({
+  botConfig: GamesProviderBotConfigSchema,
+  enabledGames: z.array(z.enum(['crash', 'coinflip'])).min(1),
+}).strict();
+const ProviderAdminHostParamsSchema = z.object({ hostCode: z.string().min(2).max(32) });
+const ProviderAdminOperatorParamsSchema = ProviderAdminHostParamsSchema.extend({
+  operatorCode: z.string().min(2).max(64),
+});
+
+function sameApiBaseUrl(left: string, right: string): boolean {
+  try {
+    return new URL(left).toString() === new URL(right).toString();
+  } catch {
+    return false;
+  }
+}
 
 const PAGE_SIZE = 50;
 
@@ -1566,6 +1637,372 @@ adminRouter.post(
       userAgent: req.headers['user-agent'],
     });
     res.status(201).json({ data: { launchUrl: session.launchUrl } });
+  }),
+);
+
+adminRouter.get(
+  '/provider-management/:hostCode/dashboard',
+  asyncHandler(async (req, res) => {
+    const params = parse(ProviderAdminHostParamsSchema, req.params);
+    res.json({
+      data: await providerAdminRequest({
+        hostCode: params.hostCode,
+        actorId: req.auth!.userId,
+        path: '/api/admin/dashboard',
+      }),
+    });
+  }),
+);
+
+adminRouter.get(
+  '/provider-management/:hostCode/operators',
+  asyncHandler(async (req, res) => {
+    const params = parse(ProviderAdminHostParamsSchema, req.params);
+    res.json({
+      data: await providerAdminRequest({
+        hostCode: params.hostCode,
+        actorId: req.auth!.userId,
+        path: '/api/admin/operators',
+      }),
+    });
+  }),
+);
+
+adminRouter.post(
+  '/provider-management/:hostCode/operators',
+  asyncHandler(async (req, res) => {
+    const params = parse(ProviderAdminHostParamsSchema, req.params);
+    const body = parse(GamesProviderOperatorCreateSchema, req.body);
+    const host = await getProviderHost(params.hostCode);
+    const existing = await prisma.gameProvider.findUnique({ where: { code: body.code } });
+    if (existing && (existing.enabled || !existing.apiBaseUrl || !sameApiBaseUrl(existing.apiBaseUrl, host.apiBaseUrl))) {
+      throw Errors.conflict(
+        'A different or enabled Bingo provider already uses this code',
+        'BINGO_PROVIDER_CODE_IN_USE',
+      );
+    }
+
+    const created = await providerAdminRequest<{
+      operator: ProviderOperatorSummary;
+      secret: string;
+      secretVersion: number;
+    }>({
+      hostCode: params.hostCode,
+      actorId: req.auth!.userId,
+      path: '/api/admin/operators',
+      method: 'POST',
+      body,
+    });
+    try {
+      await syncProviderOperatorToBingo(host, created.operator, { webhookSecret: created.secret });
+    } catch {
+      throw new AppError(
+        502,
+        'PROVIDER_LINK_SYNC_FAILED',
+        `Games Provider operator "${created.operator.code}" was created, but Bingo could not save its integration. Retry secret rotation from the operator page to finish linking.`,
+        { operatorCode: created.operator.code },
+      );
+    }
+    await writeAudit({
+      actorId: req.auth!.userId,
+      actorRole: req.auth!.role,
+      action: 'games_provider.operator_create',
+      entityType: 'GameProvider',
+      entityId: created.operator.code,
+      after: { hostCode: params.hostCode, status: created.operator.status, secretVersion: created.secretVersion },
+      ip: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
+    res.status(201).json({
+      data: { operator: created.operator, secretVersion: created.secretVersion, bingoLinked: true },
+    });
+  }),
+);
+
+adminRouter.get(
+  '/provider-management/:hostCode/operators/:operatorCode',
+  asyncHandler(async (req, res) => {
+    const params = parse(ProviderAdminOperatorParamsSchema, req.params);
+    const operator = await providerAdminRequest<ProviderOperatorSummary & Record<string, unknown>>({
+      hostCode: params.hostCode,
+      actorId: req.auth!.userId,
+      path: `/api/admin/operators/${encodeURIComponent(params.operatorCode)}`,
+    });
+    const linked = await prisma.gameProvider.findUnique({
+      where: { code: params.operatorCode },
+      select: { config: true },
+    });
+    const config = linked?.config && typeof linked.config === 'object' && !Array.isArray(linked.config)
+      ? linked.config
+      : {};
+    res.json({
+      data: {
+        ...operator,
+        hasPreviousSecret: typeof config.previousWebhookSecret === 'string',
+      },
+    });
+  }),
+);
+
+adminRouter.patch(
+  '/provider-management/:hostCode/operators/:operatorCode',
+  asyncHandler(async (req, res) => {
+    const params = parse(ProviderAdminOperatorParamsSchema, req.params);
+    const body = parse(GamesProviderOperatorUpdateSchema, req.body);
+    const integration = await prisma.gameProvider.findUnique({
+      where: { code: params.operatorCode },
+      select: { id: true },
+    });
+    if (!integration) {
+      throw Errors.conflict('Link this operator to Bingo by rotating its secret before editing it here', 'PROVIDER_LINK_REQUIRED');
+    }
+    const operator = await providerAdminRequest<ProviderOperatorSummary>({
+      hostCode: params.hostCode,
+      actorId: req.auth!.userId,
+      path: `/api/admin/operators/${encodeURIComponent(params.operatorCode)}`,
+      method: 'PATCH',
+      body,
+    });
+    const host = await getProviderHost(params.hostCode);
+    await syncProviderOperatorToBingo(host, operator);
+    await writeAudit({
+      actorId: req.auth!.userId,
+      actorRole: req.auth!.role,
+      action: 'games_provider.operator_update',
+      entityType: 'GameProvider',
+      entityId: operator.code,
+      after: { hostCode: params.hostCode, status: operator.status, currency: operator.currency },
+      ip: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
+    res.json({ data: operator });
+  }),
+);
+
+adminRouter.post(
+  '/provider-management/:hostCode/operators/:operatorCode/probe',
+  asyncHandler(async (req, res) => {
+    const params = parse(ProviderAdminOperatorParamsSchema, req.params);
+    const result = await providerAdminRequest({
+      hostCode: params.hostCode,
+      actorId: req.auth!.userId,
+      path: `/api/admin/operators/${encodeURIComponent(params.operatorCode)}/probe`,
+      method: 'POST',
+    });
+    await writeAudit({
+      actorId: req.auth!.userId,
+      actorRole: req.auth!.role,
+      action: 'games_provider.operator_probe',
+      entityType: 'GameProvider',
+      entityId: params.operatorCode,
+      after: { hostCode: params.hostCode },
+      ip: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
+    res.json({ data: result });
+  }),
+);
+
+adminRouter.post(
+  '/provider-management/:hostCode/operators/:operatorCode/status',
+  asyncHandler(async (req, res) => {
+    const params = parse(ProviderAdminOperatorParamsSchema, req.params);
+    const body = parse(GamesProviderStatusSchema, req.body);
+    const integration = await prisma.gameProvider.findUnique({
+      where: { code: params.operatorCode },
+      select: { id: true },
+    });
+    if (!integration) {
+      throw Errors.conflict('Link this operator to Bingo by rotating its secret before changing status', 'PROVIDER_LINK_REQUIRED');
+    }
+    const operator = await providerAdminRequest<ProviderOperatorSummary>({
+      hostCode: params.hostCode,
+      actorId: req.auth!.userId,
+      path: `/api/admin/operators/${encodeURIComponent(params.operatorCode)}/status`,
+      method: 'POST',
+      body,
+    });
+    const host = await getProviderHost(params.hostCode);
+    await syncProviderOperatorToBingo(host, operator);
+    await writeAudit({
+      actorId: req.auth!.userId,
+      actorRole: req.auth!.role,
+      action: 'games_provider.operator_status',
+      entityType: 'GameProvider',
+      entityId: operator.code,
+      after: { hostCode: params.hostCode, status: operator.status },
+      ip: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
+    res.json({ data: operator });
+  }),
+);
+
+adminRouter.post(
+  '/provider-management/:hostCode/operators/:operatorCode/secrets',
+  asyncHandler(async (req, res) => {
+    const params = parse(ProviderAdminOperatorParamsSchema, req.params);
+    const rotated = await providerAdminRequest<{
+      operator: ProviderOperatorSummary;
+      secret: string;
+      secretVersion: number;
+    }>({
+      hostCode: params.hostCode,
+      actorId: req.auth!.userId,
+      path: `/api/admin/operators/${encodeURIComponent(params.operatorCode)}/secrets`,
+      method: 'POST',
+    });
+    const host = await getProviderHost(params.hostCode);
+    try {
+      await syncProviderOperatorToBingo(host, rotated.operator, {
+        webhookSecret: rotated.secret,
+        preservePreviousSecret: true,
+      });
+    } catch {
+      throw new AppError(
+        502,
+        'PROVIDER_SECRET_SYNC_FAILED',
+        'The Games Provider secret rotated, but Bingo could not save it. Do not retire the previous secret. Resolve the Bingo storage issue, retry secret rotation to synchronize the latest secret, then run a probe.',
+        { secretVersion: rotated.secretVersion, operatorCode: rotated.operator.code },
+      );
+    }
+    await writeAudit({
+      actorId: req.auth!.userId,
+      actorRole: req.auth!.role,
+      action: 'games_provider.secret_rotate',
+      entityType: 'GameProvider',
+      entityId: rotated.operator.code,
+      after: { hostCode: params.hostCode, secretVersion: rotated.secretVersion, bingoSynced: true },
+      ip: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
+    res.status(201).json({
+      data: { operator: rotated.operator, secretVersion: rotated.secretVersion, bingoSynced: true },
+    });
+  }),
+);
+
+adminRouter.post(
+  '/provider-management/:hostCode/operators/:operatorCode/secrets/retire-previous',
+  asyncHandler(async (req, res) => {
+    const params = parse(ProviderAdminOperatorParamsSchema, req.params);
+    const operator = await providerAdminRequest<ProviderOperatorSummary & { secretVersion: number | null }>({
+      hostCode: params.hostCode,
+      actorId: req.auth!.userId,
+      path: `/api/admin/operators/${encodeURIComponent(params.operatorCode)}`,
+    });
+    const provider = await prisma.gameProvider.findUnique({ where: { code: params.operatorCode } });
+    if (!provider) throw Errors.notFound('Bingo provider integration');
+    const config = provider.config && typeof provider.config === 'object' && !Array.isArray(provider.config)
+      ? provider.config
+      : {};
+    if (!('previousWebhookSecret' in config) || typeof config.previousWebhookSecret !== 'string') {
+      throw Errors.conflict('There is no previous webhook secret to retire', 'PREVIOUS_SECRET_NOT_FOUND');
+    }
+    if (!operator.secretVersion || operator.secretVersion < 2) {
+      throw Errors.conflict('The Games Provider has no older secret version to retire', 'PROVIDER_SECRET_VERSION_INVALID');
+    }
+    try {
+      await providerAdminRequest({
+        hostCode: params.hostCode,
+        actorId: req.auth!.userId,
+        path: `/api/admin/operators/${encodeURIComponent(params.operatorCode)}/secrets/${operator.secretVersion - 1}/retire`,
+        method: 'POST',
+      });
+    } catch (error) {
+      if (!(error instanceof AppError && error.status === 404 && error.code === 'SECRET_NOT_ACTIVE')) {
+        throw error;
+      }
+    }
+    await prisma.gameProvider.update({
+      where: { code: params.operatorCode },
+      data: { config: { ...config, previousWebhookSecret: null } as Prisma.InputJsonValue },
+    });
+    await writeAudit({
+      actorId: req.auth!.userId,
+      actorRole: req.auth!.role,
+      action: 'games_provider.secret_retire_previous',
+      entityType: 'GameProvider',
+      entityId: params.operatorCode,
+      after: { hostCode: params.hostCode },
+      ip: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
+    res.json({ data: { retired: true } });
+  }),
+);
+
+adminRouter.delete(
+  '/provider-management/:hostCode/operators/:operatorCode',
+  asyncHandler(async (req, res) => {
+    const params = parse(ProviderAdminOperatorParamsSchema, req.params);
+    try {
+      await providerAdminRequest({
+        hostCode: params.hostCode,
+        actorId: req.auth!.userId,
+        path: `/api/admin/operators/${encodeURIComponent(params.operatorCode)}`,
+        method: 'DELETE',
+      });
+    } catch (error) {
+      if (!(error instanceof AppError && error.status === 404 && error.code === 'OPERATOR_NOT_FOUND')) {
+        throw error;
+      }
+    }
+    await prisma.gameProvider.updateMany({
+      where: { code: params.operatorCode },
+      data: { enabled: false },
+    });
+    await writeAudit({
+      actorId: req.auth!.userId,
+      actorRole: req.auth!.role,
+      action: 'games_provider.operator_delete',
+      entityType: 'GameProvider',
+      entityId: params.operatorCode,
+      after: { hostCode: params.hostCode, bingoIntegrationDisabled: true },
+      ip: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
+    res.json({ data: { deleted: true, bingoIntegrationDisabled: true } });
+  }),
+);
+
+adminRouter.get(
+  '/provider-management/:hostCode/runtime-settings',
+  asyncHandler(async (req, res) => {
+    const params = parse(ProviderAdminHostParamsSchema, req.params);
+    res.json({
+      data: await providerAdminRequest({
+        hostCode: params.hostCode,
+        actorId: req.auth!.userId,
+        path: '/api/admin/runtime-settings',
+      }),
+    });
+  }),
+);
+
+adminRouter.put(
+  '/provider-management/:hostCode/runtime-settings',
+  asyncHandler(async (req, res) => {
+    const params = parse(ProviderAdminHostParamsSchema, req.params);
+    const body = parse(GamesProviderRuntimeSettingsSchema, req.body);
+    const result = await providerAdminRequest({
+      hostCode: params.hostCode,
+      actorId: req.auth!.userId,
+      path: '/api/admin/runtime-settings',
+      method: 'PUT',
+      body,
+    });
+    await writeAudit({
+      actorId: req.auth!.userId,
+      actorRole: req.auth!.role,
+      action: 'games_provider.runtime_settings',
+      entityType: 'GameProvider',
+      entityId: params.hostCode,
+      after: { botEnabled: body.botConfig.enabled, botCount: body.botConfig.count, enabledGames: body.enabledGames },
+      ip: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
+    res.json({ data: result });
   }),
 );
 

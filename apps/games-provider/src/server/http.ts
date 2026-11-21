@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import express from 'express';
 import { ZodError, z } from 'zod';
@@ -12,6 +13,7 @@ import { WalletError } from './wallet';
 import { ChatRainError, ChatRainManager } from './chatRain';
 import { renderProviderConsole } from './providerConsole';
 import { getProviderGameThumbnail, PROVIDER_GAMES } from '../domain/gameCatalogue';
+import { openApiDocument } from './openapi';
 
 export interface AppDeps {
   config: AppConfig;
@@ -23,6 +25,8 @@ export interface AppDeps {
 // while the process runs from the repo root.
 const clientDir = path.resolve(fileURLToPath(new URL('../../dist/client', import.meta.url)));
 const clientIndex = path.join(clientDir, 'index.html');
+const require = createRequire(import.meta.url);
+const swaggerUiDir = path.dirname(require.resolve('swagger-ui-dist'));
 const SESSION_TTL_MS = 2 * 3600_000;
 const SessionBody = z.object({
   token: z.string().uuid(),
@@ -48,6 +52,36 @@ export function createApp(deps: AppDeps): express.Express {
   });
 
   app.use(express.json({ limit: '32kb' }));
+
+  app.get('/api/docs/openapi.json', (_req, res) => {
+    res.setHeader('Cache-Control', 'public, max-age=300');
+    res.json(openApiDocument);
+  });
+  app.use('/api/docs/assets', express.static(swaggerUiDir, { index: false, maxAge: '1d' }));
+  app.get('/api/docs', (_req, res) => {
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    res.type('html').send(`<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Games Provider API</title>
+    <link rel="stylesheet" href="/api/docs/assets/swagger-ui.css">
+  </head>
+  <body>
+    <div id="swagger-ui"></div>
+    <script src="/api/docs/assets/swagger-ui-bundle.js"></script>
+    <script>
+      window.onload = () => SwaggerUIBundle({
+        url: '/api/docs/openapi.json',
+        dom_id: '#swagger-ui',
+        deepLinking: true,
+        persistAuthorization: false
+      });
+    </script>
+  </body>
+</html>`);
+  });
 
   app.use(
     '/api/admin',

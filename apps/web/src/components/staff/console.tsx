@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
+import { usePathname, useRouter } from 'next/navigation';
 import { useSession } from '@/components/session';
 import { cn, EmptyState, ErrorNote, Panel, Tabs } from '@/components/ui';
 import { ApiError, fetchAdminOverview } from '@/lib/api';
@@ -11,7 +12,7 @@ import { AuditTab, OverviewTab, StaffTab } from './admin';
 import { BingoRoomsTab } from './bingo';
 import { BonusesTab } from './bonuses';
 import { GameProvidersTab } from './catalog';
-import { ProviderDashboardTab } from './providerDashboard';
+import { ProviderManagement } from './providerManagement';
 import { ProviderGuidesTab } from './providerGuides';
 import { MarketingTab } from './marketing';
 import { ProvidersTab } from './providers';
@@ -389,8 +390,16 @@ function Sidebar({
 export function StaffConsole({ mode }: { mode: 'support' | 'admin' }) {
   const { user } = useSession();
   const { t } = useI18n();
+  const pathname = usePathname();
+  const router = useRouter();
   const [supportTab, setSupportTab] = useState<SupportTab>('tickets');
-  const [adminTab, setAdminTab] = useState<AdminTab>('overview');
+  const pathSection = pathname.split('/').filter(Boolean)[1];
+  const initialAdminTab: AdminTab = pathname.split('/').filter(Boolean)[1] === 'provider'
+    ? 'provider-dashboard'
+    : ADMIN_ITEMS.some((item) => item.value === pathSection)
+      ? pathSection as AdminTab
+      : 'overview';
+  const [adminTab, setAdminTab] = useState<AdminTab>(initialAdminTab);
   const [providerDashboardCode, setProviderDashboardCode] = useState<string | undefined>();
   const [overview, setOverview] = useState<AdminOverview | null>(null);
   const [overviewError, setOverviewError] = useState<string | null>(null);
@@ -430,6 +439,18 @@ export function StaffConsole({ mode }: { mode: 'support' | 'admin' }) {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [drawerOpen]);
+
+  useEffect(() => {
+    if (mode !== 'admin') return;
+    const section = pathname.split('/').filter(Boolean)[1];
+    if (section === 'provider') {
+      setAdminTab('provider-dashboard');
+    } else if (ADMIN_ITEMS.some((item) => item.value === section)) {
+      setAdminTab(section as AdminTab);
+    } else {
+      setAdminTab('overview');
+    }
+  }, [mode, pathname]);
 
   if (!allowed) {
     return (
@@ -484,10 +505,13 @@ export function StaffConsole({ mode }: { mode: 'support' | 'admin' }) {
   const select = (tab: AdminTab) => {
     setAdminTab(tab);
     setDrawerOpen(false);
+    router.push(tab === 'provider-dashboard' ? '/admin/provider/overview' : `/admin/${tab}`);
   };
   const openProviderDashboard = (code: string) => {
     setProviderDashboardCode(code);
-    select('provider-dashboard');
+    setAdminTab('provider-dashboard');
+    setDrawerOpen(false);
+    router.push(`/admin/provider/overview?host=${encodeURIComponent(code)}`);
   };
 
   const sidebar = (
@@ -564,7 +588,7 @@ export function StaffConsole({ mode }: { mode: 'support' | 'admin' }) {
             {adminTab === 'bonuses' ? <BonusesTab /> : null}
             {adminTab === 'games' ? <GameProvidersTab onOpenDashboard={openProviderDashboard} /> : null}
             {adminTab === 'provider-dashboard' ? (
-              <ProviderDashboardTab preferredProviderCode={providerDashboardCode} />
+              <ProviderManagement preferredProviderCode={providerDashboardCode} />
             ) : null}
             {adminTab === 'provider-guides' ? <ProviderGuidesTab /> : null}
             {adminTab === 'staff' ? <StaffTab /> : null}

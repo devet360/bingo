@@ -1091,6 +1091,120 @@ export function fetchGameProviders(): Promise<GameProvider[]> {
   return apiRequest('/admin/game-providers');
 }
 
+export interface GamesProviderOperator {
+  code: string;
+  name: string;
+  callbackUrl: string;
+  currency: string;
+  status: 'PENDING' | 'ACTIVE' | 'SUSPENDED';
+  allowedOrigins: string[];
+  localeDefault: 'en' | 'am';
+  limits: {
+    minStake: string;
+    maxStake: string;
+    maxWin: string;
+    maxBetsPerRound: number;
+  };
+  enabledGames: string[];
+  theme: Record<string, unknown> | null;
+  botConfig: {
+    enabled: boolean;
+    count: number;
+    stakeMin: string;
+    stakeMax: string;
+    roundPayoutCap: string;
+    dayPayoutCap: string;
+    disclose: boolean;
+  } | null;
+  maintenance: boolean;
+  probeOkAt: string | null;
+  createdAt: string;
+  hasSecret: boolean;
+  secretVersion: number | null;
+  hasPreviousSecret?: boolean;
+}
+
+export interface GamesProviderRuntimeSettings {
+  operatorCode: string;
+  enabledGames: Array<'crash' | 'coinflip'>;
+  botConfig: NonNullable<GamesProviderOperator['botConfig']>;
+}
+
+export interface GamesProviderDashboard {
+  operators: Array<Pick<GamesProviderOperator, 'code' | 'name' | 'status' | 'currency' | 'enabledGames' | 'maintenance' | 'probeOkAt' | 'createdAt'>>;
+  metrics: {
+    sessions: { total: number; active: number };
+    rounds: { total: number; last24Hours: number; recent: Array<{ id: number; gameId: string; status: string; crashPoint: number | null; coinOutcome?: 'HEADS' | 'TAILS'; startedAt: string; crashedAt: string | null }> };
+    bets: { total: number; unsettled: number };
+    outbox: { pending: number; dead: number; capRejected: number; recent: Array<{ type: string; status: string; amount: string; attempts: number; updatedAt: string }> };
+  };
+}
+
+export interface GamesProviderOperatorInput {
+  code: string;
+  name: string;
+  callbackUrl: string;
+  allowedOrigins: string[];
+  currency?: string;
+  localeDefault?: 'en' | 'am';
+  limits?: GamesProviderOperator['limits'];
+  enabledGames?: string[];
+  theme?: Record<string, unknown> | null;
+  botConfig?: NonNullable<GamesProviderOperator['botConfig']>;
+}
+
+export type GamesProviderOperatorPatch = Partial<Omit<GamesProviderOperatorInput, 'code'>> & {
+  maintenance?: boolean;
+};
+
+export function fetchGamesProviderDashboard(hostCode: string): Promise<GamesProviderDashboard> {
+  return apiRequest(`/admin/provider-management/${encodeURIComponent(hostCode)}/dashboard`);
+}
+
+export function fetchGamesProviderOperators(hostCode: string): Promise<GamesProviderOperator[]> {
+  return apiRequest(`/admin/provider-management/${encodeURIComponent(hostCode)}/operators`);
+}
+
+export function fetchGamesProviderOperator(hostCode: string, operatorCode: string): Promise<GamesProviderOperator> {
+  return apiRequest(`/admin/provider-management/${encodeURIComponent(hostCode)}/operators/${encodeURIComponent(operatorCode)}`);
+}
+
+export function createGamesProviderOperator(hostCode: string, input: GamesProviderOperatorInput): Promise<{ operator: GamesProviderOperator; secretVersion: number; bingoLinked: true }> {
+  return apiRequest(`/admin/provider-management/${encodeURIComponent(hostCode)}/operators`, { method: 'POST', body: input });
+}
+
+export function updateGamesProviderOperator(hostCode: string, operatorCode: string, patch: GamesProviderOperatorPatch): Promise<GamesProviderOperator> {
+  return apiRequest(`/admin/provider-management/${encodeURIComponent(hostCode)}/operators/${encodeURIComponent(operatorCode)}`, { method: 'PATCH', body: patch });
+}
+
+export function probeGamesProviderOperator(hostCode: string, operatorCode: string): Promise<{ ok: true; checkedAt: string }> {
+  return apiRequest(`/admin/provider-management/${encodeURIComponent(hostCode)}/operators/${encodeURIComponent(operatorCode)}/probe`, { method: 'POST' });
+}
+
+export function setGamesProviderOperatorStatus(hostCode: string, operatorCode: string, status: GamesProviderOperator['status']): Promise<GamesProviderOperator> {
+  return apiRequest(`/admin/provider-management/${encodeURIComponent(hostCode)}/operators/${encodeURIComponent(operatorCode)}/status`, { method: 'POST', body: { status } });
+}
+
+export function rotateGamesProviderOperatorSecret(hostCode: string, operatorCode: string): Promise<{ operator: GamesProviderOperator; secretVersion: number; bingoSynced: true }> {
+  return apiRequest(`/admin/provider-management/${encodeURIComponent(hostCode)}/operators/${encodeURIComponent(operatorCode)}/secrets`, { method: 'POST' });
+}
+
+export function retirePreviousGamesProviderSecret(hostCode: string, operatorCode: string): Promise<{ retired: true }> {
+  return apiRequest(`/admin/provider-management/${encodeURIComponent(hostCode)}/operators/${encodeURIComponent(operatorCode)}/secrets/retire-previous`, { method: 'POST' });
+}
+
+export function deleteGamesProviderOperator(hostCode: string, operatorCode: string): Promise<{ deleted: true; bingoIntegrationDisabled: true }> {
+  return apiRequest(`/admin/provider-management/${encodeURIComponent(hostCode)}/operators/${encodeURIComponent(operatorCode)}`, { method: 'DELETE' });
+}
+
+export function fetchGamesProviderRuntimeSettings(hostCode: string): Promise<GamesProviderRuntimeSettings> {
+  return apiRequest(`/admin/provider-management/${encodeURIComponent(hostCode)}/runtime-settings`);
+}
+
+export function updateGamesProviderRuntimeSettings(hostCode: string, settings: Pick<GamesProviderRuntimeSettings, 'botConfig' | 'enabledGames'>): Promise<GamesProviderRuntimeSettings> {
+  return apiRequest(`/admin/provider-management/${encodeURIComponent(hostCode)}/runtime-settings`, { method: 'PUT', body: settings });
+}
+
 export function testLaunchGameProviderGame(gameId: string): Promise<{ launchUrl: string | null }> {
   return apiRequest(`/admin/game-providers/games/${encodeURIComponent(gameId)}/test-launch`, {
     method: 'POST',

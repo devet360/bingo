@@ -15,6 +15,7 @@ import { createParser } from './parsers';
 import { normalizeInput } from './reference';
 import type { ReceiptProvider, ReceiptSource, VerifyInput, VerifyOutcome } from './types';
 import { MAX_PLAIN_TEXT_BYTES, verifyClientPayload, verifyClientText } from './verify';
+import { logger } from '../../lib/logger';
 
 const RELAY_PROVIDERS = new Set(['telebirr', 'mpesa']);
 const DEFAULT_TIMEOUT_MS = 15_000;
@@ -34,9 +35,15 @@ export function relayTimeoutMs(): number {
     : DEFAULT_TIMEOUT_MS;
 }
 
+function relayAuthHeaders(): Record<string, string> | null {
+  const key = (process.env.RECEIPT_RELAY_API_KEY ?? '').trim();
+  const secret = (process.env.RECEIPT_RELAY_API_SECRET ?? '').trim();
+  return key && secret ? { 'X-API-Key': key, 'X-API-Secret': secret } : null;
+}
+
 /** Only the geo-blocked rails this relay serves. */
 export function relayEnabled(provider: ReceiptProvider): boolean {
-  return !!relayUrl() && RELAY_PROVIDERS.has(provider.code);
+  return !!relayUrl() && !!relayAuthHeaders() && RELAY_PROVIDERS.has(provider.code);
 }
 
 export interface RelayPayload {
@@ -77,7 +84,7 @@ export async function relayFetchText(
   let response: Response;
   try {
     response = await fetchImpl(url, {
-      headers: { Accept: 'application/json' },
+      headers: { Accept: 'application/json', ...(relayAuthHeaders() ?? {}) },
       redirect: 'error',
       signal: AbortSignal.timeout(relayTimeoutMs()),
     });
@@ -146,7 +153,7 @@ export async function relayFetchPayload(
   let response: Response;
   try {
     response = await fetchImpl(url, {
-      headers: { Accept: 'application/json' },
+      headers: { Accept: 'application/json', ...(relayAuthHeaders() ?? {}) },
       redirect: 'error',
       signal: AbortSignal.timeout(relayTimeoutMs()),
     });
@@ -230,20 +237,47 @@ export async function verifyViaRelay(
   baseUrl: string | null = relayUrl(),
 ): Promise<VerifyOutcome> {
   const text = await relayFetchText(provider, rawInput, fetchImpl, baseUrl);
+  let outcome: VerifyOutcome;
   if (text.ok) {
-    return verifyClientText(provider, rawInput, text.text, source);
-  }
-  if (text.notFound) {
-    return relayFailure(provider, rawInput, source, 'NOT_FOUND', text.message);
-  }
-
-  if (text.retryRaw) {
+    outcome = await verifyClientText(provider, rawInput, text.text, source);
+  } else if (text.notFound) {
+    outcome = relayFailure(provider, rawInput, source, 'NOT_FOUND', text.message);
+  } else if (text.retryRaw) {
     const result = await relayFetchPayload(provider, rawInput, fetchImpl, baseUrl);
     if (result.ok) {
-      return verifyClientPayload(provider, rawInput, result.payload, source);
+      outcome = await verifyClientPayload(provider, rawInput, result.payload, source);
+    } else {
+      outcome = relayFailure(provider, rawInput, source, 'UNREACHABLE', result.message);
     }
-    return relayFailure(provider, rawInput, source, 'UNREACHABLE', result.message);
+  } else {
+    outcome = relayFailure(provider, rawInput, source, 'UNREACHABLE', text.message);
   }
 
-  return relayFailure(provider, rawInput, source, 'UNREACHABLE', text.message);
+  await reportRelayVerification(provider.code, outcome.status, baseUrl, fetchImpl);
+  return outcome;
+}
+
+async function reportRelayVerification(
+  provider: string,
+  status: VerifyOutcome['status'],
+  baseUrl: string | null,
+  fetchImpl: RelayFetch,
+): Promise<void> {
+  const auth = relayAuthHeaders();
+  if (!baseUrl || !auth || !RELAY_PROVIDERS.has(provider)) return;
+
+  try {
+    const response = await fetchImpl(`${baseUrl}/events/verification`, {
+      method: 'POST',
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json', ...auth },
+      body: JSON.stringify({ provider, status }),
+      redirect: 'error',
+      signal: AbortSignal.timeout(Math.min(relayTimeoutMs(), 3_000)),
+    });
+    if (!response.ok) {
+      logger.warn({ provider, status, httpStatus: response.status }, 'receipt relay verification analytics rejected');
+    }
+  } catch (error) {
+    logger.warn({ err: error, provider, status }, 'receipt relay verification analytics failed');
+  }
 }

@@ -1,0 +1,286 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Bingo Receipt Relay API",
+    "version": "2.0.0",
+    "description": "Authenticated Telebirr and M-Pesa receipt fetching from the Ethiopian-hosted relay. The calling API parses the response and makes the final verification decision."
+  },
+  "servers": [
+    {
+      "url": "https://receipts.example.com",
+      "description": "Replace with the Plesk relay domain"
+    }
+  ],
+  "tags": [
+    { "name": "Receipts", "description": "Fetch bank receipt documents or extracted text" },
+    { "name": "Analytics", "description": "Report final verification outcomes to the relay dashboard" },
+    { "name": "System", "description": "Health and API documentation" }
+  ],
+  "paths": {
+    "/health": {
+      "get": {
+        "tags": ["System"],
+        "summary": "Check relay health",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Relay is running",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["ok", "app", "version", "providers", "time"],
+                  "properties": {
+                    "ok": { "const": true },
+                    "app": { "type": "string" },
+                    "version": { "type": "string" },
+                    "providers": { "type": "array", "items": { "type": "string", "enum": ["telebirr", "mpesa"] } },
+                    "time": { "type": "string", "format": "date-time" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/receipts/{provider}/{reference}": {
+      "get": {
+        "tags": ["Receipts"],
+        "summary": "Fetch a receipt by reference",
+        "security": [{ "ApiKey": [], "ApiSecret": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/Provider" },
+          {
+            "name": "reference",
+            "in": "path",
+            "required": true,
+            "description": "Bare provider receipt/transaction reference.",
+            "schema": { "type": "string", "minLength": 6, "maxLength": 64, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{5,63}$" }
+          },
+          {
+            "name": "format",
+            "in": "query",
+            "description": "Use text for compact extracted receipt text; raw is the default.",
+            "schema": { "type": "string", "enum": ["raw", "text"], "default": "raw" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Fetched receipt. A bank no-receipt response is returned as notFound in text mode.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    { "$ref": "#/components/schemas/RawReceipt" },
+                    { "$ref": "#/components/schemas/TextReceipt" },
+                    { "$ref": "#/components/schemas/NotFoundReceipt" }
+                  ]
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/ApiError" },
+          "401": { "$ref": "#/components/responses/ApiError" },
+          "404": { "$ref": "#/components/responses/ApiError" },
+          "422": { "$ref": "#/components/responses/ApiError" },
+          "429": { "$ref": "#/components/responses/ApiError" },
+          "502": { "$ref": "#/components/responses/ApiError" },
+          "503": { "$ref": "#/components/responses/ApiError" },
+          "504": { "$ref": "#/components/responses/ApiError" }
+        }
+      }
+    },
+    "/receipts/{provider}": {
+      "get": {
+        "tags": ["Receipts"],
+        "summary": "Fetch a receipt using a pasted receipt URL",
+        "security": [{ "ApiKey": [], "ApiSecret": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/Provider" },
+          {
+            "name": "reference",
+            "in": "query",
+            "required": true,
+            "description": "A bare reference or URL-encoded receipt link from the supported provider.",
+            "schema": { "type": "string", "minLength": 6 }
+          },
+          {
+            "name": "format",
+            "in": "query",
+            "schema": { "type": "string", "enum": ["raw", "text"], "default": "raw" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Fetched receipt. Response shapes are the same as /receipts/{provider}/{reference}.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    { "$ref": "#/components/schemas/RawReceipt" },
+                    { "$ref": "#/components/schemas/TextReceipt" },
+                    { "$ref": "#/components/schemas/NotFoundReceipt" }
+                  ]
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/ApiError" },
+          "401": { "$ref": "#/components/responses/ApiError" },
+          "404": { "$ref": "#/components/responses/ApiError" },
+          "422": { "$ref": "#/components/responses/ApiError" },
+          "429": { "$ref": "#/components/responses/ApiError" },
+          "502": { "$ref": "#/components/responses/ApiError" },
+          "503": { "$ref": "#/components/responses/ApiError" },
+          "504": { "$ref": "#/components/responses/ApiError" }
+        }
+      }
+    },
+    "/events/verification": {
+      "post": {
+        "tags": ["Analytics"],
+        "summary": "Report the API's final verification status",
+        "description": "The relay does not decide whether a receipt is valid. The calling API reports its parser and verification-gate result here. Only provider, status, API key ID, and timestamp are stored; receipt references are not accepted.",
+        "security": [{ "ApiKey": [], "ApiSecret": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["provider", "status"],
+                "additionalProperties": false,
+                "properties": {
+                  "provider": { "type": "string", "enum": ["telebirr", "mpesa"] },
+                  "status": {
+                    "type": "string",
+                    "enum": ["VERIFIED", "FAILED", "NOT_FOUND", "NOT_MATCHED", "NOT_VERIFIED", "UNREACHABLE", "UNSUPPORTED", "INVALID_REFERENCE"]
+                  }
+                }
+              },
+              "examples": {
+                "verified": {
+                  "value": { "provider": "telebirr", "status": "VERIFIED" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Verification outcome recorded",
+            "content": { "application/json": { "schema": { "type": "object", "properties": { "ok": { "const": true } } } } }
+          },
+          "400": { "$ref": "#/components/responses/ApiError" },
+          "401": { "$ref": "#/components/responses/ApiError" },
+          "413": { "$ref": "#/components/responses/ApiError" },
+          "415": { "$ref": "#/components/responses/ApiError" },
+          "503": { "$ref": "#/components/responses/ApiError" }
+        }
+      }
+    },
+    "/openapi.json": {
+      "get": {
+        "tags": ["System"],
+        "summary": "Download the OpenAPI specification",
+        "security": [],
+        "responses": { "200": { "description": "OpenAPI 3.1 JSON document" } }
+      }
+    },
+    "/docs": {
+      "get": {
+        "tags": ["System"],
+        "summary": "Open interactive Swagger UI",
+        "security": [],
+        "responses": { "200": { "description": "Swagger UI HTML page" } }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "ApiKey": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-API-Key",
+        "description": "Create a credential in the admin dashboard."
+      },
+      "ApiSecret": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-API-Secret",
+        "description": "Shown only once at key creation. Always use HTTPS."
+      }
+    },
+    "parameters": {
+      "Provider": {
+        "name": "provider",
+        "in": "path",
+        "required": true,
+        "schema": { "type": "string", "enum": ["telebirr", "mpesa"] }
+      }
+    },
+    "schemas": {
+      "RawReceipt": {
+        "type": "object",
+        "required": ["ok", "provider", "reference", "status", "contentType", "bodyBase64", "sourceUrl", "fetchedAt"],
+        "properties": {
+          "ok": { "const": true },
+          "provider": { "type": "string", "enum": ["telebirr", "mpesa"] },
+          "reference": { "type": "string" },
+          "status": { "type": "integer" },
+          "contentType": { "type": "string" },
+          "bodyBase64": { "type": "string", "contentEncoding": "base64" },
+          "sourceUrl": { "type": "string", "format": "uri" },
+          "fetchedAt": { "type": "string", "format": "date-time" }
+        }
+      },
+      "TextReceipt": {
+        "type": "object",
+        "required": ["ok", "provider", "reference", "status", "format", "text", "sourceUrl", "fetchedAt"],
+        "properties": {
+          "ok": { "const": true },
+          "provider": { "type": "string", "enum": ["telebirr", "mpesa"] },
+          "reference": { "type": "string" },
+          "status": { "type": "integer" },
+          "format": { "const": "text" },
+          "text": { "type": "string" },
+          "sourceUrl": { "type": "string", "format": "uri" },
+          "fetchedAt": { "type": "string", "format": "date-time" }
+        }
+      },
+      "NotFoundReceipt": {
+        "type": "object",
+        "required": ["ok", "provider", "reference", "status", "format", "notFound", "message"],
+        "properties": {
+          "ok": { "const": true },
+          "provider": { "type": "string", "enum": ["telebirr", "mpesa"] },
+          "reference": { "type": "string" },
+          "status": { "type": "integer" },
+          "format": { "const": "text" },
+          "notFound": { "const": true },
+          "message": { "type": "string" }
+        }
+      },
+      "ApiError": {
+        "type": "object",
+        "required": ["ok", "code", "message"],
+        "properties": {
+          "ok": { "const": false },
+          "code": { "type": "string" },
+          "message": { "type": "string" }
+        }
+      }
+    },
+    "responses": {
+      "ApiError": {
+        "description": "Request failed",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/ApiError" }
+          }
+        }
+      }
+    }
+  }
+}

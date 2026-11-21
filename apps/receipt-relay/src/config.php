@@ -6,9 +6,9 @@ declare(strict_types=1);
  * Endpoints are fixed templates: the caller supplies a reference, never a URL.
  * Keep the byte caps and timeouts in line with apps/api's receipt client.
  */
-return [
+$config = [
     'app' => 'bingo-receipt-relay',
-    'version' => '1.1.0',
+    'version' => '2.0.0',
     'user_agent' => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
     'providers' => [
         'telebirr' => [
@@ -44,4 +44,17 @@ return [
         'enabled' => true,
         'per_ip_per_minute' => 30,
     ],
+    'database' => [],
+    'admin_bootstrap_username' => '',
+    'admin_bootstrap_password' => '',
 ];
+
+$localConfigPath = __DIR__ . '/config.local.php';
+if (is_file($localConfigPath)) {
+    $localConfig = require $localConfigPath;
+    if (is_array($localConfig)) {
+        $config = array_replace_recursive($config, $localConfig);
+    }
+}
+
+return $config;

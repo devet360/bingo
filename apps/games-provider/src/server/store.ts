@@ -51,6 +51,9 @@ export interface DashboardMetrics {
 export interface Store {
   getOperator(code: string): Promise<OperatorRecord | null>;
   upsertOperator(operator: OperatorRecord): Promise<void>;
+  deleteOperatorIfUnused(
+    code: string,
+  ): Promise<'DELETED' | 'NOT_FOUND' | 'NOT_SUSPENDED' | 'HAS_HISTORY'>;
   listOperators(): Promise<OperatorRecord[]>;
   listOperatorSecrets(operatorCode: string): Promise<OperatorSecretRecord[]>;
   addOperatorSecret(operatorCode: string, secret: string): Promise<OperatorSecretRecord>;

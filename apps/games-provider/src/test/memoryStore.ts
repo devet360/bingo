@@ -56,6 +56,24 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): MemoryStore
     async upsertOperator(operator) {
       operators.set(operator.code, clone(operator));
     },
+    async deleteOperatorIfUnused(code) {
+      const operator = operators.get(code);
+      if (!operator) return 'NOT_FOUND';
+      if (operator.status !== 'SUSPENDED') return 'NOT_SUSPENDED';
+      if (
+        [...sessions.values()].some((row) => row.operatorCode === code)
+        || [...rounds.values()].some((row) => row.operatorCode === code)
+        || [...bets.values()].some((row) => row.operatorCode === code)
+        || [...outbox.values()].some((row) => row.operatorCode === code)
+      ) {
+        return 'HAS_HISTORY';
+      }
+      operators.delete(code);
+      for (const [key, row] of operatorSecrets) {
+        if (row.operatorCode === code) operatorSecrets.delete(key);
+      }
+      return 'DELETED';
+    },
     async listOperators() {
       return [...operators.values()].map(clone);
     },

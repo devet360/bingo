@@ -232,6 +232,35 @@ export function createPostgresStore(db: Database): Store {
           },
         });
     },
+    async deleteOperatorIfUnused(code) {
+      return db.transaction(async (tx) => {
+        const [operator] = await tx
+          .select({ code: operators.code, status: operators.status })
+          .from(operators)
+          .where(eq(operators.code, code))
+          .for('update');
+        if (!operator) return 'NOT_FOUND';
+        if (operator.status !== 'SUSPENDED') return 'NOT_SUSPENDED';
+
+        const [sessionRows, roundRows, betRows, outboxRows] = await Promise.all([
+          tx.select({ total: count() }).from(sessions).where(eq(sessions.operatorCode, code)),
+          tx.select({ total: count() }).from(rounds).where(eq(rounds.operatorCode, code)),
+          tx.select({ total: count() }).from(bets).where(eq(bets.operatorCode, code)),
+          tx.select({ total: count() }).from(walletOutbox).where(eq(walletOutbox.operatorCode, code)),
+        ]);
+        if (
+          (sessionRows[0]?.total ?? 0) > 0
+          || (roundRows[0]?.total ?? 0) > 0
+          || (betRows[0]?.total ?? 0) > 0
+          || (outboxRows[0]?.total ?? 0) > 0
+        ) {
+          return 'HAS_HISTORY';
+        }
+
+        await tx.delete(operators).where(eq(operators.code, code));
+        return 'DELETED';
+      });
+    },
     async listOperators() {
       const rows = await db.select().from(operators).orderBy(asc(operators.code));
       return rows.map(toOperatorRecord);

@@ -121,6 +121,23 @@ export async function setOperatorStatus(store: Store, code: string, status: Oper
   return next;
 }
 
+export async function deleteOperator(store: Store, code: string): Promise<void> {
+  const result = await store.deleteOperatorIfUnused(code);
+  if (result === 'NOT_FOUND') {
+    throw new OperatorError(404, 'OPERATOR_NOT_FOUND', `Unknown operator ${code}`);
+  }
+  if (result === 'NOT_SUSPENDED') {
+    throw new OperatorError(409, 'SUSPEND_REQUIRED', 'Suspend the operator before deleting it');
+  }
+  if (result === 'HAS_HISTORY') {
+    throw new OperatorError(
+      409,
+      'OPERATOR_HAS_HISTORY',
+      'This operator has sessions or financial history and cannot be deleted; keep it suspended instead',
+    );
+  }
+}
+
 /**
  * Signs and sends one probe to the operator's callback URL. A 2xx answer proves
  * the peer holds the shared secret, so the probe timestamp is recorded and the

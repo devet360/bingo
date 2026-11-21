@@ -254,6 +254,13 @@ test('a reference already attached to a deposit is reported', async () => {
 });
 
 test('a relay-enabled rail is checked through the Ethio Telecom relay', async () => {
+  const prior = {
+    url: process.env.RECEIPT_RELAY_URL,
+    key: process.env.RECEIPT_RELAY_API_KEY,
+    secret: process.env.RECEIPT_RELAY_API_SECRET,
+  };
+  process.env.RECEIPT_RELAY_API_KEY = 'rk_test';
+  process.env.RECEIPT_RELAY_API_SECRET = 'rs_test';
   process.env.RECEIPT_RELAY_URL = 'https://relay.example.test';
   try {
     const { checkReceipt } = await import('../src/services/receipts/checker');
@@ -274,11 +281,23 @@ test('a relay-enabled rail is checked through the Ethio Telecom relay', async ()
     assert.equal(calls.verify, 0);
     assert.equal(calls.verifyPayload, 0);
   } finally {
-    delete process.env.RECEIPT_RELAY_URL;
+    if (prior.url === undefined) delete process.env.RECEIPT_RELAY_URL;
+    else process.env.RECEIPT_RELAY_URL = prior.url;
+    if (prior.key === undefined) delete process.env.RECEIPT_RELAY_API_KEY;
+    else process.env.RECEIPT_RELAY_API_KEY = prior.key;
+    if (prior.secret === undefined) delete process.env.RECEIPT_RELAY_API_SECRET;
+    else process.env.RECEIPT_RELAY_API_SECRET = prior.secret;
   }
 });
 
 test('a relay failure still returns the open-the-link message', async () => {
+  const prior = {
+    url: process.env.RECEIPT_RELAY_URL,
+    key: process.env.RECEIPT_RELAY_API_KEY,
+    secret: process.env.RECEIPT_RELAY_API_SECRET,
+  };
+  process.env.RECEIPT_RELAY_API_KEY = 'rk_test';
+  process.env.RECEIPT_RELAY_API_SECRET = 'rs_test';
   process.env.RECEIPT_RELAY_URL = 'https://relay.example.test';
   try {
     const { checkReceipt } = await import('../src/services/receipts/checker');
@@ -301,7 +320,12 @@ test('a relay failure still returns the open-the-link message', async () => {
     assert.equal(calls.relay, 1);
     assert.equal(calls.verify, 0);
   } finally {
-    delete process.env.RECEIPT_RELAY_URL;
+    if (prior.url === undefined) delete process.env.RECEIPT_RELAY_URL;
+    else process.env.RECEIPT_RELAY_URL = prior.url;
+    if (prior.key === undefined) delete process.env.RECEIPT_RELAY_API_KEY;
+    else process.env.RECEIPT_RELAY_API_KEY = prior.key;
+    if (prior.secret === undefined) delete process.env.RECEIPT_RELAY_API_SECRET;
+    else process.env.RECEIPT_RELAY_API_SECRET = prior.secret;
   }
 });
 

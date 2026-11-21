@@ -20,6 +20,9 @@ const dataArrayRef = (name: string) => ({
   properties: { data: { type: 'array', items: { $ref: `#/components/schemas/${name}` } } },
 });
 
+const providerAdminOk = (schema: Record<string, unknown> = { type: 'object' }) =>
+  ok({ type: 'object', properties: { data: schema } });
+
 const idParam = (name: string) => ({
   name,
   in: 'path',
@@ -2696,6 +2699,147 @@ export const openApiDocument = {
         tags: ['Admin'],
         summary: 'Provider catalog with games',
         responses: { '200': ok(dataArrayRef('GameProvider')) },
+      },
+    },
+    '/admin/provider-management/{hostCode}/dashboard': {
+      get: {
+        tags: ['Admin'],
+        summary: 'Read Games Provider operational metrics',
+        description: 'Proxies to a configured Games Provider deployment using a short-lived server-side provider-console token.',
+        parameters: [idParam('hostCode')],
+        responses: { '200': providerAdminOk(), '502': errorResponse('PROVIDER_ADMIN_UNAVAILABLE') },
+      },
+    },
+    '/admin/provider-management/{hostCode}/operators': {
+      get: {
+        tags: ['Admin'],
+        summary: 'List operators on a Games Provider deployment',
+        parameters: [idParam('hostCode')],
+        responses: { '200': providerAdminOk({ type: 'array', items: { type: 'object' } }), '502': errorResponse('PROVIDER_ADMIN_UNAVAILABLE') },
+      },
+      post: {
+        tags: ['Admin'],
+        summary: 'Create a Games Provider operator and link its callback secret to Bingo',
+        description: 'The secret is synchronized server-side and is never returned to the browser. The operator starts PENDING.',
+        parameters: [idParam('hostCode')],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                required: ['code', 'name', 'callbackUrl', 'allowedOrigins'],
+                properties: {
+                  code: { type: 'string', pattern: '^[a-z0-9_-]{2,32}$' },
+                  name: { type: 'string', minLength: 1, maxLength: 120 },
+                  callbackUrl: { type: 'string', format: 'uri' },
+                  allowedOrigins: { type: 'array', minItems: 1, maxItems: 32, items: { type: 'string', format: 'uri' } },
+                  currency: { type: 'string', pattern: '^[A-Za-z]{3}$' },
+                  localeDefault: { type: 'string', enum: ['en', 'am'] },
+                  limits: { type: 'object', properties: { minStake: money, maxStake: money, maxWin: money, maxBetsPerRound: { type: 'integer', minimum: 1 } } },
+                  enabledGames: { type: 'array', minItems: 1, items: { type: 'string' } },
+                  theme: { type: 'object', nullable: true },
+                  botConfig: { type: 'object' },
+                },
+              },
+            },
+          },
+        },
+        responses: { '201': providerAdminOk(), '400': errorResponse('VALIDATION_ERROR'), '409': errorResponse('BINGO_PROVIDER_CODE_IN_USE'), '502': errorResponse('PROVIDER_LINK_SYNC_FAILED') },
+      },
+    },
+    '/admin/provider-management/{hostCode}/operators/{operatorCode}': {
+      parameters: [idParam('hostCode'), idParam('operatorCode')],
+      get: {
+        tags: ['Admin'],
+        summary: 'Read a Games Provider operator and secret metadata',
+        responses: { '200': providerAdminOk(), '404': errorResponse('OPERATOR_NOT_FOUND'), '502': errorResponse('PROVIDER_ADMIN_UNAVAILABLE') },
+      },
+      patch: {
+        tags: ['Admin'],
+        summary: 'Update a linked Games Provider operator',
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                properties: {
+                  name: { type: 'string' },
+                  callbackUrl: { type: 'string', format: 'uri' },
+                  allowedOrigins: { type: 'array', items: { type: 'string', format: 'uri' } },
+                  localeDefault: { type: 'string', enum: ['en', 'am'] },
+                  limits: { type: 'object', properties: { minStake: money, maxStake: money, maxWin: money, maxBetsPerRound: { type: 'integer', minimum: 1 } } },
+                  enabledGames: { type: 'array', items: { type: 'string' } },
+                  theme: { type: 'object', nullable: true },
+                  maintenance: { type: 'boolean' },
+                  botConfig: { type: 'object' },
+                },
+              },
+            },
+          },
+        },
+        responses: { '200': providerAdminOk(), '400': errorResponse('VALIDATION_ERROR'), '409': errorResponse('PROVIDER_LINK_REQUIRED'), '502': errorResponse('PROVIDER_ADMIN_UNAVAILABLE') },
+      },
+      delete: {
+        tags: ['Admin'],
+        summary: 'Delete an operator only when suspended and without history',
+        responses: { '200': providerAdminOk(), '404': errorResponse('OPERATOR_NOT_FOUND'), '409': errorResponse('SUSPEND_REQUIRED / OPERATOR_HAS_HISTORY'), '502': errorResponse('PROVIDER_ADMIN_UNAVAILABLE') },
+      },
+    },
+    '/admin/provider-management/{hostCode}/operators/{operatorCode}/probe': {
+      post: {
+        tags: ['Admin'],
+        summary: 'Probe the operator callback',
+        parameters: [idParam('hostCode'), idParam('operatorCode')],
+        responses: { '200': providerAdminOk(), '502': errorResponse('PROVIDER_ADMIN_UNAVAILABLE') },
+      },
+    },
+    '/admin/provider-management/{hostCode}/operators/{operatorCode}/status': {
+      post: {
+        tags: ['Admin'],
+        summary: 'Change operator status and synchronize Bingo enablement',
+        parameters: [idParam('hostCode'), idParam('operatorCode')],
+        requestBody: {
+          required: true,
+          content: { 'application/json': { schema: { type: 'object', required: ['status'], properties: { status: { type: 'string', enum: ['PENDING', 'ACTIVE', 'SUSPENDED'] } } } } },
+        },
+        responses: { '200': providerAdminOk(), '400': errorResponse('VALIDATION_ERROR'), '409': errorResponse('PROVIDER_LINK_REQUIRED'), '502': errorResponse('PROVIDER_ADMIN_UNAVAILABLE') },
+      },
+    },
+    '/admin/provider-management/{hostCode}/operators/{operatorCode}/secrets': {
+      post: {
+        tags: ['Admin'],
+        summary: 'Rotate the operator callback secret and synchronize it with Bingo',
+        description: 'Bingo keeps the previous callback secret for overlap. Probe successfully before retiring it.',
+        parameters: [idParam('hostCode'), idParam('operatorCode')],
+        responses: { '201': providerAdminOk(), '502': errorResponse('PROVIDER_SECRET_SYNC_FAILED') },
+      },
+    },
+    '/admin/provider-management/{hostCode}/operators/{operatorCode}/secrets/retire-previous': {
+      post: {
+        tags: ['Admin'],
+        summary: 'Retire the previous callback secret after a successful probe',
+        parameters: [idParam('hostCode'), idParam('operatorCode')],
+        responses: { '200': providerAdminOk(), '409': errorResponse('PREVIOUS_SECRET_NOT_FOUND / PROVIDER_SECRET_VERSION_INVALID'), '502': errorResponse('PROVIDER_ADMIN_UNAVAILABLE') },
+      },
+    },
+    '/admin/provider-management/{hostCode}/runtime-settings': {
+      get: {
+        tags: ['Admin'],
+        summary: 'Read owner operator game and simulation settings',
+        parameters: [idParam('hostCode')],
+        responses: { '200': providerAdminOk(), '403': errorResponse('PROVIDER_OWNER_REQUIRED'), '502': errorResponse('PROVIDER_ADMIN_UNAVAILABLE') },
+      },
+      put: {
+        tags: ['Admin'],
+        summary: 'Update owner operator game and simulation settings',
+        parameters: [idParam('hostCode')],
+        requestBody: {
+          required: true,
+          content: { 'application/json': { schema: { type: 'object', required: ['botConfig', 'enabledGames'], properties: { botConfig: { type: 'object' }, enabledGames: { type: 'array', minItems: 1, items: { type: 'string', enum: ['crash', 'coinflip'] } } } } } },
+        },
+        responses: { '200': providerAdminOk(), '400': errorResponse('VALIDATION_ERROR'), '403': errorResponse('PROVIDER_OWNER_REQUIRED'), '502': errorResponse('PROVIDER_ADMIN_UNAVAILABLE') },
       },
     },
     '/admin/game-providers/games/{gameId}/test-launch': {

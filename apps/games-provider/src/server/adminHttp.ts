@@ -4,6 +4,7 @@ import { ZodError, z } from 'zod';
 import type { OperatorRecord, OperatorSecretRecord, OperatorStatus } from '../domain/types';
 import {
   createOperator,
+  deleteOperator,
   runProbe,
   setOperatorStatus,
   updateOperator,
@@ -331,6 +332,11 @@ export function adminRouter(deps: {
   router.post(
     '/operators',
     route(async (req, res) => {
+      const scope = res.locals.consoleScope as ConsoleScope | undefined;
+      if (scope && scope.role !== 'superadmin') {
+        res.status(403).json({ error: { code: 'SUPERADMIN_REQUIRED' } });
+        return;
+      }
       const input = CreateOperatorSchema.parse(req.body);
       const created = await createOperator(deps.store, deps.registry, input);
       const secrets = await deps.store.listOperatorSecrets(created.operator.code);
@@ -353,6 +359,19 @@ export function adminRouter(deps: {
     }),
   );
 
+  router.delete(
+    '/operators/:code',
+    route(async (req, res) => {
+      const scope = res.locals.consoleScope as ConsoleScope | undefined;
+      if (scope && scope.role !== 'superadmin') {
+        res.status(403).json({ error: { code: 'SUPERADMIN_REQUIRED' } });
+        return;
+      }
+      await deleteOperator(deps.store, req.params.code);
+      res.json({ data: { deleted: true } });
+    }),
+  );
+
   // Rotation returns the new secret exactly once, shaped like createOperator.
   router.post(
     '/operators/:code/secrets',
@@ -367,6 +386,27 @@ export function adminRouter(deps: {
           secretVersion: rotated.version,
         },
       });
+    }),
+  );
+
+  router.post(
+    '/operators/:code/secrets/:version/retire',
+    route(async (req, res) => {
+      const version = Number(req.params.version);
+      if (!Number.isSafeInteger(version) || version < 1) {
+        throw new OperatorError(400, 'SECRET_VERSION_INVALID', 'Secret version must be a positive integer');
+      }
+      const active = (await deps.store.listOperatorSecrets(req.params.code))
+        .filter((secret) => secret.retiredAt === null)
+        .sort((left, right) => right.version - left.version);
+      if (!active.some((secret) => secret.version === version)) {
+        throw new OperatorError(404, 'SECRET_NOT_ACTIVE', `Active secret version ${version} was not found`);
+      }
+      if (active.length < 2 || active[0]!.version === version) {
+        throw new OperatorError(409, 'SECRET_RETIRE_UNSAFE', 'Keep the newest active secret and at least one active version');
+      }
+      await deps.store.retireOperatorSecret(req.params.code, version);
+      res.json({ data: { retired: true, version } });
     }),
   );
 

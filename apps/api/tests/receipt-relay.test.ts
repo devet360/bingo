@@ -279,15 +279,73 @@ test('relay text refuses a payload larger than the text cap', async () => {
 });
 
 test('relay covers only the geo-blocked rails', () => {
+  const prior = {
+    url: process.env.RECEIPT_RELAY_URL,
+    key: process.env.RECEIPT_RELAY_API_KEY,
+    secret: process.env.RECEIPT_RELAY_API_SECRET,
+  };
+  process.env.RECEIPT_RELAY_API_KEY = 'rk_test';
+  process.env.RECEIPT_RELAY_API_SECRET = 'rs_test';
   process.env.RECEIPT_RELAY_URL = 'https://relay.example.test/';
   try {
     assert.equal(relayEnabled(provider('telebirr')), true);
     assert.equal(relayEnabled(provider('mpesa')), true);
     assert.equal(relayEnabled(provider('cbe', { method: PaymentMethod.BANK_TRANSFER, geoBlocked: false })), false);
   } finally {
-    delete process.env.RECEIPT_RELAY_URL;
+    if (prior.url === undefined) delete process.env.RECEIPT_RELAY_URL;
+    else process.env.RECEIPT_RELAY_URL = prior.url;
+    if (prior.key === undefined) delete process.env.RECEIPT_RELAY_API_KEY;
+    else process.env.RECEIPT_RELAY_API_KEY = prior.key;
+    if (prior.secret === undefined) delete process.env.RECEIPT_RELAY_API_SECRET;
+    else process.env.RECEIPT_RELAY_API_SECRET = prior.secret;
   }
   assert.equal(relayEnabled(provider('telebirr')), false);
+});
+
+test('relay calls authenticate and report final status without storing the reference', async () => {
+  const prior = {
+    url: process.env.RECEIPT_RELAY_URL,
+    key: process.env.RECEIPT_RELAY_API_KEY,
+    secret: process.env.RECEIPT_RELAY_API_SECRET,
+  };
+  process.env.RECEIPT_RELAY_URL = 'https://relay.example.test';
+  process.env.RECEIPT_RELAY_API_KEY = 'rk_test';
+  process.env.RECEIPT_RELAY_API_SECRET = 'rs_test';
+  const calls: Array<{ url: string; init?: RequestInit }> = [];
+  const fake: RelayFetch = async (input, init) => {
+    const url = String(input);
+    calls.push({ url, init });
+    if (url.endsWith('/events/verification')) return jsonResponse({ ok: true }, 202);
+    return textResponse(TELEBIRR_TEXT, 'ABC1234567');
+  };
+
+  try {
+    const outcome = await verifyViaRelay(
+      provider('telebirr'),
+      { reference: 'ABC1234567' },
+      'RELAY',
+      fake,
+    );
+    assert.equal(outcome.status, 'VERIFIED');
+    assert.equal(calls.length, 2);
+    for (const call of calls) {
+      const headers = new Headers(call.init?.headers);
+      assert.equal(headers.get('X-API-Key'), 'rk_test');
+      assert.equal(headers.get('X-API-Secret'), 'rs_test');
+    }
+    assert.equal(calls[1].init?.method, 'POST');
+    assert.deepEqual(JSON.parse(String(calls[1].init?.body)), {
+      provider: 'telebirr',
+      status: 'VERIFIED',
+    });
+  } finally {
+    if (prior.url === undefined) delete process.env.RECEIPT_RELAY_URL;
+    else process.env.RECEIPT_RELAY_URL = prior.url;
+    if (prior.key === undefined) delete process.env.RECEIPT_RELAY_API_KEY;
+    else process.env.RECEIPT_RELAY_API_KEY = prior.key;
+    if (prior.secret === undefined) delete process.env.RECEIPT_RELAY_API_SECRET;
+    else process.env.RECEIPT_RELAY_API_SECRET = prior.secret;
+  }
 });
 
 test('relay requests never leave the configured base URL unencoded', async () => {

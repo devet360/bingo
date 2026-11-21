@@ -142,8 +142,17 @@ async function main() {
       console.log(`operator ${data.code} status ${data.status}`);
       return;
     }
+    case 'delete': {
+      const code = flag('code');
+      if (!code || flag('confirm') !== code) {
+        throw new Error('delete requires --code and --confirm with the same operator code');
+      }
+      await call(`/api/admin/operators/${encodeURIComponent(code)}`, 'DELETE');
+      console.log(`operator ${code} deleted`);
+      return;
+    }
     default:
-      throw new Error('usage: operator <list|create|update|rotate-secret|probe|activate|suspend> [--code ...]');
+      throw new Error('usage: operator <list|create|update|rotate-secret|probe|activate|suspend|delete> [--code ...]');
   }
 }
 

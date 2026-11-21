@@ -13,6 +13,30 @@ const HMAC_SECRET = 'test-hmac-secret-value';
 const fakeBingo = (options: Partial<FakeBingoOptions> = {}) =>
   createFakeBingo({ hmacSecret: HMAC_SECRET, balance: 0n, currency: 'ETB', operatorCode: OPERATOR_CODE, ...options });
 
+test('OpenAPI JSON and bundled Swagger UI are publicly available', async (t) => {
+  const fake = await fakeBingo();
+  const { server, base } = await boot(fake);
+  t.after(async () => {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await fake.close();
+  });
+
+  const specResponse = await fetch(`${base}/api/docs/openapi.json`);
+  assert.equal(specResponse.status, 200);
+  const spec = await specResponse.json();
+  assert.equal(spec.openapi, '3.0.3');
+  assert.ok(spec.paths['/api/admin/operators/{code}'].delete);
+  assert.ok(spec.paths['/api/admin/operators/{code}/secrets/{version}/retire']);
+  assert.ok(spec.components.securitySchemes.providerConsoleToken);
+
+  const docs = await fetch(`${base}/api/docs`);
+  assert.equal(docs.status, 200);
+  assert.match(await docs.text(), /swagger-ui-bundle\.js/);
+  const bundle = await fetch(`${base}/api/docs/assets/swagger-ui-bundle.js`);
+  assert.equal(bundle.status, 200);
+  assert.match(bundle.headers.get('content-type') ?? '', /javascript/);
+});
+
 async function boot(fake: Awaited<ReturnType<typeof createFakeBingo>>, env: NodeJS.ProcessEnv = {}) {
   const config = loadConfig({
     DATABASE_URL: 'postgres://x',

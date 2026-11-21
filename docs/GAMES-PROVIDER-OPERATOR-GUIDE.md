@@ -18,15 +18,19 @@ The callback code is significant: `OPERATOR_CODE` must match the provider code
 in the callback URL and in the Bingo **Admin → Games** provider record. The
 signature covers this code as well as the raw request body.
 
-For the Bingo super-admin embedded dashboard:
+For the Bingo super-admin provider dashboard:
 
 - Set the same `CONSOLE_TOKEN_SECRET` (at least 32 characters) on the Bingo API
   and Games Provider.
 - Add the Bingo web application's origin to `ALLOWED_PARENT_ORIGINS` on the
-  Games Provider, for example `https://app.example.com`. This lets the provider
-  console be embedded by that site.
+  Games Provider, for example `https://app.example.com`, if you use the legacy
+  embedded console.
 - Keep `PROVIDER_ADMIN_TOKEN` as a separate, long random CLI bootstrap token.
   Do not put it in a browser or expose it to operators.
+- The interactive provider API reference is available at
+  `https://<games-provider-host>/api/docs`; its OpenAPI JSON is at
+  `/api/docs/openapi.json`. These routes do not need an additional environment
+  variable.
 
 ## 2. Create an operator
 
@@ -117,11 +121,14 @@ exists. In staging, verify all of the following before enabling public games:
 
 ## 5. Use the provider dashboard
 
-In Bingo web, open **Super Admin → Provider dashboard**, choose the registered
-Games Provider, and refresh as needed. The dashboard is embedded from the
-provider deployment and uses a short-lived token scoped to the provider owner.
-It shows operator status, active sessions, recent rounds, unsettled bets, and
-pending or terminal wallet outbox deliveries.
+In Bingo web, open **Super Admin → Provider dashboard**. The native pages are
+directly addressable at `/admin/provider/overview`,
+`/admin/provider/operators`, `/admin/provider/settings`, and
+`/admin/provider/test-player`. Choose the registered Games Provider connection.
+The Bingo API proxies requests to the provider using a short-lived server-side
+superadmin token; no provider bootstrap token is sent to the browser. The
+dashboard shows operator status, active sessions, recent rounds, unsettled
+bets, and pending or terminal wallet outbox deliveries.
 
 The owner dashboard also controls the bootstrap operator's enabled game IDs and
 simulation bot settings. Changes are persisted and apply to the next crash round.
