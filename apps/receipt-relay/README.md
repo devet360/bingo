@@ -40,6 +40,9 @@ URL, and the two endpoint templates are fixed in `src/config.php`.
 
 1. In Plesk, create a MySQL database and database user. Grant that user access
    to the new database. Use phpMyAdmin to import `database/schema.sql`.
+   If the dashboard bootstrap does not create its first account, run
+   `database/create-superadmin.sql` in phpMyAdmin's SQL tab. It creates or
+   resets the `id = 1` super-admin account.
 2. Upload this folder and set the domain's **document root to `public/`**.
    Confirm the domain uses PHP 8.1+ and enables `curl`, `zlib`, `iconv`,
    `mbstring`, and `pdo_mysql`.
