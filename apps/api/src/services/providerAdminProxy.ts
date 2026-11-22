@@ -4,6 +4,7 @@ import { prisma } from '../lib/prisma';
 import { AppError, Errors } from '../lib/errors';
 import { env } from '../config/env';
 import { upsertProvider } from './gameProviders';
+import { resolveProviderApiUrl } from '../lib/providerContract';
 
 type ProviderAdminMethod = 'GET' | 'POST' | 'PATCH' | 'DELETE' | 'PUT';
 
@@ -83,7 +84,7 @@ export async function providerAdminRequest<T = unknown>(
     throw Errors.internal('Invalid Games Provider admin path');
   }
   const host = await getProviderHost(input.hostCode);
-  const url = new URL(input.path.slice(1), providerBaseUrl(host.apiBaseUrl));
+  const url = resolveProviderApiUrl(providerBaseUrl(host.apiBaseUrl).toString(), input.path);
   let response: Response;
   try {
     response = await fetch(url, {
@@ -115,6 +116,13 @@ export async function providerAdminRequest<T = unknown>(
     const code = remoteError && 'code' in remoteError && typeof remoteError.code === 'string'
       ? remoteError.code
       : 'PROVIDER_ADMIN_ERROR';
+    if (response.status === 404 && code === 'PROVIDER_ADMIN_ERROR') {
+      throw new AppError(
+        502,
+        'PROVIDER_ADMIN_ENDPOINT_MISSING',
+        'The configured Games Provider URL did not expose this admin endpoint. Check its API base URL and deploy the current Games Provider version.',
+      );
+    }
     const message = remoteError && 'message' in remoteError && typeof remoteError.message === 'string'
       ? remoteError.message.slice(0, 300)
       : `Games Provider returned HTTP ${response.status}`;

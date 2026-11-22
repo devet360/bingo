@@ -68,9 +68,13 @@ the configured operator records.
 
 In the Bingo web **Super Admin → Games** page:
 
-1. Add a provider with code `bingo251` (the same value as `--code` above),
-   the Games Provider public base URL, currency `ETB`, and the same webhook
-   secret returned by the CLI.
+1. Add or use the Bingo provider integration with code `bingo251` (the same
+   value as the Games Provider operator code), the Games Provider public base
+   URL, currency `ETB`, and the matching webhook secret. The deployment/host
+   label (for example `stratos`) is not the operator code. Each operator needs
+   its own Bingo provider integration code so callback signatures and game
+   launch URLs use the correct tenant. The native provider dashboard links a
+   newly created operator into Bingo automatically.
 2. Select each enabled provider game from the **Available provider game**
    selector. Bingo fills in the provider's default game ID, name, category and
    thumbnail. The name and thumbnail URL remain editable; upload a PNG, JPEG or
@@ -92,10 +96,10 @@ In the Bingo web **Super Admin → Games** page:
    Provider dashboard first. Test rounds use that account's configured
    starting balance and cannot deposit or withdraw.
 
-If the provider was created with code `stratos`, use `stratos` consistently for
-the Games Provider operator code, callback path, and Bingo provider code. Do
-not mix identifiers: the HMAC signature is scoped to the callback provider
-code.
+Use the operator code consistently for the Games Provider tenant, Bingo
+provider integration, callback path, and generated launch URL. The Games
+Provider deployment URL can be shared by multiple Bingo provider integrations;
+do not use the deployment label in place of the tenant code.
 
 ## 4. Probe, activate, and test
 

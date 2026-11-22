@@ -8,6 +8,13 @@ export interface LaunchContext {
   game?: string;
 }
 
+export function resolveProviderApiUrl(apiBaseUrl: string, endpointPath: string): URL {
+  if (!endpointPath.startsWith('/')) {
+    throw new Error('Provider endpoint paths must be root-relative.');
+  }
+  return new URL(endpointPath, apiBaseUrl);
+}
+
 export function buildDefaultLaunchUrlTemplate(
   apiBaseUrl: string | null,
   operator: string,

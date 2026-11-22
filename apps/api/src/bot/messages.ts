@@ -10,7 +10,9 @@ interface BotCopy {
   welcomeBack: string;
   shareContactButton: string;
   playButton: string;
+  playPrompt: string;
   contactSaved: (phone: string) => string;
+  contactVerified: string;
   contactButtonHint: string;
   help: string;
   notOwnContact: string;
@@ -33,8 +35,10 @@ export const botCopy: Record<BotLocale, BotCopy> = {
     welcomeBack: 'Welcome back! Your number is verified — tap below to enter the hall.',
     shareContactButton: 'Share my number',
     playButton: 'Play Bingo',
+    playPrompt: 'Tap the button below to enter the hall.',
     contactSaved: (phone) =>
       `Your number ${phone} is verified. You can now play. Winnings are credited to your in-game wallet.`,
+    contactVerified: 'Your phone number is verified.',
     contactButtonHint: 'Tap “Share my number” below so we can verify you.',
     help:
       'Bingo 251 is a real-time bingo game.\n\n/start — open the game\n/verify — re-verify your phone number\n/dashboard — staff and agents: open your console\n/help — this message',
@@ -56,8 +60,10 @@ export const botCopy: Record<BotLocale, BotCopy> = {
     welcomeBack: 'እንኳን ደግመው መጡ! ቁጥርዎ ተረጋግጧል — ለመግባት ከታች ይጫኑ።',
     shareContactButton: 'ስልክ ቁጥሬን አጋራ',
     playButton: 'ቢንጎ ተጫወት',
+    playPrompt: 'ወደ አዳራሹ ለመግባት ከታች ያለውን አዝራር ይጫኑ።',
     contactSaved: (phone) =>
       `ቁጥርዎ ${phone} ተረጋግጧል። አሁን መጫወት ይችላሉ። የሚያሸንፉት ገንዘብ በጨዋታ ቦርሳዎ ውስጥ ይቀመጣል።`,
+    contactVerified: 'የስልክ ቁጥርዎ ተረጋግጧል።',
     contactButtonHint: 'ማንነትዎን ለማረጋገጥ ከታች “ስልክ ቁጥሬን አጋራ” የሚለውን ይጫኑ።',
     help:
       'ቢንጎ አዳራሽ የቀጥታ ቢንጎ ጨዋታ ነው።\n\n/start — ጨዋታውን ይክፈቱ\n/verify — ስልክ ቁጥርዎን እንደገና ያረጋግጡ\n/dashboard — ሰራተኞችና ወኪሎች፦ ኮንሶልዎን ይክፈቱ\n/help — ይህ መልእክት',

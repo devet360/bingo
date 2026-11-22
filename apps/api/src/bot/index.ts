@@ -200,15 +200,21 @@ bot.on('message:contact', async (ctx) => {
     );
     const savedLocale = resolveBotLocale(sender.language_code, user.locale);
     if (user.role !== 'PLAYER') {
+      await ctx.reply(botCopy[savedLocale].contactVerified, {
+        reply_markup: { remove_keyboard: true, selective: true },
+      });
       await openDashboard(ctx, savedLocale, user.role, botCopy[savedLocale].staffWelcome);
       return;
     }
     const keyboard = playKeyboard(savedLocale);
     const text = botCopy[savedLocale].contactSaved(user.phone ?? contact.phone_number);
+    await ctx.reply(text, {
+      reply_markup: { remove_keyboard: true, selective: true },
+    });
     if (keyboard) {
-      await ctx.reply(text, { reply_markup: keyboard });
+      await ctx.reply(botCopy[savedLocale].playPrompt, { reply_markup: keyboard });
     } else {
-      await ctx.reply(`${text}\n\n${botCopy[savedLocale].appNotConfigured}`);
+      await ctx.reply(botCopy[savedLocale].appNotConfigured);
     }
   } catch (error) {
     if (error instanceof AppError && error.code === 'PHONE_TAKEN') {

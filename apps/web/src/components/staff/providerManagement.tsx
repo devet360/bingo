@@ -154,7 +154,9 @@ export function ProviderManagement({ preferredProviderCode }: { preferredProvide
           <Select label="Games Provider deployment" value={hostCode} onChange={(event) => changeHost(event.target.value)}>
             {providers.map((item) => <option key={item.code} value={item.code}>{item.name} ({item.code})</option>)}
           </Select>
-          <p className="mt-1 text-[11px] text-muted">Provider control requests use short-lived, server-side scoped tokens.</p>
+          <p className="mt-1 text-[11px] text-muted">
+            This selects the Games Provider deployment, not its operator code. Create or choose the tenant code separately (for example, deployment <code>stratos</code> can host operator <code>bingo251</code>). Requests use short-lived, server-side scoped tokens.
+          </p>
         </div>
         <div className="flex flex-wrap gap-2">
           <Link className="rounded-xl border border-line px-3 py-2 text-xs font-semibold hover:bg-raised" href={href('overview')}>Overview</Link>

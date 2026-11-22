@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
-import { buildBalanceReply, buildDefaultLaunchUrlTemplate, buildLaunchUrl, isPlayableLaunchUrl, movementRequiresOpenSession, publicProviderConfig, withBalance } from '../src/lib/providerContract';
+import { buildBalanceReply, buildDefaultLaunchUrlTemplate, buildLaunchUrl, isPlayableLaunchUrl, movementRequiresOpenSession, publicProviderConfig, resolveProviderApiUrl, withBalance } from '../src/lib/providerContract';
 import { ProviderProbeSchema } from '../src/lib/providerCallback';
 
 // The provider services pull in env/prisma at import time; provide dummy values
@@ -52,6 +52,14 @@ test('default launch url is built from the provider URL and external game config
   );
   assert.equal(buildDefaultLaunchUrlTemplate(null, 'partner01', 'crash'), null);
   assert.equal(buildDefaultLaunchUrlTemplate('ftp://games.example.com', 'partner01', 'crash'), null);
+});
+
+test('provider API endpoints resolve from the host root even when the configured URL has a path', () => {
+  assert.equal(
+    resolveProviderApiUrl('https://games.example.com/api/v2/', '/api/admin/operators').toString(),
+    'https://games.example.com/api/admin/operators',
+  );
+  assert.throws(() => resolveProviderApiUrl('https://games.example.com', 'api/admin/operators'));
 });
 
 test('launch url is null without a template and encodes the token', () => {

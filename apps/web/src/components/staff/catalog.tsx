@@ -464,7 +464,7 @@ function ProviderSheet({
             value={draft.code}
             onChange={(event) => patch({ code: event.target.value.toLowerCase() })}
             disabled={Boolean(provider)}
-            hint="Used in the callback URL."
+            hint="This is the tenant/operator code; it must match the Games Provider operator and is used in the callback and launch URLs."
           />
           <Input label="Name" value={draft.name} onChange={(event) => patch({ name: event.target.value })} />
           <Select
@@ -771,9 +771,9 @@ function GameSheet({
           />
         </label>
         <p className="rounded-xl border border-line bg-raised/50 px-3 py-2 text-[11px] leading-relaxed text-muted">
-          The launch URL is generated from the provider API base URL, this provider’s code,
-          the external game ID, and the session details. Configure the base URL in the
-          provider settings.
+          The launch URL is generated from the Games Provider API base URL, this Bingo
+          integration’s code (which must match the Games Provider operator), the external
+          game ID, and the session details.
         </p>
         <details className="rounded-xl border border-line px-3 py-2">
           <summary className="cursor-pointer text-xs font-semibold text-text">
