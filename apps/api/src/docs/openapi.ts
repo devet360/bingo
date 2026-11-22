@@ -2720,7 +2720,7 @@ export const openApiDocument = {
       post: {
         tags: ['Admin'],
         summary: 'Create a Games Provider operator and link its callback secret to Bingo',
-        description: 'The secret is synchronized server-side and is never returned to the browser. The operator starts PENDING.',
+        description: 'Bingo derives the callback URL from the API host and allowed web origins from CORS_ORIGINS. The Games Provider generates the signing secret; Bingo synchronizes it server-side and never returns it to the browser. The operator starts PENDING.',
         parameters: [idParam('hostCode')],
         requestBody: {
           required: true,
@@ -2728,12 +2728,10 @@ export const openApiDocument = {
             'application/json': {
               schema: {
                 type: 'object',
-                required: ['code', 'name', 'callbackUrl', 'allowedOrigins'],
+                required: ['code', 'name'],
                 properties: {
                   code: { type: 'string', pattern: '^[a-z0-9_-]{2,32}$' },
                   name: { type: 'string', minLength: 1, maxLength: 120 },
-                  callbackUrl: { type: 'string', format: 'uri' },
-                  allowedOrigins: { type: 'array', minItems: 1, maxItems: 32, items: { type: 'string', format: 'uri' } },
                   currency: { type: 'string', pattern: '^[A-Za-z]{3}$' },
                   localeDefault: { type: 'string', enum: ['en', 'am'] },
                   limits: { type: 'object', properties: { minStake: money, maxStake: money, maxWin: money, maxBetsPerRound: { type: 'integer', minimum: 1 } } },
@@ -2766,8 +2764,6 @@ export const openApiDocument = {
                 type: 'object',
                 properties: {
                   name: { type: 'string' },
-                  callbackUrl: { type: 'string', format: 'uri' },
-                  allowedOrigins: { type: 'array', items: { type: 'string', format: 'uri' } },
                   localeDefault: { type: 'string', enum: ['en', 'am'] },
                   limits: { type: 'object', properties: { minStake: money, maxStake: money, maxWin: money, maxBetsPerRound: { type: 'integer', minimum: 1 } } },
                   enabledGames: { type: 'array', items: { type: 'string' } },

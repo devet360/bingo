@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
-import { buildBalanceReply, buildDefaultLaunchUrlTemplate, buildLaunchUrl, isPlayableLaunchUrl, movementRequiresOpenSession, publicProviderConfig, resolveProviderApiUrl, withBalance } from '../src/lib/providerContract';
+import { buildBalanceReply, buildDefaultLaunchUrlTemplate, buildLaunchUrl, buildProviderCallbackUrl, isPlayableLaunchUrl, movementRequiresOpenSession, publicProviderConfig, resolveProviderApiUrl, withBalance } from '../src/lib/providerContract';
 import { ProviderProbeSchema } from '../src/lib/providerCallback';
 
 // The provider services pull in env/prisma at import time; provide dummy values
@@ -60,6 +60,13 @@ test('provider API endpoints resolve from the host root even when the configured
     'https://games.example.com/api/admin/operators',
   );
   assert.throws(() => resolveProviderApiUrl('https://games.example.com', 'api/admin/operators'));
+});
+
+test('provider callback URL uses the API host and the exact tenant code', () => {
+  assert.equal(
+    buildProviderCallbackUrl('https://bingo-api.example.com', 'bingo251'),
+    'https://bingo-api.example.com/games/callback/bingo251',
+  );
 });
 
 test('launch url is null without a template and encodes the token', () => {

@@ -50,7 +50,7 @@ async function setup() {
   await store.upsertOperator({
     code: config.operator.code,
     name: config.operator.name,
-    callbackUrl: config.operator.callbackUrl,
+    callbackUrl: config.operator.callbackUrl!,
     currency: config.operator.currency,
     status: 'ACTIVE',
     allowedOrigins: [],

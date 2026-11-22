@@ -13,7 +13,9 @@ that is retried until bingo accepts it, replays it, or refuses it terminally.
 `server.ts` follows the design's §5.3 sequence:
 
 1. `database.migrate()` — drizzle migrations from `drizzle/`.
-2. `store.upsertOperator()` — the operator row is created or refreshed from config.
+2. Optional bootstrap — if both `OPERATOR_CALLBACK_URL` and `OPERATOR_HMAC_SECRET` are set,
+   the configured operator row is created or refreshed from config. Otherwise, create
+   operators from Bingo Super Admin so their callback and secret are linked automatically.
 3. Outbox drain — every pending win is attempted once before anything is decided.
 4. `runRecovery()` — interrupted rounds are abandoned and refunded, ambiguous charges
    are replayed with their original txn id, and terminal bets without an outbox row get
@@ -51,10 +53,10 @@ opened to players.
 | --- | --- | --- |
 | `PORT` | `3000` | HTTP port; Dokku injects its own. |
 | `DATABASE_URL` | — (required) | Postgres connection string. |
-| `OPERATOR_CODE` | `bingo251` | Key of the operator row refreshed at boot. |
-| `OPERATOR_NAME` | `Bingo 251` | Display name of that operator row. |
-| `OPERATOR_CALLBACK_URL` | — (required) | Bingo wallet callback, `POST /games/callback/<provider>`. |
-| `OPERATOR_HMAC_SECRET` | — (required, 16+ chars) | Shared with the bingo provider record. |
+| `OPERATOR_CODE` | `bingo251` | Default tenant code used by the game runtime. |
+| `OPERATOR_NAME` | `Bingo 251` | Name used only for an optional env-seeded bootstrap operator. |
+| `OPERATOR_CALLBACK_URL` | unset | Optional bootstrap callback URL. Set with `OPERATOR_HMAC_SECRET` only when env-seeding an operator; dashboard-created operators get this from Bingo. |
+| `OPERATOR_HMAC_SECRET` | unset | Optional bootstrap secret (16+ chars). The dashboard generates and synchronizes secrets for managed operators. |
 | `OPERATOR_CURRENCY` | `ETB` | Three-letter ISO code. |
 | `ALLOWED_PARENT_ORIGINS` | empty | Comma-separated origins allowed to iframe `/play`. |
 | `GAME_MIN_STAKE` | `100` | Minor units. |
@@ -72,9 +74,13 @@ opened to players.
 | `CHAT_ENABLED` | `false` | Opt-in per-process chat feature. |
 | `CHAT_RETENTION_DAYS` | `30` | Retention window for room message playback. |
 
-`.env.example` lists every key with placeholder values. Never commit real secrets.
+`.env.example` lists the values needed for a dashboard-managed deployment.
+Optional bootstrap-only values are described in the table; never commit real secrets.
+For dashboard-managed setup, the only provider URL entered in Bingo is the Games
+Provider deployment URL. Bingo derives the callback from the API host, takes allowed
+game origins from `CORS_ORIGINS`, and stores the Games Provider-generated HMAC secret.
 
-The bootstrap `BOT_*` values seed settings only when the owner operator has no saved
+The `BOT_*` values seed settings only when the owner operator has no saved
 configuration. The Bingo251 owner can change supported games and simulation settings in
 the embedded **Provider dashboard**. Simulated bots are clearly labelled in the client,
 appear in Crash rounds only, do not place real bets, and never call the wallet.

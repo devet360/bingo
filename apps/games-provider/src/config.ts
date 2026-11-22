@@ -5,8 +5,8 @@ const EnvSchema = z.object({
   DATABASE_URL: z.string().min(1),
   OPERATOR_CODE: z.string().min(1).default('bingo251'),
   OPERATOR_NAME: z.string().min(1).default('Bingo 251'),
-  OPERATOR_CALLBACK_URL: z.string().url(),
-  OPERATOR_HMAC_SECRET: z.string().min(16),
+  OPERATOR_CALLBACK_URL: z.string().url().optional(),
+  OPERATOR_HMAC_SECRET: z.string().min(16).optional(),
   OPERATOR_CURRENCY: z.string().length(3).default('ETB'),
   ALLOWED_PARENT_ORIGINS: z.string().default(''),
   GAME_MIN_STAKE: z.coerce.bigint().min(1n).default(100n),
@@ -30,6 +30,14 @@ const EnvSchema = z.object({
   CHAT_BLOCKED_PATTERNS: z.string().default(''),
   CHAT_RETENTION_DAYS: z.coerce.number().int().positive().default(30),
   CONSOLE_TOKEN_SECRET: z.string().min(32).optional(),
+}).superRefine((config, context) => {
+  if (Boolean(config.OPERATOR_CALLBACK_URL) !== Boolean(config.OPERATOR_HMAC_SECRET)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['OPERATOR_CALLBACK_URL'],
+      message: 'OPERATOR_CALLBACK_URL and OPERATOR_HMAC_SECRET must either both be set or both be omitted',
+    });
+  }
 });
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
@@ -45,8 +53,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     operator: {
       code: parsed.OPERATOR_CODE,
       name: parsed.OPERATOR_NAME,
-      callbackUrl: parsed.OPERATOR_CALLBACK_URL,
-      hmacSecret: parsed.OPERATOR_HMAC_SECRET,
+      callbackUrl: parsed.OPERATOR_CALLBACK_URL ?? null,
+      hmacSecret: parsed.OPERATOR_HMAC_SECRET ?? null,
       currency: parsed.OPERATOR_CURRENCY.toUpperCase(),
     },
     allowedParentOrigins: parsed.ALLOWED_PARENT_ORIGINS.split(',')

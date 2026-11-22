@@ -15,6 +15,10 @@ export function resolveProviderApiUrl(apiBaseUrl: string, endpointPath: string):
   return new URL(endpointPath, apiBaseUrl);
 }
 
+export function buildProviderCallbackUrl(apiOrigin: string, operatorCode: string): string {
+  return new URL(`/games/callback/${encodeURIComponent(operatorCode)}`, apiOrigin).toString();
+}
+
 export function buildDefaultLaunchUrlTemplate(
   apiBaseUrl: string | null,
   operator: string,

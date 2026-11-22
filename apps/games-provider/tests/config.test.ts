@@ -51,3 +51,13 @@ test('admin token and default operator code are optional and additive', () => {
   assert.equal(custom.adminToken, 'admin-token-for-tests');
   assert.equal(custom.defaultOperatorCode, 'op-main');
 });
+
+test('callback and HMAC bootstrap settings are optional but must be configured together', () => {
+  const dashboardManaged = loadConfig({ DATABASE_URL: 'postgres://user:pass@localhost:5432/db' });
+  assert.equal(dashboardManaged.operator.callbackUrl, null);
+  assert.equal(dashboardManaged.operator.hmacSecret, null);
+  assert.throws(() => loadConfig({
+    DATABASE_URL: 'postgres://user:pass@localhost:5432/db',
+    OPERATOR_CALLBACK_URL: 'https://bingo.example/games/callback/bingo251',
+  }), /must either both be set or both be omitted/);
+});

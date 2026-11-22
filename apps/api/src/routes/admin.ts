@@ -1,4 +1,4 @@
-import { Router } from 'express';
+import { Router, type Request } from 'express';
 import { createHmac } from 'node:crypto';
 import type { Prisma } from '@prisma/client';
 import {
@@ -81,6 +81,7 @@ import {
   syncProviderOperatorToBingo,
   type ProviderOperatorSummary,
 } from '../services/providerAdminProxy';
+import { buildProviderCallbackUrl } from '../lib/providerContract';
 import { fetchProviderGameCatalogue } from '../services/providerCatalogue';
 import { storeMedia } from '../services/media';
 
@@ -247,8 +248,6 @@ const GamesProviderBotConfigSchema = z.object({
 const GamesProviderOperatorCreateSchema = z.object({
   code: z.string().regex(/^[a-z0-9_-]{2,32}$/),
   name: z.string().trim().min(1).max(120),
-  callbackUrl: z.string().url().max(2048),
-  allowedOrigins: z.array(z.string().url().max(2048)).min(1).max(32),
   currency: z.string().regex(/^[A-Za-z]{3}$/).optional(),
   localeDefault: z.enum(['en', 'am']).optional(),
   limits: GamesProviderLimitsSchema.optional(),
@@ -258,8 +257,6 @@ const GamesProviderOperatorCreateSchema = z.object({
 }).strict();
 const GamesProviderOperatorUpdateSchema = z.object({
   name: z.string().trim().min(1).max(120).optional(),
-  callbackUrl: z.string().url().max(2048).optional(),
-  allowedOrigins: z.array(z.string().url().max(2048)).min(1).max(32).optional(),
   localeDefault: z.enum(['en', 'am']).optional(),
   limits: GamesProviderLimitsSchema.optional(),
   enabledGames: z.array(z.string().trim().min(1).max(32)).min(1).optional(),
@@ -278,6 +275,30 @@ const ProviderAdminHostParamsSchema = z.object({ hostCode: z.string().min(2).max
 const ProviderAdminOperatorParamsSchema = ProviderAdminHostParamsSchema.extend({
   operatorCode: z.string().min(2).max(64),
 });
+
+function publicApiOrigin(req: Request): string {
+  const host = req.get('host');
+  if (!host) throw Errors.conflict('Could not determine the public Bingo API host', 'API_ORIGIN_UNAVAILABLE');
+  const protocol = req.protocol;
+  if (protocol !== 'https' && protocol !== 'http') {
+    throw Errors.conflict('Could not determine the public Bingo API protocol', 'API_ORIGIN_UNAVAILABLE');
+  }
+  if (env.isProd && protocol !== 'https') {
+    throw Errors.conflict('The public Bingo API must be reached over HTTPS', 'API_ORIGIN_INVALID');
+  }
+  try {
+    return new URL(`${protocol}://${host}`).origin;
+  } catch {
+    throw Errors.conflict('The public Bingo API host is invalid', 'API_ORIGIN_INVALID');
+  }
+}
+
+function providerAllowedOrigins(): string[] {
+  if (env.corsOrigins.length === 0) {
+    throw Errors.conflict('Configure CORS_ORIGINS with the Bingo web origin first', 'WEB_ORIGIN_REQUIRED');
+  }
+  return env.corsOrigins;
+}
 
 function sameApiBaseUrl(left: string, right: string): boolean {
   try {
@@ -1691,7 +1712,11 @@ adminRouter.post(
       actorId: req.auth!.userId,
       path: '/api/admin/operators',
       method: 'POST',
-      body,
+      body: {
+        ...body,
+        callbackUrl: buildProviderCallbackUrl(publicApiOrigin(req), body.code),
+        allowedOrigins: providerAllowedOrigins(),
+      },
     });
     try {
       await syncProviderOperatorToBingo(host, created.operator, { webhookSecret: created.secret });
@@ -1761,7 +1786,11 @@ adminRouter.patch(
       actorId: req.auth!.userId,
       path: `/api/admin/operators/${encodeURIComponent(params.operatorCode)}`,
       method: 'PATCH',
-      body,
+      body: {
+        ...body,
+        callbackUrl: buildProviderCallbackUrl(publicApiOrigin(req), params.operatorCode),
+        allowedOrigins: providerAllowedOrigins(),
+      },
     });
     const host = await getProviderHost(params.hostCode);
     await syncProviderOperatorToBingo(host, operator);

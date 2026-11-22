@@ -206,9 +206,11 @@ export function GameProvidersTab({ onOpenDashboard }: { onOpenDashboard: (code: 
                       ) : null}
                     </div>
                     <p className="mt-0.5 font-mono text-[11px] text-muted">{provider.code}</p>
-                    <p className="mt-1 break-all text-[10px] text-muted">
-                      POST {apiBase}/games/callback/{provider.code}
-                    </p>
+                    {provider.apiBaseUrl && !provider.enabled && !provider.hasSecret && provider.games.length === 0 ? (
+                      <p className="mt-1 text-[10px] text-muted">Games Provider deployment connection only; tenant callback and secret are created per operator in Provider dashboard.</p>
+                    ) : (
+                      <p className="mt-1 break-all text-[10px] text-muted">POST {apiBase}/games/callback/{provider.code}</p>
+                    )}
                   </div>
                   <div className="flex shrink-0 flex-wrap gap-1.5">
                     <Button
@@ -514,7 +516,7 @@ function ProviderSheet({
           hint={
             provider?.hasSecret
               ? 'A secret is configured. Leave blank to keep it; enter a new one to rotate.'
-              : 'At least 16 characters. Shared with the provider for HMAC signing.'
+              : 'For Games Provider V2, leave this blank on the deployment row and create operators in Provider dashboard; their secret is generated and linked automatically. Other providers may require their supplied HMAC secret here.'
           }
         />
         <Input

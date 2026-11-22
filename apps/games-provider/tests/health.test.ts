@@ -18,7 +18,7 @@ test('health endpoint reports ok', async () => {
   await store.upsertOperator({
     code: config.operator.code,
     name: config.operator.name,
-    callbackUrl: config.operator.callbackUrl,
+    callbackUrl: config.operator.callbackUrl!,
     currency: config.operator.currency,
     status: 'ACTIVE',
     allowedOrigins: [],
@@ -30,7 +30,7 @@ test('health endpoint reports ok', async () => {
     probeOkAt: null,
     createdAt: new Date('2026-11-19T00:00:00Z'),
   });
-  await store.addOperatorSecret(config.operator.code, config.operator.hmacSecret);
+  await store.addOperatorSecret(config.operator.code, config.operator.hmacSecret!);
   const server = createApp({ config, store, registry: new OperatorRegistry({ store }) }).listen(0);
   const { port } = server.address() as AddressInfo;
   const response = await fetch(`http://127.0.0.1:${port}/api/health`);

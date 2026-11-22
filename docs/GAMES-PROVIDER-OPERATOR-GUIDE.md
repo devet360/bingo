@@ -10,21 +10,61 @@ see the [Games Provider Integration Guide](./GAMES-PROVIDER-INTEGRATION.md).
 ## 1. Prepare the deployment
 
 Confirm that the Games Provider and Bingo API are deployed, use the expected
-PostgreSQL database, and can reach each other's public endpoints. Set the
-provider's `DATABASE_URL`, `OPERATOR_CODE`, `OPERATOR_CALLBACK_URL`,
-`OPERATOR_HMAC_SECRET`, and `ALLOWED_PARENT_ORIGINS`.
+PostgreSQL database, and can reach each other's public endpoints. For the
+dashboard-managed setup, the only provider URL you enter in Bingo is the Games
+Provider deployment URL, such as `https://stratos.example.com`. Bingo derives
+the callback from the public Bingo API request host and reads allowed game
+origins from its `CORS_ORIGINS` setting.
 
-The callback code is significant: `OPERATOR_CODE` must match the provider code
-in the callback URL and in the Bingo **Admin → Games** provider record. The
-signature covers this code as well as the raw request body.
+Create the tenant from **Super Admin → Provider dashboard → Operators → Add
+operator**. Use the same code for the tenant and Bingo provider integration
+(for example, `bingo251`). The Games Provider generates its HMAC secret, and
+Bingo stores it automatically. No callback URL or HMAC secret needs to be
+copied or typed for this flow.
+
+### How is Bingo's Webhook secret set?
+
+The HMAC/webhook secret signs game-wallet traffic. The dashboard-managed
+workflow generates it on the Games Provider and saves it into Bingo
+automatically. You do not need to see or copy it or type anything into Bingo's
+Webhook secret field:
+
+| Where | Value |
+| --- | --- |
+| Games Provider | Active HMAC secret for the operator code |
+| Bingo **Admin → Games → provider with the same code** | The exact same value in **Webhook secret** |
+
+Use the CLI only when setting up outside the Bingo dashboard:
+
+- **Created with the Games Provider CLI:** copy the one-time secret printed by
+  `operator create` into Bingo's **Webhook secret** for that same operator
+  code. Enter the callback URL and allowed web origins in the CLI command too.
+- **Rotating from the Provider dashboard:** use the dashboard's Rotate secret
+  action; it synchronizes the new key and temporarily retains the previous
+  key. Run a probe, then retire the previous key only after the probe succeeds.
+- **Rotating with the CLI:** the CLI prints the new secret once. Update Bingo's
+  **Webhook secret** to that exact value promptly, then run a probe. CLI
+  rotation does not synchronize Bingo or preserve the previous secret there;
+  use the dashboard rotation flow when you need managed overlap.
+
+`OPERATOR_CALLBACK_URL` and `OPERATOR_HMAC_SECRET` are optional paired
+environment settings for legacy env-seeded operators. Do not set them for a
+dashboard-created operator. Changing an env bootstrap secret later does **not**
+rotate an already stored secret. Remove the pair from deployment configuration
+when moving an existing tenant to dashboard management so startup does not
+reapply legacy connection settings.
+
+`CONSOLE_TOKEN_SECRET` is a different key used for short-lived dashboard
+authentication. It must be shared between the Bingo API and Games Provider,
+but it must **not** be entered as Bingo's webhook secret.
 
 For the Bingo super-admin provider dashboard:
 
 - Set the same `CONSOLE_TOKEN_SECRET` (at least 32 characters) on the Bingo API
   and Games Provider.
-- Add the Bingo web application's origin to `ALLOWED_PARENT_ORIGINS` on the
-  Games Provider, for example `https://app.example.com`, if you use the legacy
-  embedded console.
+- Include the Bingo web application's origin in Bingo API `CORS_ORIGINS`.
+  The provider dashboard copies those origins into the operator configuration;
+  no separate provider `ALLOWED_PARENT_ORIGINS` value is needed for it.
 - Keep `PROVIDER_ADMIN_TOKEN` as a separate, long random CLI bootstrap token.
   Do not put it in a browser or expose it to operators.
 - The interactive provider API reference is available at
@@ -34,7 +74,9 @@ For the Bingo super-admin provider dashboard:
 
 ## 2. Create an operator
 
-Run the operator CLI from the repository root. The following example uses
+The recommended setup is to create an operator from Bingo's Provider dashboard;
+that automatically creates its Bingo integration and syncs its secret. For
+standalone CLI setup, run the operator CLI from the repository root. The following example uses
 `bingo251` as both the Games Provider operator code and the Bingo API provider
 code:
 
@@ -68,14 +110,13 @@ the configured operator records.
 
 In the Bingo web **Super Admin → Games** page:
 
-1. Add or use the Bingo provider integration with code `bingo251` (the same
-   value as the Games Provider operator code), the Games Provider public base
-   URL, currency `ETB`, and the matching webhook secret. The deployment/host
-   label (for example `stratos`) is not the operator code. Each operator needs
-   its own Bingo provider integration code so callback signatures and game
-   launch URLs use the correct tenant. The native provider dashboard links a
-   newly created operator into Bingo automatically.
-2. Select each enabled provider game from the **Available provider game**
+1. Add the Games Provider deployment with its public base URL, for example
+   `https://stratos.example.com`. This is the provider's host address, not the
+   Bingo API or web URL.
+2. Create the operator from **Super Admin → Provider dashboard**. This creates
+   the matching Bingo provider integration using the operator code and generated
+   secret. Do not separately add a duplicate integration or type a callback URL.
+3. Select each enabled provider game from the **Available provider game**
    selector. Bingo fills in the provider's default game ID, name, category and
    thumbnail. The name and thumbnail URL remain editable; upload a PNG, JPEG or
    WebP thumbnail when you want a custom image. Bingo generates the launch URL
@@ -85,11 +126,11 @@ In the Bingo web **Super Admin → Games** page:
    Use the **Advanced: custom launch URL** override only if a provider uses a
    non-standard route.
 
-3. Keep each intended game disabled until the probe and staging checks below
+4. Keep each intended game disabled until the probe and staging checks below
    pass. The provider must be enabled to test a launch; enable individual games
    from this page only when they are ready to appear in the player lobby.
 
-4. Use **Play** beside a game to open its generated launch URL in a new tab.
+5. Use **Play** beside a game to open its generated launch URL in a new tab.
    This admin-only action launches a session for an active test player (not the
    signed-in admin), and can test a hidden game while its provider is enabled.
    Set `TEST_PLAYER_LOGIN_ENABLED=true` and create a test player from the
@@ -144,10 +185,11 @@ The provider catalogue shows only games enabled for the operator. Enable or
 disable Crash and Coin Flip in the owner dashboard; game metadata and thumbnail
 defaults are served by the Games Provider itself.
 
-If the embedded page is blocked, verify that `ALLOWED_PARENT_ORIGINS` contains
+If the embedded page is blocked, verify that Bingo API `CORS_ORIGINS` contains
 the exact web origin (scheme and host, without a path), that the provider
 `apiBaseUrl` is reachable over HTTPS, and that both deployments use the same
-`CONSOLE_TOKEN_SECRET`.
+`CONSOLE_TOKEN_SECRET`. `ALLOWED_PARENT_ORIGINS` is only a fallback for older
+or manually seeded operators.
 
 ## 6. Update configuration and rotate a secret
 
@@ -181,5 +223,5 @@ npm run operator -w @bingo/games-provider -- suspend --code bingo251
 | Games selector is empty in Bingo | Match the Bingo provider code to the Games Provider operator code, enable Crash or Coin Flip for that operator, and deploy the current Games Provider and Bingo API versions. |
 | Probe fails or callbacks return 401 | Compare the callback path code and HMAC secret on both sides; signatures use the exact raw request bytes. |
 | `GAME_UNAVAILABLE` | Confirm the external game ID is listed in `enabledGames` and is enabled in Bingo. |
-| Dashboard iframe is blank | Check the Games Provider `ALLOWED_PARENT_ORIGINS`, API base URL, and shared `CONSOLE_TOKEN_SECRET`. |
+| Dashboard iframe is blank | Check Bingo API `CORS_ORIGINS`, the Games Provider API base URL, and shared `CONSOLE_TOKEN_SECRET`. |
 | Provider starts but health checks fail | Inspect startup logs for migration failures before trying manual SQL changes. |

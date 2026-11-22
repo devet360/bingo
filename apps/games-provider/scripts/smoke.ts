@@ -38,6 +38,10 @@ if (process.env.SMOKE_CONFIRM !== 'yes') {
 }
 
 const config = loadConfig();
+if (!config.operator.callbackUrl || !config.operator.hmacSecret) {
+  console.error('smoke: set OPERATOR_CALLBACK_URL and OPERATOR_HMAC_SECRET before running the provider smoke test');
+  process.exit(1);
+}
 const database = createDb(config.databaseUrl);
 const store = createPostgresStore(database.db);
 const wallet = new HttpWalletClient({

@@ -301,8 +301,6 @@ function OperatorTable({
 function OperatorCreateForm({ hostCode, onCancel, onCreated }: { hostCode: string; onCancel: () => void; onCreated: (code: string) => void }) {
   const [code, setCode] = useState('');
   const [name, setName] = useState('');
-  const [callbackUrl, setCallbackUrl] = useState(`${getRuntimeConfig().apiUrl}/games/callback/`);
-  const [origin, setOrigin] = useState('');
   const [minStake, setMinStake] = useState('100');
   const [maxStake, setMaxStake] = useState('100000');
   const [maxWin, setMaxWin] = useState('3000000');
@@ -310,7 +308,6 @@ function OperatorCreateForm({ hostCode, onCancel, onCreated }: { hostCode: strin
   const [games, setGames] = useState('crash');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  useEffect(() => setOrigin(window.location.origin), []);
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     setBusy(true); setError(null);
@@ -319,8 +316,6 @@ function OperatorCreateForm({ hostCode, onCancel, onCreated }: { hostCode: strin
       const result = await createGamesProviderOperator(hostCode, {
         code: normalizedCode,
         name: name.trim(),
-        callbackUrl: callbackUrl.replace(/\/+$/, '').endsWith(normalizedCode) ? callbackUrl : `${callbackUrl.replace(/\/+$/, '')}/${normalizedCode}`,
-        allowedOrigins: origin.split(',').map((value) => value.trim()).filter(Boolean),
         currency: 'ETB',
         localeDefault: 'en',
         limits: { minStake, maxStake, maxWin, maxBetsPerRound: Number(maxBets) },
@@ -337,16 +332,10 @@ function OperatorCreateForm({ hostCode, onCancel, onCreated }: { hostCode: strin
   return (
     <Panel className="p-4">
       <h2 className="font-display text-lg font-bold">Create operator</h2>
-      <p className="mb-4 text-xs text-muted">Creates a PENDING operator and links its one-time generated callback secret to Bingo automatically.</p>
+      <p className="mb-4 text-xs text-muted">Creates a PENDING operator. Bingo generates its callback address from the API host, uses configured Bingo web origins, and automatically stores the provider-generated signing secret.</p>
       <form className="grid gap-3 sm:grid-cols-2" onSubmit={(event) => void submit(event)}>
-        <Input label="Code" required minLength={2} maxLength={32} pattern="[a-z0-9_-]+" value={code} onChange={(event) => {
-          const value = event.target.value.toLowerCase();
-          setCode(value);
-          setCallbackUrl(`${getRuntimeConfig().apiUrl}/games/callback/${value}`);
-        }} />
+        <Input label="Code" required minLength={2} maxLength={32} pattern="[a-z0-9_-]+" value={code} onChange={(event) => setCode(event.target.value.toLowerCase())} hint="The same tenant code is used for the provider, callback, and game launch." />
         <Input label="Display name" required maxLength={120} value={name} onChange={(event) => setName(event.target.value)} />
-        <Input label="Bingo callback URL" type="url" required value={callbackUrl} onChange={(event) => setCallbackUrl(event.target.value)} />
-        <Input label="Allowed web origins (comma-separated)" required value={origin} onChange={(event) => setOrigin(event.target.value)} />
         <Input label="Minimum stake (minor units)" type="number" min="1" value={minStake} onChange={(event) => setMinStake(event.target.value)} />
         <Input label="Maximum stake (minor units)" type="number" min="1" value={maxStake} onChange={(event) => setMaxStake(event.target.value)} />
         <Input label="Maximum win (minor units)" type="number" min="1" value={maxWin} onChange={(event) => setMaxWin(event.target.value)} />
@@ -384,8 +373,6 @@ function OperatorDetail({
   useEffect(() => setDraft(operator), [operator]);
   const update = () => onUpdate({
     name: draft.name,
-    callbackUrl: draft.callbackUrl,
-    allowedOrigins: draft.allowedOrigins,
     localeDefault: draft.localeDefault,
     limits: draft.limits,
     enabledGames: draft.enabledGames,
@@ -403,8 +390,7 @@ function OperatorDetail({
         <h3 className="mb-3 text-sm font-bold">Operator configuration</h3>
         <div className="grid gap-3 sm:grid-cols-2">
           <Input label="Name" value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} />
-          <Input label="Callback URL" type="url" value={draft.callbackUrl} onChange={(event) => setDraft({ ...draft, callbackUrl: event.target.value })} />
-          <Input label="Allowed origins (comma-separated)" value={draft.allowedOrigins.join(', ')} onChange={(event) => setDraft({ ...draft, allowedOrigins: event.target.value.split(',').map((item) => item.trim()).filter(Boolean) })} />
+          <div className="rounded-lg border border-line px-3 py-2 text-xs sm:col-span-2"><p className="font-semibold">Managed connection addresses</p><p className="mt-1 break-all font-mono text-muted">Bingo API callback: {operator.callbackUrl}</p><p className="mt-1 break-all text-muted">Game origins: {operator.allowedOrigins.join(', ')}</p><p className="mt-1 text-muted">These are generated from the Bingo API host and its configured CORS origins.</p></div>
           <Input label="Enabled game IDs (comma-separated)" value={draft.enabledGames.join(', ')} onChange={(event) => setDraft({ ...draft, enabledGames: event.target.value.split(',').map((item) => item.trim()).filter(Boolean) })} />
           <Input label="Minimum stake (minor units)" type="number" value={draft.limits.minStake} onChange={(event) => setDraft({ ...draft, limits: { ...draft.limits, minStake: event.target.value } })} />
           <Input label="Maximum stake (minor units)" type="number" value={draft.limits.maxStake} onChange={(event) => setDraft({ ...draft, limits: { ...draft.limits, maxStake: event.target.value } })} />

@@ -20,9 +20,10 @@ const database = createDb(config.databaseUrl);
 await database.migrate();
 const store = createPostgresStore(database.db);
 
-// The bootstrap operator stays env-seeded: `OPERATOR_*` owns identity, callback,
-// currency, limits and origins, while lifecycle fields survive a restart.
+// Optional env bootstrap keeps identity and connection settings in config while
+// preserving lifecycle fields. Dashboard-managed operators are not rewritten at boot.
 async function seedBootstrapOperator(store: ReturnType<typeof createPostgresStore>, config: ReturnType<typeof loadConfig>) {
+  if (!config.operator.callbackUrl || !config.operator.hmacSecret) return;
   const existing = await store.getOperator(config.operator.code);
   const now = new Date();
   await store.upsertOperator({

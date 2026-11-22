@@ -49,7 +49,7 @@ async function boot(fake: Awaited<ReturnType<typeof createFakeBingo>>, env: Node
   await store.upsertOperator({
     code: config.operator.code,
     name: config.operator.name,
-    callbackUrl: config.operator.callbackUrl,
+    callbackUrl: config.operator.callbackUrl!,
     currency: config.operator.currency,
     status: 'ACTIVE',
     allowedOrigins: [],

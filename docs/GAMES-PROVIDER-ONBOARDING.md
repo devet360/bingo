@@ -11,11 +11,26 @@ see the [Games Provider Integration Guide](./GAMES-PROVIDER-INTEGRATION.md).
 ## Prerequisites
 
 - Provider Postgres is migrated and reachable.
-- `PROVIDER_ADMIN_TOKEN` is set to a long random bootstrap token.
-- The bingo staff console has registered a `GameProvider` row for the operator.
-- The bingo callback URL and provider callback secret match.
+- The Games Provider deployment's public API base URL is registered in Bingo
+  **Super Admin → Games**.
+- The Bingo API `CORS_ORIGINS` includes the public Bingo web origin.
+- `CONSOLE_TOKEN_SECRET` matches between Bingo API and Games Provider.
 
-## 1. Create the operator
+## Recommended: create and link from Bingo
+
+1. In **Super Admin → Provider dashboard → Operators**, choose **Add operator**
+   and enter the tenant code and display name.
+2. Bingo derives the callback from the API host and allowed web origins from
+   `CORS_ORIGINS`. The Games Provider generates the HMAC secret, and Bingo
+   stores it automatically. Do not copy or enter callback URLs or webhook
+   secrets.
+3. Use **Run probe**, then activate the operator when the probe succeeds.
+4. In **Super Admin → Games**, select the linked provider code and add or enable
+   the desired provider games.
+
+## CLI alternative: create an operator manually
+
+Use the CLI only when you are not using the Bingo dashboard integration:
 
 ```bash
 npm run operator -w @bingo/games-provider -- create \
@@ -32,14 +47,14 @@ npm run operator -w @bingo/games-provider -- create \
   --games crash
 ```
 
-Store the returned secret in bingo. It is shown once and must not be committed
-to source control or documentation.
+The CLI returns the HMAC secret once. Store it in Bingo's provider integration
+with the same operator code.
 
 ## 2. Register games in bingo
 
 In **Super Admin → Games**, create the games that should be visible for this
-operator. Set the provider API base URL, then add each external game ID (such
-as `crash`). Bingo generates the launch URL from the provider base URL,
+operator. Set the provider API base URL if it is not already registered, then
+add each external game ID (such as `crash`). Bingo generates the launch URL from the provider base URL,
 operator code, external game ID, and session details. Use the advanced custom
 URL override only when the provider uses a non-standard launch route.
 
@@ -51,8 +66,8 @@ npm run operator -w @bingo/games-provider -- activate --code operator-code
 ```
 
 Activation fails unless a signed probe has succeeded and at least one active
-secret exists. A bad callback URL or mismatched secret cannot activate the
-operator.
+secret exists. The dashboard probe also verifies that Bingo and the Games
+Provider are linked to the same operator code and generated secret.
 
 ## 4. Run a sandbox round
 

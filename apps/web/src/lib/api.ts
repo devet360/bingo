@@ -1143,8 +1143,6 @@ export interface GamesProviderDashboard {
 export interface GamesProviderOperatorInput {
   code: string;
   name: string;
-  callbackUrl: string;
-  allowedOrigins: string[];
   currency?: string;
   localeDefault?: 'en' | 'am';
   limits?: GamesProviderOperator['limits'];
