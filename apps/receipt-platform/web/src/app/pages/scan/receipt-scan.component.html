@@ -1,0 +1,74 @@
+<main class="scan-shell">
+  <header class="scan-topbar">
+    <a class="scan-brand" routerLink="/" aria-label="Verity home"><span class="brand-mark" aria-hidden="true">v.</span><span>verity<span>.</span></span></a>
+    <nav aria-label="Receipt tools"><a routerLink="/dashboard">Dashboard</a><a routerLink="/docs">API docs</a></nav>
+  </header>
+
+  <section class="scan-intro">
+    <p class="eyebrow">RECEIPT INTAKE</p>
+    <h1>Scan a receipt.<br /><span>Review every detail.</span></h1>
+    <p>Extract text locally from a photo, then confirm the payment details yourself. A receipt image is evidence to review—not proof of payment.</p>
+  </section>
+
+  <section class="scan-grid" aria-label="Receipt scanner">
+    <article class="scan-card capture-card">
+      <div class="card-heading"><div><span class="step-label">01 · ADD IMAGE</span><h2>Capture or upload</h2></div><span class="privacy-tag"><span aria-hidden="true">●</span> On-device OCR</span></div>
+      <div class="camera-frame" [class.camera-live]="cameraActive()">
+        @if (previewUrl(); as preview) {
+          <img class="receipt-preview" [src]="preview" alt="Selected receipt image preview" />
+        } @else {
+          <div class="capture-placeholder"><span class="scan-icon" aria-hidden="true">▧</span><strong>Keep the receipt in focus</strong><span>Use even light and include the full transaction reference.</span></div>
+        }
+        <video #cameraVideo class="camera-video" [class.visible]="cameraActive()" playsinline muted aria-label="Live camera preview"></video>
+        @if (cameraActive()) { <div class="camera-overlay"><span>LIVE CAMERA</span><span class="camera-corner"></span></div> }
+      </div>
+      <div class="capture-actions">
+        <label class="upload-button" for="receipt-image">Choose image</label>
+        <input id="receipt-image" class="visually-hidden" type="file" accept="image/*" capture="environment" (change)="onFileSelected($event)" />
+        @if (cameraActive()) {
+          <button class="button-secondary" type="button" (click)="capturePhoto()">Capture photo</button>
+        } @else {
+          <button class="button-secondary" type="button" (click)="startCamera()">Open camera</button>
+        }
+        @if (hasImage) { <button class="clear-button" type="button" (click)="clearImage()">Remove</button> }
+      </div>
+      <p class="privacy-note"><span aria-hidden="true">◇</span> The image and recognized text stay in this browser and are not uploaded.</p>
+      <button class="run-button" type="button" [disabled]="!hasImage || processing()" (click)="runOcr()">
+        @if (processing()) { <span class="spinner" aria-hidden="true"></span> Reading receipt… } @else { Extract receipt details <span aria-hidden="true">→</span> }
+      </button>
+      <div class="scan-status" role="status" aria-live="polite">{{ status() }}</div>
+      @if (processing()) {
+        <div class="progress-track" role="progressbar" aria-label="OCR progress" aria-valuemin="0" aria-valuemax="100" [attr.aria-valuenow]="progress()"><span [style.width.%]="progress()"></span></div>
+      }
+      @if (error()) { <p class="error-message" role="alert">{{ error() }}</p> }
+    </article>
+
+    <article class="scan-card review-card">
+      <div class="card-heading"><div><span class="step-label">02 · REVIEW</span><h2>Confirm extracted fields</h2></div><span class="review-state">Needs review</span></div>
+      <p class="review-hint">OCR can misread digits. Correct the values before using them in a verification request.</p>
+      <div class="field-list">
+        <label>Provider
+          <select [value]="fields().provider" (change)="updateField('provider', $event)">
+            <option value="">Choose a provider</option><option value="cbe">Commercial Bank of Ethiopia</option><option value="telebirr">Telebirr</option><option value="mpesa">M-Pesa</option><option value="boa">Bank of Abyssinia</option><option value="dashen">Dashen Bank</option><option value="awash">Awash Bank</option><option value="cbebirr">CBE Birr</option><option value="ebirr">eBirr</option><option value="other">Other / unknown</option>
+          </select>
+        </label>
+        <label>Transaction reference
+          <input [value]="fields().reference" (input)="updateField('reference', $event)" autocomplete="off" placeholder="Found in the receipt text" />
+        </label>
+        <div class="field-row"><label>Amount
+          <input [value]="fields().amount" (input)="updateField('amount', $event)" inputmode="decimal" placeholder="0.00" />
+        </label><label>Currency
+          <input [value]="fields().currency" (input)="updateField('currency', $event)" maxlength="3" placeholder="ETB" />
+        </label></div>
+        <label>Transaction date
+          <input [value]="fields().date" (input)="updateField('date', $event)" placeholder="As printed on receipt" />
+        </label>
+      </div>
+      @if (rawText()) {
+        <details class="raw-text"><summary>View all recognized text</summary><pre>{{ rawText() }}</pre></details>
+      }
+      <div class="verification-note"><span class="note-icon" aria-hidden="true">!</span><p><strong>Extraction is not verification.</strong> A payment is only marked verified after a supported authoritative provider confirms it. Screenshots alone never produce a verified result.</p></div>
+    </article>
+  </section>
+  <footer class="scan-footer"><span>Verity · Receipt verification infrastructure</span><a routerLink="/">Back to platform overview</a></footer>
+</main>
