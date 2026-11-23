@@ -18,6 +18,7 @@ apps/api/src/support-bot        grammY customer-support bot: FAQ, chat, staff re
 apps/api/scripts                create-admin: bootstraps the first super admin
 apps/api/tests                  Unit tests (node:test)
 apps/web                        Next.js 15 Mini App + staff dashboards (/admin, /support)
+apps/receipt-platform           Independent receipt verification API, Angular web app, and Flutter scanner
 docs/ARCHITECTURE.md            Topology, ERDs, money flows, state machine
 docs/API.md                     REST contract, error codes, idempotency rules
 docs/DEPLOY.md                  Dokku apps, services, release commands

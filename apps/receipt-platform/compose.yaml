@@ -1,0 +1,33 @@
+services:
+  api:
+    build:
+      context: ./api
+    environment:
+      SERVER_PORT: 8080
+      CBE_ENABLED: ${CBE_ENABLED:-false}
+      RECEIPT_DATABASE_URL: jdbc:postgresql://postgres:5432/receipt_platform
+      RECEIPT_DATABASE_USER: receipt_platform
+      RECEIPT_DATABASE_PASSWORD: ${RECEIPT_DATABASE_PASSWORD:-change-me-locally}
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: receipt_platform
+      POSTGRES_USER: receipt_platform
+      POSTGRES_PASSWORD: ${RECEIPT_DATABASE_PASSWORD:-change-me-locally}
+    ports:
+      - "55432:5432"
+    volumes:
+      - receipt-platform-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U receipt_platform -d receipt_platform"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  receipt-platform-postgres:

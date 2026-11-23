@@ -1,0 +1,30 @@
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+
+# Java build output
+api/target/
+
+# Angular and Node build output
+web/node_modules/
+web/dist/
+web/.angular/cache/
+web/coverage/
+web/npm-debug.log*
+
+# Flutter build output
+mobile/.dart_tool/
+mobile/.packages
+mobile/build/
+mobile/.flutter-plugins*
+mobile/android/.gradle/
+mobile/ios/Pods/
+mobile/ios/Flutter/Generated.xcconfig
+mobile/ios/Flutter/flutter_export_environment.sh
+
+# Editor and operating-system files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

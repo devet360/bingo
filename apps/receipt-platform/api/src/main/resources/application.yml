@@ -1,0 +1,48 @@
+server:
+  port: ${SERVER_PORT:8080}
+  shutdown: graceful
+  forward-headers-strategy: framework
+
+providers:
+  cbe:
+    enabled: ${CBE_ENABLED:false}
+
+telegram:
+  bot-token: ${TELEGRAM_BOT_TOKEN:}
+  webhook-secret: ${TELEGRAM_WEBHOOK_SECRET:}
+  mini-app-url: ${TELEGRAM_MINI_APP_URL:}
+
+spring:
+  application:
+    name: verity-receipt-platform-api
+  datasource:
+    url: ${RECEIPT_DATABASE_URL:jdbc:postgresql://localhost:55432/receipt_platform}
+    username: ${RECEIPT_DATABASE_USER:receipt_platform}
+    password: ${RECEIPT_DATABASE_PASSWORD:change-me-locally}
+    hikari:
+      maximum-pool-size: ${DATABASE_POOL_SIZE:12}
+      connection-timeout: 3000
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+  jdbc:
+    template:
+      query-timeout: 5
+  lifecycle:
+    timeout-per-shutdown-phase: 20s
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: never
+
+info:
+  app:
+    name: Verity Receipt Platform API
+    version: 0.1.0
