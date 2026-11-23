@@ -4,6 +4,7 @@ import { createServer } from 'node:http';
 import { loadConfig } from './src/config';
 import { createDb } from './src/db/index';
 import { createPostgresStore } from './src/db/storePostgres';
+import { seedBootstrapOperator } from './src/server/bootstrap';
 import { BetManager } from './src/server/betManager';
 import { createApp } from './src/server/http';
 import { OutboxWorker } from './src/server/outbox';
@@ -20,32 +21,6 @@ const database = createDb(config.databaseUrl);
 await database.migrate();
 const store = createPostgresStore(database.db);
 
-// Optional env bootstrap keeps identity and connection settings in config while
-// preserving lifecycle fields. Dashboard-managed operators are not rewritten at boot.
-async function seedBootstrapOperator(store: ReturnType<typeof createPostgresStore>, config: ReturnType<typeof loadConfig>) {
-  if (!config.operator.callbackUrl || !config.operator.hmacSecret) return;
-  const existing = await store.getOperator(config.operator.code);
-  const now = new Date();
-  await store.upsertOperator({
-    code: config.operator.code,
-    name: config.operator.name,
-    callbackUrl: config.operator.callbackUrl,
-    currency: config.operator.currency,
-    status: existing?.status ?? 'ACTIVE',
-    allowedOrigins: config.allowedParentOrigins,
-    localeDefault: existing?.localeDefault ?? 'en',
-    limits: config.limits,
-    enabledGames: existing?.enabledGames ?? ['crash'],
-    theme: existing?.theme ?? null,
-    botConfig: existing?.botConfig ?? config.botConfig,
-    maintenance: existing?.maintenance ?? false,
-    probeOkAt: existing?.probeOkAt ?? now,
-    createdAt: existing?.createdAt ?? now,
-  });
-  if ((await store.listOperatorSecrets(config.operator.code)).length === 0) {
-    await store.addOperatorSecret(config.operator.code, config.operator.hmacSecret);
-  }
-}
 await seedBootstrapOperator(store, config);
 // One directory resolves every wallet: bets, outbox rows and recovery replays
 // all settle against the operator that owns the session, never a shared client.

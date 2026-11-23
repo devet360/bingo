@@ -1834,12 +1834,82 @@ adminRouter.post(
   '/provider-management/:hostCode/operators/:operatorCode/probe',
   asyncHandler(async (req, res) => {
     const params = parse(ProviderAdminOperatorParamsSchema, req.params);
-    const result = await providerAdminRequest({
+    const host = await getProviderHost(params.hostCode);
+    const integration = await prisma.gameProvider.findUnique({
+      where: { code: params.operatorCode },
+      select: { apiBaseUrl: true, webhookSecret: true },
+    });
+    if (
+      integration &&
+      (!integration.apiBaseUrl || !sameApiBaseUrl(integration.apiBaseUrl, host.apiBaseUrl))
+    ) {
+      throw Errors.conflict(
+        'A different Bingo provider already uses this operator code',
+        'BINGO_PROVIDER_CODE_IN_USE',
+      );
+    }
+
+    const operatorPath = `/api/admin/operators/${encodeURIComponent(params.operatorCode)}`;
+    const operator = await providerAdminRequest<ProviderOperatorSummary>({
       hostCode: params.hostCode,
       actorId: req.auth!.userId,
-      path: `/api/admin/operators/${encodeURIComponent(params.operatorCode)}/probe`,
+      path: operatorPath,
+      method: 'PATCH',
+      body: {
+        callbackUrl: buildProviderCallbackUrl(publicApiOrigin(req), params.operatorCode),
+        allowedOrigins: providerAllowedOrigins(),
+      },
+    });
+    if (!integration?.apiBaseUrl || !integration.webhookSecret) {
+      const rotated = await providerAdminRequest<{
+        operator: ProviderOperatorSummary;
+        secret: string;
+      }>({
+        hostCode: params.hostCode,
+        actorId: req.auth!.userId,
+        path: `${operatorPath}/secrets`,
+        method: 'POST',
+      });
+      await syncProviderOperatorToBingo(host, rotated.operator, {
+        webhookSecret: rotated.secret,
+        preservePreviousSecret: Boolean(integration?.webhookSecret),
+      });
+    } else {
+      await syncProviderOperatorToBingo(host, operator);
+    }
+
+    const probe = () => providerAdminRequest({
+      hostCode: params.hostCode,
+      actorId: req.auth!.userId,
+      path: `${operatorPath}/probe`,
       method: 'POST',
     });
+    let result: unknown;
+    try {
+      result = await probe();
+    } catch (error) {
+      if (
+        !(error instanceof AppError) ||
+        error.code !== 'PROBE_FAILED' ||
+        !/Probe answered 403\b/.test(error.message)
+      ) {
+        throw error;
+      }
+      const rotated = await providerAdminRequest<{
+        operator: ProviderOperatorSummary;
+        secret: string;
+      }>({
+        hostCode: params.hostCode,
+        actorId: req.auth!.userId,
+        path: `${operatorPath}/secrets`,
+        method: 'POST',
+      });
+      await syncProviderOperatorToBingo(host, rotated.operator, {
+        webhookSecret: rotated.secret,
+        preservePreviousSecret: true,
+      });
+      result = await probe();
+    }
     await writeAudit({
       actorId: req.auth!.userId,
       actorRole: req.auth!.role,

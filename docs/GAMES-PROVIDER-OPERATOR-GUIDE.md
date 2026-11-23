@@ -25,6 +25,8 @@ The host name and tenant code are different: `stratos` is the host, while
 callback URL, and saves the Games Provider-generated HMAC secret automatically.
 It then opens the operator dashboard so you can probe and activate it. No
 callback URL or HMAC secret needs to be copied or typed for this flow.
+**Run Probe** refreshes the callback URL and allowed game origins, repairs a
+missing Bingo link or secret, and retries once after a signature mismatch.
 
 ### How is Bingo's Webhook secret set?
 
@@ -52,11 +54,11 @@ Use the CLI only when setting up outside the Bingo dashboard:
   use the dashboard rotation flow when you need managed overlap.
 
 `OPERATOR_CALLBACK_URL` and `OPERATOR_HMAC_SECRET` are optional paired
-environment settings for legacy env-seeded operators. Do not set them for a
-dashboard-created operator. Changing an env bootstrap secret later does **not**
-rotate an already stored secret. Remove the pair from deployment configuration
-when moving an existing tenant to dashboard management so startup does not
-reapply legacy connection settings.
+environment settings for legacy env-seeded operators. They seed an operator only
+when that operator does not already exist, so dashboard-managed settings survive
+restarts even if an old pair remains configured. Changing an env bootstrap secret
+later does **not** rotate an already stored secret. Remove the pair after migration
+to avoid reseeding the operator if the provider database is recreated.
 
 `CONSOLE_TOKEN_SECRET` is a different key used for short-lived dashboard
 authentication. It must be shared between the Bingo API and Games Provider,

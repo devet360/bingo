@@ -14,8 +14,9 @@ that is retried until bingo accepts it, replays it, or refuses it terminally.
 
 1. `database.migrate()` — drizzle migrations from `drizzle/`.
 2. Optional bootstrap — if both `OPERATOR_CALLBACK_URL` and `OPERATOR_HMAC_SECRET` are set,
-   the configured operator row is created or refreshed from config. Otherwise, create
-   operators from Bingo Super Admin so their callback and secret are linked automatically.
+   the configured operator is seeded only when it does not already exist. Existing
+   dashboard-managed operator settings are never overwritten at startup. Otherwise,
+   create operators from Bingo Super Admin so their callback and secret are linked automatically.
 3. Outbox drain — every pending win is attempted once before anything is decided.
 4. `runRecovery()` — interrupted rounds are abandoned and refunded, ambiguous charges
    are replayed with their original txn id, and terminal bets without an outbox row get
