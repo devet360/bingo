@@ -16,11 +16,15 @@ Provider deployment URL, such as `https://stratos.example.com`. Bingo derives
 the callback from the public Bingo API request host and reads allowed game
 origins from its `CORS_ORIGINS` setting.
 
-Create the tenant from **Super Admin → Provider dashboard → Operators → Add
-operator**. Use the same code for the tenant and Bingo provider integration
-(for example, `bingo251`). The Games Provider generates its HMAC secret, and
-Bingo stores it automatically. No callback URL or HMAC secret needs to be
-copied or typed for this flow.
+In **Super Admin → Games → Add provider**, choose **Games Provider V2 ·
+automatic secret and linking**, enter the tenant code (for example `bingo251`)
+and the Games Provider deployment URL (for example
+`https://stratos.example.com`), then choose **Create and link Games Provider**.
+The host name and tenant code are different: `stratos` is the host, while
+`bingo251` identifies the operator. Bingo creates the operator, generates its
+callback URL, and saves the Games Provider-generated HMAC secret automatically.
+It then opens the operator dashboard so you can probe and activate it. No
+callback URL or HMAC secret needs to be copied or typed for this flow.
 
 ### How is Bingo's Webhook secret set?
 
@@ -110,12 +114,10 @@ the configured operator records.
 
 In the Bingo web **Super Admin → Games** page:
 
-1. Add the Games Provider deployment with its public base URL, for example
-   `https://stratos.example.com`. This is the provider's host address, not the
-   Bingo API or web URL.
-2. Create the operator from **Super Admin → Provider dashboard**. This creates
-   the matching Bingo provider integration using the operator code and generated
-   secret. Do not separately add a duplicate integration or type a callback URL.
+1. The managed setup already creates the matching Bingo provider integration.
+   If you registered the deployment separately before, create/link the operator
+   from **Super Admin → Provider dashboard** instead. Do not type a callback URL
+   or manually add a second integration.
 3. Select each enabled provider game from the **Available provider game**
    selector. Bingo fills in the provider's default game ID, name, category and
    thumbnail. The name and thumbnail URL remain editable; upload a PNG, JPEG or

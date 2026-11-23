@@ -69,6 +69,29 @@ test('provider callback URL uses the API host and the exact tenant code', () => 
   );
 });
 
+test('an aggregator cannot be enabled without a signing secret', async () => {
+  const { upsertProvider } = await import('../src/services/gameProviders');
+  const { prisma } = await import('../src/lib/prisma');
+  const client = prisma as unknown as {
+    gameProvider: { findUnique: (args: unknown) => Promise<unknown> };
+  };
+  const originalFind = client.gameProvider.findUnique;
+  client.gameProvider.findUnique = async () => null;
+  try {
+    await assert.rejects(
+      upsertProvider({
+        code: 'unsigned',
+        name: 'Unsigned provider',
+        kind: 'AGGREGATOR',
+        enabled: true,
+      }),
+      (error: unknown) => (error as { code?: string }).code === 'PROVIDER_SECRET_REQUIRED',
+    );
+  } finally {
+    client.gameProvider.findUnique = originalFind;
+  }
+});
+
 test('launch url is null without a template and encodes the token', () => {
   assert.equal(buildLaunchUrl(null, { token: 'a b', lang: 'en', currency: 'ETB' }), null);
   assert.equal(

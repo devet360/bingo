@@ -130,6 +130,19 @@ export async function upsertProvider(input: ProviderInput): Promise<GameProvider
   if (!/^[A-Z]{3,8}$/.test(currency)) {
     throw Errors.badRequest('Currency must be a 3-8 letter ISO code');
   }
+  const existing = await prisma.gameProvider.findUnique({
+    where: { code },
+    select: { webhookSecret: true },
+  });
+  const webhookSecret = input.webhookSecret !== undefined
+    ? input.webhookSecret
+    : existing?.webhookSecret ?? null;
+  if (input.kind === 'AGGREGATOR' && input.enabled && !webhookSecret) {
+    throw Errors.conflict(
+      'An enabled aggregator needs a webhook signing secret. Create/link Games Provider V2 from the provider dashboard or enter the external provider secret.',
+      'PROVIDER_SECRET_REQUIRED',
+    );
+  }
   return prisma.gameProvider.upsert({
     where: { code },
     create: {

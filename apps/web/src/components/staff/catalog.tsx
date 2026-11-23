@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
   ApiError,
+  createGamesProviderOperator,
   deleteGameProvider,
   deleteGameProviderGame,
   fetchGameProviders,
@@ -44,6 +45,7 @@ interface ProviderDraft {
   code: string;
   name: string;
   kind: ProviderKind;
+  managedGamesProvider: boolean;
   apiBaseUrl: string;
   webhookSecret: string;
   currency: string;
@@ -57,6 +59,7 @@ function emptyProvider(): ProviderDraft {
     code: '',
     name: '',
     kind: 'AGGREGATOR',
+    managedGamesProvider: true,
     apiBaseUrl: '',
     webhookSecret: '',
     currency: 'ETB',
@@ -71,6 +74,7 @@ function toProviderDraft(provider: GameProvider): ProviderDraft {
     code: provider.code,
     name: provider.name,
     kind: provider.kind,
+    managedGamesProvider: Boolean(provider.apiBaseUrl && !provider.hasSecret),
     apiBaseUrl: provider.apiBaseUrl ?? '',
     webhookSecret: '',
     currency: provider.currency,
@@ -78,6 +82,10 @@ function toProviderDraft(provider: GameProvider): ProviderDraft {
     enabled: provider.enabled,
     sortOrder: String(provider.sortOrder),
   };
+}
+
+function isProviderDeploymentConnection(provider: GameProvider): boolean {
+  return Boolean(provider.apiBaseUrl && !provider.enabled && !provider.hasSecret && provider.games.length === 0);
 }
 
 export function GameProvidersTab({ onOpenDashboard }: { onOpenDashboard: (code: string) => void }) {
@@ -197,8 +205,8 @@ export function GameProvidersTab({ onOpenDashboard }: { onOpenDashboard: (code: 
                         {provider.enabled ? 'enabled' : 'off'}
                       </Pill>
                       <Pill tone="blue">{provider.kind.toLowerCase()}</Pill>
-                      <Pill tone={provider.hasSecret ? 'gold' : 'danger'}>
-                        {provider.hasSecret ? 'signed' : 'no secret'}
+                      <Pill tone={provider.hasSecret ? 'gold' : isProviderDeploymentConnection(provider) ? 'neutral' : 'danger'}>
+                        {provider.hasSecret ? 'signed' : isProviderDeploymentConnection(provider) ? 'deployment' : 'no secret'}
                       </Pill>
                       <Pill tone="neutral">{provider.currency}</Pill>
                       {provider.maxWin ? (
@@ -206,7 +214,7 @@ export function GameProvidersTab({ onOpenDashboard }: { onOpenDashboard: (code: 
                       ) : null}
                     </div>
                     <p className="mt-0.5 font-mono text-[11px] text-muted">{provider.code}</p>
-                    {provider.apiBaseUrl && !provider.enabled && !provider.hasSecret && provider.games.length === 0 ? (
+                    {isProviderDeploymentConnection(provider) ? (
                       <p className="mt-1 text-[10px] text-muted">Games Provider deployment connection only; tenant callback and secret are created per operator in Provider dashboard.</p>
                     ) : (
                       <p className="mt-1 break-all text-[10px] text-muted">POST {apiBase}/games/callback/{provider.code}</p>
@@ -228,7 +236,13 @@ export function GameProvidersTab({ onOpenDashboard }: { onOpenDashboard: (code: 
                     <Button size="sm" variant="ghost" onClick={() => setLogsTarget(provider)}>
                       Logs
                     </Button>
-                    <Button size="sm" variant="ghost" onClick={() => setGameTarget(provider)}>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      disabled={isProviderDeploymentConnection(provider)}
+                      title={isProviderDeploymentConnection(provider) ? 'Create/link the operator in Provider dashboard first.' : undefined}
+                      onClick={() => setGameTarget(provider)}
+                    >
                       Add game
                     </Button>
                     <Button size="sm" variant="danger" onClick={() => void removeProvider(provider)}>
@@ -289,14 +303,16 @@ export function GameProvidersTab({ onOpenDashboard }: { onOpenDashboard: (code: 
       <ProviderSheet
         open={creating || editing !== null}
         provider={editing}
+        onOpenDashboard={onOpenDashboard}
         onClose={() => {
           setCreating(false);
           setEditing(null);
         }}
-        onSaved={() => {
+        onSaved={(dashboardHostCode) => {
           setCreating(false);
           setEditing(null);
           void load();
+          if (dashboardHostCode) onOpenDashboard(dashboardHostCode);
         }}
       />
 
@@ -388,11 +404,13 @@ function ProviderSheet({
   provider,
   onClose,
   onSaved,
+  onOpenDashboard,
 }: {
   open: boolean;
   provider: GameProvider | null;
   onClose: () => void;
-  onSaved: () => void;
+  onSaved: (dashboardHostCode?: string) => void;
+  onOpenDashboard: (code: string) => void;
 }) {
   const [draft, setDraft] = useState<ProviderDraft>(emptyProvider());
   const [error, setError] = useState<string | null>(null);
@@ -418,13 +436,26 @@ function ProviderSheet({
       setError('A display name is required.');
       return;
     }
+    if (draft.managedGamesProvider && !draft.apiBaseUrl.trim()) {
+      setError('Enter the public Games Provider deployment URL first.');
+      return;
+    }
     if (draft.webhookSecret.trim() && draft.webhookSecret.trim().length < 16) {
       setError('The signing secret must be at least 16 characters.');
+      return;
+    }
+    if (!draft.managedGamesProvider && draft.enabled && draft.kind === 'AGGREGATOR'
+      && !draft.webhookSecret.trim() && !provider?.hasSecret) {
+      setError('An enabled external aggregator needs its HMAC webhook secret. For Games Provider V2, choose the managed setup so the server generates and links the secret.');
       return;
     }
     const currency = draft.currency.trim().toUpperCase();
     if (!/^[A-Z]{3,8}$/.test(currency)) {
       setError('Use a currency code like ETB or USD.');
+      return;
+    }
+    if (draft.managedGamesProvider && !/^[A-Z]{3}$/.test(currency)) {
+      setError('Games Provider V2 requires a three-letter currency code such as ETB.');
       return;
     }
     const maxWin = draft.maxWin.trim() ? creditsToMinor(draft.maxWin) : null;
@@ -441,15 +472,36 @@ function ProviderSheet({
     try {
       await upsertGameProvider(code, {
         name: draft.name.trim(),
-        kind: draft.kind,
+        kind: draft.managedGamesProvider ? 'AGGREGATOR' : draft.kind,
         apiBaseUrl: draft.apiBaseUrl.trim() || null,
-        webhookSecret: draft.webhookSecret.trim() || undefined,
+        ...(!draft.managedGamesProvider && draft.webhookSecret.trim()
+          ? { webhookSecret: draft.webhookSecret.trim() }
+          : {}),
         currency,
         maxWin,
-        enabled: draft.enabled,
+        enabled: draft.managedGamesProvider ? false : draft.enabled,
         sortOrder: order,
       });
-      onSaved();
+      if (draft.managedGamesProvider && !provider) {
+        const linked = await createGamesProviderOperator(code, {
+          code,
+          name: draft.name.trim(),
+          currency,
+          limits: {
+            minStake: '100',
+            maxStake: '100000',
+            maxWin: String(maxWin ?? 3_000_000),
+            maxBetsPerRound: 200,
+          },
+          enabledGames: ['crash'],
+        });
+        if (!linked.bingoLinked) throw new Error('The Games Provider operator was created but could not be linked to Bingo.');
+        onSaved(code);
+      } else if (draft.managedGamesProvider) {
+        onSaved(code);
+      } else {
+        onSaved();
+      }
     } catch (caught) {
       setError(caught instanceof ApiError ? caught.message : 'Could not save the provider.');
     } finally {
@@ -460,31 +512,52 @@ function ProviderSheet({
   return (
     <Sheet open title={provider ? `Configure ${provider.name}` : 'Add a game provider'} onClose={onClose}>
       <div className="max-h-[70vh] space-y-3 overflow-y-auto pr-1">
+        <Select
+          label="Setup type"
+          value={draft.managedGamesProvider ? 'games-provider-v2' : 'external'}
+          onChange={(event) => patch({ managedGamesProvider: event.target.value === 'games-provider-v2' })}
+        >
+          <option value="games-provider-v2">Games Provider V2 · automatic secret and linking</option>
+          <option value="external">Other provider · use its supplied webhook secret</option>
+        </Select>
+        {draft.managedGamesProvider ? (
+          <div className="rounded-xl border border-mint/25 bg-mint/5 px-3 py-2 text-[11px] text-muted">
+            {provider
+              ? 'This saves the deployment connection and opens its dashboard. Create or manage the tenant there; callback and secret are handled automatically.'
+              : 'Enter the Games Provider deployment URL and tenant code. Bingo will create the operator, generate and save its signing secret, and open the operator dashboard. The deployment stays off until you probe and activate the linked operator.'}
+          </div>
+        ) : null}
         <div className="grid grid-cols-2 gap-3">
           <Input
             label="Code"
             value={draft.code}
             onChange={(event) => patch({ code: event.target.value.toLowerCase() })}
             disabled={Boolean(provider)}
-            hint="This is the tenant/operator code; it must match the Games Provider operator and is used in the callback and launch URLs."
+            hint={draft.managedGamesProvider
+              ? 'Tenant/operator code; for example bingo251. The provider hostname (such as stratos) is separate.'
+              : 'This is the tenant/operator code used in callback and launch URLs.'}
           />
           <Input label="Name" value={draft.name} onChange={(event) => patch({ name: event.target.value })} />
-          <Select
-            label="Integration"
-            value={draft.kind}
-            onChange={(event) => patch({ kind: event.target.value as ProviderKind })}
-          >
-            <option value="AGGREGATOR">Aggregator</option>
-            <option value="NATIVE">Native</option>
-          </Select>
-          <Select
-            label="Enabled"
-            value={draft.enabled ? 'ON' : 'OFF'}
-            onChange={(event) => patch({ enabled: event.target.value === 'ON' })}
-          >
-            <option value="ON">Live</option>
-            <option value="OFF">Off</option>
-          </Select>
+          {!draft.managedGamesProvider ? (
+            <>
+              <Select
+                label="Integration"
+                value={draft.kind}
+                onChange={(event) => patch({ kind: event.target.value as ProviderKind })}
+              >
+                <option value="AGGREGATOR">Aggregator</option>
+                <option value="NATIVE">Native</option>
+              </Select>
+              <Select
+                label="Enabled"
+                value={draft.enabled ? 'ON' : 'OFF'}
+                onChange={(event) => patch({ enabled: event.target.value === 'ON' })}
+              >
+                <option value="ON">Live</option>
+                <option value="OFF">Off</option>
+              </Select>
+            </>
+          ) : null}
         </div>
         <Input
           label="API base URL"
@@ -508,36 +581,36 @@ function ProviderSheet({
             hint="Falls back to the platform cap when blank."
           />
         </div>
-        <Input
-          label="Webhook secret"
-          type="password"
-          value={draft.webhookSecret}
-          onChange={(event) => patch({ webhookSecret: event.target.value })}
-          hint={
-            provider?.hasSecret
-              ? 'A secret is configured. Leave blank to keep it; enter a new one to rotate.'
-              : 'For Games Provider V2, leave this blank on the deployment row and create operators in Provider dashboard; their secret is generated and linked automatically. Other providers may require their supplied HMAC secret here.'
-          }
-        />
+        {!draft.managedGamesProvider ? (
+          <Input
+            label="Webhook secret"
+            type="password"
+            value={draft.webhookSecret}
+            onChange={(event) => patch({ webhookSecret: event.target.value })}
+            hint={
+              provider?.hasSecret
+                ? 'A secret is configured. Leave blank to keep it; enter a new one to rotate.'
+                : 'Required to enable this external provider. For Games Provider V2, use the automatic setup instead.'
+            }
+          />
+        ) : null}
         <Input
           label="Sort order"
           inputMode="numeric"
           value={draft.sortOrder}
           onChange={(event) => patch({ sortOrder: event.target.value })}
         />
-        <div className="rounded-xl border border-gold/25 bg-gold/5 px-3 py-2 text-[11px] text-muted">
-          Callback:{' '}
-          <span className="break-all font-mono text-text">
-            {getRuntimeConfig().apiUrl}/games/callback/{draft.code || '<code>'}
-          </span>
-          <p className="mt-1">
-            Send the HMAC-SHA256 hex digest of the raw JSON body in <code>x-provider-signature</code>.
-            The secret is write-only and never returned.
-          </p>
-        </div>
+        {draft.managedGamesProvider ? null : (
+          <div className="rounded-xl border border-gold/25 bg-gold/5 px-3 py-2 text-[11px] text-muted">
+            Callback: <span className="break-all font-mono text-text">{getRuntimeConfig().apiUrl}/games/callback/{draft.code || '<code>'}</span>
+            <p className="mt-1">Send the HMAC-SHA256 hex digest of the raw JSON body in <code>x-provider-signature</code>. The secret is write-only and never returned.</p>
+          </div>
+        )}
         {error ? <ErrorNote>{error}</ErrorNote> : null}
         <Button className="w-full" loading={busy} onClick={() => void save()}>
-          {provider ? 'Save provider' : 'Add provider'}
+          {draft.managedGamesProvider
+            ? provider ? 'Save deployment and manage operators' : 'Create and link Games Provider'
+            : provider ? 'Save provider' : 'Add provider'}
         </Button>
       </div>
     </Sheet>

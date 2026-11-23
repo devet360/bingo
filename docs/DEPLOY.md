@@ -470,14 +470,16 @@ wallet-integration walkthroughs.
 
 Connect the Games Provider deployment and create its tenant in Bingo:
 
-1. In **Super Admin → Games**, add a Games Provider deployment with its public base
-   URL, for example `https://crash.example.com`. This is the deployment address only;
-   it is not the Bingo API or web URL.
-2. Open **Super Admin → Provider dashboard → Operators → Add operator** and create
-   the tenant code, for example `bingo251`. Bingo derives
-   `https://<bingo-api-host>/games/callback/bingo251`; the Games Provider generates
-   the HMAC secret, and Bingo stores it automatically. Bingo's `CORS_ORIGINS` must
-   include the public Bingo web origin so the game can be embedded.
+1. In **Super Admin → Games → Add provider**, choose **Games Provider V2 · automatic
+   secret and linking**, enter the tenant code (for example `bingo251`) and the
+   Games Provider public base URL (for example `https://stratos.example.com`), then
+   choose **Create and link Games Provider**. The host name `stratos` and tenant code
+   `bingo251` are different things.
+2. Bingo creates the Games Provider operator, generates its callback from the public
+   Bingo API host, generates the HMAC secret on the Games Provider, and saves that
+   secret in Bingo automatically. It then opens the operator dashboard. Probe and
+   activate the operator there. Bingo API `CORS_ORIGINS` must include the public
+   Bingo web origin so the game can be embedded.
 3. Add game: external id `crash`, category `crash`. Bingo generates its launch
    URL from the provider API base URL, provider code, external game ID, and
    session details. To publish coin flip, add external id `coinflip`. Use the

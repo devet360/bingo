@@ -1703,35 +1703,57 @@ adminRouter.post(
       );
     }
 
-    const created = await providerAdminRequest<{
+    const callbackUrl = buildProviderCallbackUrl(publicApiOrigin(req), body.code);
+    const allowedOrigins = providerAllowedOrigins();
+    let createdNew = true;
+    type CreatedGamesProviderOperator = {
       operator: ProviderOperatorSummary;
       secret: string;
       secretVersion: number;
-    }>({
-      hostCode: params.hostCode,
-      actorId: req.auth!.userId,
-      path: '/api/admin/operators',
-      method: 'POST',
-      body: {
-        ...body,
-        callbackUrl: buildProviderCallbackUrl(publicApiOrigin(req), body.code),
-        allowedOrigins: providerAllowedOrigins(),
-      },
-    });
+    };
+    let created: CreatedGamesProviderOperator;
     try {
-      await syncProviderOperatorToBingo(host, created.operator, { webhookSecret: created.secret });
+      created = await providerAdminRequest<CreatedGamesProviderOperator>({
+        hostCode: params.hostCode,
+        actorId: req.auth!.userId,
+        path: '/api/admin/operators',
+        method: 'POST',
+        body: { ...body, callbackUrl, allowedOrigins },
+      });
+    } catch (error) {
+      if (!(error instanceof AppError) || error.code !== 'OPERATOR_EXISTS') throw error;
+      createdNew = false;
+      await providerAdminRequest({
+        hostCode: params.hostCode,
+        actorId: req.auth!.userId,
+        path: `/api/admin/operators/${encodeURIComponent(body.code)}`,
+        method: 'PATCH',
+        body: { name: body.name, callbackUrl, allowedOrigins },
+      });
+      created = await providerAdminRequest<CreatedGamesProviderOperator>({
+        hostCode: params.hostCode,
+        actorId: req.auth!.userId,
+        path: `/api/admin/operators/${encodeURIComponent(body.code)}/secrets`,
+        method: 'POST',
+      });
+    }
+    try {
+      await syncProviderOperatorToBingo(host, created.operator, {
+        webhookSecret: created.secret,
+        preservePreviousSecret: !createdNew && Boolean(existing?.webhookSecret),
+      });
     } catch {
       throw new AppError(
         502,
         'PROVIDER_LINK_SYNC_FAILED',
-        `Games Provider operator "${created.operator.code}" was created, but Bingo could not save its integration. Retry secret rotation from the operator page to finish linking.`,
+        `Games Provider operator "${created.operator.code}" was prepared, but Bingo could not save its integration. Retry secret rotation from the operator page to finish linking.`,
         { operatorCode: created.operator.code },
       );
     }
     await writeAudit({
       actorId: req.auth!.userId,
       actorRole: req.auth!.role,
-      action: 'games_provider.operator_create',
+      action: createdNew ? 'games_provider.operator_create' : 'games_provider.operator_link',
       entityType: 'GameProvider',
       entityId: created.operator.code,
       after: { hostCode: params.hostCode, status: created.operator.status, secretVersion: created.secretVersion },

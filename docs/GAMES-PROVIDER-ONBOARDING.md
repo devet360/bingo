@@ -18,15 +18,14 @@ see the [Games Provider Integration Guide](./GAMES-PROVIDER-INTEGRATION.md).
 
 ## Recommended: create and link from Bingo
 
-1. In **Super Admin → Provider dashboard → Operators**, choose **Add operator**
-   and enter the tenant code and display name.
-2. Bingo derives the callback from the API host and allowed web origins from
-   `CORS_ORIGINS`. The Games Provider generates the HMAC secret, and Bingo
-   stores it automatically. Do not copy or enter callback URLs or webhook
-   secrets.
+1. In **Super Admin → Games → Add provider**, choose **Games Provider V2 ·
+   automatic secret and linking**. Enter the tenant code, display name and
+   Games Provider deployment base URL.
+2. Bingo creates the provider operator, generates the callback from the API
+   host and allowed web origins from `CORS_ORIGINS`. The Games Provider
+   generates the HMAC secret, and Bingo stores it automatically.
 3. Use **Run probe**, then activate the operator when the probe succeeds.
-4. In **Super Admin → Games**, select the linked provider code and add or enable
-   the desired provider games.
+4. In **Super Admin → Games**, add or enable games for the linked tenant code.
 
 ## CLI alternative: create an operator manually
 
